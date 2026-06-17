@@ -36,11 +36,21 @@ descriptions handle that in every session.
 ## Install
 
 ```bash
-claude plugin marketplace add ~/development/theforge
-claude plugin install theforge@theforge-local
+claude plugin marketplace add forcetrainer/theforge
+claude plugin install theforge@theforge
 ```
 
+To update later: `claude plugin update theforge@theforge` (or `git pull` in a
+local clone).
+
 ## Developing (editing skills)
+
+On the machine where you edit the plugin, point the marketplace at your working
+copy instead of GitHub so edits are picked up locally:
+
+```bash
+claude plugin marketplace add ~/development/theforge
+```
 
 The plugin cache only re-syncs on a **version bump**. After editing anything
 under `skills/`, `agents/`, or `hooks/`:
@@ -48,7 +58,7 @@ under `skills/`, `agents/`, or `hooks/`:
 ```bash
 # 1. bump "version" in .claude-plugin/plugin.json
 # 2. then:
-claude plugin update theforge@theforge-local
+claude plugin update theforge@theforge
 # 3. restart the session to apply
 ```
 
