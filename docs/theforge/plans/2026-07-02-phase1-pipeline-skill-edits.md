@@ -64,7 +64,7 @@
 **Depends on:** nothing.
 
 ### Task 3: TDD skill — cut to operational core
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/tdd/SKILL.md` (spec §3; rewrite, not patch)
