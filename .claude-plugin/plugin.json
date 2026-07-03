@@ -1,7 +1,7 @@
 {
   "name": "forge",
-  "description": "Token-efficient development flow: brainstorm \u2192 spec \u2192 plan \u2192 TDD execution, with project memory (roadmap, decisions, deferrals). A personal fork of superpowers.",
-  "version": "0.6.0",
+  "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI.",
+  "version": "0.6.1",
   "author": {
     "name": "Bryan Inagaki",
     "email": "bryan@inagaki.us"

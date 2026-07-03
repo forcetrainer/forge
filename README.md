@@ -1,7 +1,29 @@
-# forge
+<div align="center">
 
-A development process for working with coding agents, packaged as a plugin
-for Claude Code and Codex CLI.
+# ⚒ forge
+
+**Where code gets worked.**
+
+A development process for working with coding agents,
+packaged as a plugin for Claude Code and Codex CLI.
+
+[![version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fforcetrainer%2Fforge%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=b45309)](https://github.com/forcetrainer/forge/blob/main/.claude-plugin/plugin.json)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](https://code.claude.com/docs/en/plugins)
+[![Codex CLI](https://img.shields.io/badge/Codex%20CLI-plugin-111111)](https://developers.openai.com/codex)
+[![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+[Why it exists](#why-it-exists) ·
+[The flow](#the-flow) ·
+[What it costs](#what-it-costs) ·
+[Anatomy](#anatomy) ·
+[Install](#install) ·
+[Developing](#developing-editing-skills) ·
+[Lineage](#lineage)
+
+</div>
+
+---
 
 This is not a framework with a manifesto. It's how I've figured out how to
 work with coding harnesses — assembled from other people's good ideas, my own
@@ -34,33 +56,43 @@ just as deliberately — nowhere else.
 ## The flow
 
 **Brainstorm → spec → plan → TDD execution**, with user approval gates
-between stages. Proportionality comes first: the flow runs in three gears.
+between stages:
 
-- **Gear 1 — trivial.** Mechanical edits, typos, config values. No process
-  at all; the skills are written to *not* trigger.
-- **Gear 2 — a delta to an already-spec'd system.** Design presented in
-  conversation, one approval, straight to TDD. No new documents; the owning
-  spec is amended afterward with a dated changelog line.
-- **Gear 3 — new architecture.** The full flow below.
+```mermaid
+flowchart LR
+    I([idea]) --> B[brainstorm]
+    B -- "✋ design approved" --> S[["spec<br/>docs/forge/specs/"]]
+    S --> P[["plan<br/>docs/forge/plans/"]]
+    P -- "✋ routing approved" --> E[TDD execution]
+    E -- "review + full suite" --> D([shipped])
+```
 
-The routing test is architectural — does this *create* structure or *operate
-within* it — not size.
+Proportionality comes first: the flow runs in three gears, and the routing
+test is architectural — does this *create* structure or *operate within*
+it — not size.
+
+```mermaid
+flowchart TD
+    Q{"creates new architecture?"}
+    Q -- "no — mechanical edit" --> G1["⚙ gear 1 · just do it<br/>no process at all"]
+    Q -- "no — delta to a spec'd system" --> G2["⚙⚙ gear 2 · conversational gate → TDD<br/>owning spec amended afterward"]
+    Q -- "yes" --> G3["⚙⚙⚙ gear 3 · the full flow"]
+```
 
 **Brainstorming** turns an idea into a spec through dialogue: batched
 clarifying questions, competing approaches with a recommendation, then a
 sectioned walkthrough where each design decision is approved before anything
 is written. The walkthrough *is* the gate — design happens in conversation,
-where steering is cheap, not in a document review after the fact. Specs land
-in `docs/forge/specs/` as living documents: telegraphic, contract-only prose
-(every sentence carries a requirement or a decision), amended in place as the
-system evolves.
+where steering is cheap, not in a document review after the fact. Specs are
+living documents: telegraphic, contract-only prose (every sentence carries a
+requirement or a decision), amended in place as the system evolves.
 
 **Planning** turns a spec into tasks that specify **what and where — never
 implementation code**. Code written at plan time is written without compiler
 or test feedback, so it's written twice and wrong the first time. Plans lock
 in files, interfaces, test cases, and acceptance commands; each task gets a
 tier (trivial / standard / complex) judged by what it demands, not its
-category. Plans land in `docs/forge/plans/`.
+category.
 
 **Execution** routes each task by tier to a pinned worker agent —
 `forge-light` (cheap model), `forge-standard`, `forge-deep` (strongest model,
@@ -138,7 +170,9 @@ cp codex/agents/*.toml ~/.codex/agents/
 **On plugin update:** re-run the copy command; the `.toml` files are synced
 manually by design.
 
-**Known Codex caveats:**
+<details>
+<summary><strong>Known Codex caveats</strong></summary>
+
 - Subagent selection has known regressions in CLI behavior (e.g., custom-agent
   selection broke in v0.137.0 and spawned agents silently inherited the parent
   model). If spawned agents run the wrong model, verify via acceptance commands
@@ -149,6 +183,8 @@ manually by design.
   [openai/codex#22779](https://github.com/openai/codex/issues/22779)).
   Sequential dispatch (`skills/planning/codex-execution.md`) is the mitigation;
   forge deliberately builds no cleanup machinery.
+
+</details>
 
 ## Developing (editing skills)
 
@@ -196,3 +232,9 @@ non-negotiable floor.
 The rest is native-harness pragmatism: where Claude Code grew a capability
 (worktrees, code review, verification, subagent orchestration), the
 corresponding skill was deleted rather than maintained in parallel.
+
+---
+
+<div align="center">
+<sub>Built for me, shared in case it's useful to you. <a href="LICENSE">MIT</a>.</sub>
+</div>
