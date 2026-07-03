@@ -75,6 +75,13 @@ flowchart TD
     Q -- "yes" --> G3["⚙⚙⚙ gear 3 · the full flow"]
 ```
 
+One more boundary worth stating: the flow starts when I'm ready to build,
+not when I'm thinking. Ideas get kicked around in free-form conversation
+first — research, comparisons, half-formed notes — with no gates and no
+process. The keepers land in `docs/forge/ideas/`, and when one is ready to
+become a build, that doc feeds the brainstorm as its starting input. The
+flow is for building, not ideating, and I don't force everything through it.
+
 **Brainstorming** turns an idea into a spec through conversation. The agent
 asks questions in small batches, proposes a few approaches with a
 recommendation, and walks through the design section by section for
