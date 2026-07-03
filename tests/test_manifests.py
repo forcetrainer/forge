@@ -104,6 +104,32 @@ def _session_start_commands(hook_config):
 
 
 class HookConfigTests(unittest.TestCase):
+    """Codex hook-wiring verification (Task 3, 2026-07-03).
+
+    Fetched https://developers.openai.com/codex/hooks and
+    https://developers.openai.com/codex/plugins/build. Findings:
+
+    - Codex's plugin hooks.json schema is structurally identical to Claude's:
+      `{"hooks": {"<Event>": [{"matcher": ..., "hooks": [{"type": "command",
+      "command": ...}]}]}}`. Codex additionally accepts (but does not yet
+      execute) an `async` handler field, so the existing `"async": false`
+      entries in hooks/hooks.json are inert-but-valid under Codex, not a
+      schema violation.
+    - Codex checks `hooks/hooks.json` as the default plugin hook file
+      automatically (no `hooks` entry needed in .codex-plugin/plugin.json,
+      and this repo's manifest has none).
+    - Codex sets `CLAUDE_PLUGIN_ROOT` (alongside its native `PLUGIN_ROOT`)
+      specifically for compatibility with existing Claude plugin hooks, so
+      the `${CLAUDE_PLUGIN_ROOT}` reference already in hooks/hooks.json
+      resolves correctly under Codex too.
+
+    Outcome: COMPATIBLE. hooks/hooks.json is shared byte-identical between
+    harnesses; hooks/codex-hooks.json is deliberately absent. The tests below
+    assert that outcome directly rather than skipping when the collision
+    artifact is missing, so a regression (or an unverified future change)
+    fails loudly instead of reporting false confidence.
+    """
+
     def test_all_hook_json_files_parse(self):
         hook_json_files = sorted(HOOKS_DIR.glob("*.json"))
         self.assertTrue(len(hook_json_files) >= 1)
@@ -118,9 +144,36 @@ class HookConfigTests(unittest.TestCase):
             f"expected a SessionStart command referencing hooks/session-start, got {commands}",
         )
 
+    def test_claude_hooks_json_uses_plugin_root_env_var_codex_also_supports(self):
+        # Codex sets CLAUDE_PLUGIN_ROOT for compatibility with existing
+        # Claude plugin hooks (see class docstring), so this reference
+        # resolves correctly under both harnesses without modification.
+        config = _load_json(CLAUDE_HOOKS_MANIFEST)
+        commands = _session_start_commands(config)
+        self.assertTrue(
+            any("${CLAUDE_PLUGIN_ROOT}" in command for command in commands),
+            f"expected a SessionStart command referencing ${{CLAUDE_PLUGIN_ROOT}}, got {commands}",
+        )
+
+    def test_codex_hooks_json_absent_confirms_shared_schema_outcome(self):
+        # Verified compatible: Codex's hooks.json schema and plugin-root env
+        # var both match Claude's (see class docstring), so no separate
+        # hooks/codex-hooks.json collision file is needed. If this ever
+        # needs to be created, this test must be updated deliberately as
+        # part of that change, not left to silently skip.
+        self.assertFalse(
+            CODEX_HOOKS_MANIFEST.exists(),
+            "hooks/codex-hooks.json exists but the recorded verification outcome "
+            "was 'compatible schema, shared hooks.json' — update this test and "
+            "the HookConfigTests docstring if the collision path is now needed.",
+        )
+
     def test_codex_hooks_json_references_same_session_start_script_if_present(self):
+        # Defensive: if a future re-verification lands on the collision path
+        # and hooks/codex-hooks.json is (re)introduced, it must still wire to
+        # the same shared session-start script.
         if not CODEX_HOOKS_MANIFEST.exists():
-            self.skipTest("hooks/codex-hooks.json not present (shared hooks.json outcome)")
+            self.skipTest("hooks/codex-hooks.json not present (shared hooks.json outcome; see test above)")
         config = _load_json(CODEX_HOOKS_MANIFEST)
         commands = _session_start_commands(config)
         self.assertTrue(
