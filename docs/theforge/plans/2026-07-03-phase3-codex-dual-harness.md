@@ -16,7 +16,7 @@
 - Create: `.agents/plugins/marketplace.json`
 - Test: `tests/test_manifests.py`
 
-**Spec:** Verified harness contracts, 1. Codex manifests
+**Spec:** Verified harness contracts, Codex manifests
 
 **Interface:** `.codex-plugin/plugin.json`: `{"name": "theforge", "version": <lockstep semver>, "description": <match .claude-plugin description>}`. `.agents/plugins/marketplace.json`: `{"name": "theforge", "interface": {"displayName": "theforge"}, "plugins": [{"name": "theforge", "source": {"source": "local", "path": "./"}}]}`.
 
@@ -37,7 +37,7 @@
 - Create: `codex/agents/forge-deep.toml`
 - Test: `tests/test_codex_agents.py`
 
-**Spec:** Verified harness contracts, 2. Tier agents
+**Spec:** Verified harness contracts, Tier agents
 
 **Interface:** each TOML: `name` (matches filename stem), `description` (from corresponding `agents/*.md` frontmatter description), `developer_instructions` (body text of corresponding `agents/*.md`, below frontmatter, verbatim), `model` + `model_reasoning_effort` per spec mapping table (light: gpt-5.4-mini/low, standard: gpt-5.4/high, deep: gpt-5.5/xhigh), `nickname_candidates = ["forge-<tier>-1" … "forge-<tier>-5"]`.
 
@@ -57,7 +57,7 @@
 - Create: `hooks/codex-hooks.json` (only if schemas collide)
 - Test: `tests/test_manifests.py` (extend: hook config JSON validity)
 
-**Spec:** Verified harness contracts, 3. Hook wiring
+**Spec:** Verified harness contracts, Hook wiring
 
 **Interface:** verification first — fetch https://developers.openai.com/codex/hooks and https://developers.openai.com/codex/plugins/build; determine (a) Codex plugin hook-config schema at `hooks/hooks.json`, (b) Codex's plugin-root env var (Claude uses `${CLAUDE_PLUGIN_ROOT}`). Compatible schema and env var → single shared `hooks/hooks.json`; any collision → `hooks/codex-hooks.json` with Codex SessionStart wiring pointing at the shared `hooks/session-start` script, Claude file byte-identical to current. `hooks/session-start` is not modified in either outcome. Record which outcome held in the task report.
 
@@ -76,7 +76,7 @@
 - Create: `skills/planning/codex-execution.md`
 - Modify: `skills/planning/SKILL.md` (one line added to Execution section, immediately after the routing table paragraph: Workflow tool unavailable → read `codex-execution.md` in this skill directory; no other changes)
 
-**Spec:** 4. Harness-conditional execution
+**Spec:** Harness-conditional execution
 
 **Interface:** `codex-execution.md` covers, in telegraphic skill style: sequential dispatch only (one worker at a time, spawn by naming the tier agent, `Depends on` serial, no pipelining/worktree isolation); briefs via `extract-brief.py` and review packets via `review-packet.py` unchanged; orchestrator no-work hard rule (never opens/edits implementation files; about-to-edit = owed dispatch; 2-iteration rework cap escalates to user, never absorbs inline); dispatch ledger (plan checkboxes annotated `dispatched: <nickname>` on spawn, review outcome on completion); no lifecycle machinery (harness-side bugs, sequential dispatch is the mitigation); review flow/proportional review/deferral rule/final review same as Execution section, sequentially.
 
@@ -96,7 +96,7 @@
 - Modify: `.claude-plugin/plugin.json` (version → 0.5.0)
 - Modify: `.codex-plugin/plugin.json` (version → 0.5.0)
 
-**Spec:** 5. README
+**Spec:** README
 
 **Interface:** README section covers: marketplace add from this repo, one-line agent copy (`cp codex/agents/*.toml ~/.codex/agents/`), re-copy on plugin update note, known Codex caveats (subagent-selection regression history, worker-list accumulation — issues #19197/#22779), hook wiring outcome from Task 3 (including `[hooks]` config.toml snippet only if Task 3 landed on the collision path).
 
