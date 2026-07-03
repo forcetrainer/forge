@@ -25,38 +25,34 @@ packaged as a plugin for Claude Code and Codex CLI.
 
 ---
 
-This is not a framework with a manifesto. It's how I've figured out how to
-work with coding harnesses — assembled from other people's good ideas, my own
-failures, and a running log of what actually burned tokens or shipped bugs.
-It may be good, bad, or somewhere in the middle. It works for me and the way
-I work; treat it as a reference implementation of one person's process, not
-a best practice. Steal the pieces that fit.
+This is how I work with coding agents. It borrows from other tools and
+methods, keeps what worked for me, and drops what didn't. I'm not claiming
+it's the best way to do this. It's the way that fits how I build things.
+Take whatever is useful.
 
 ## Why it exists
 
-Coding agents are strong executors and unreliable architects. Left
-unmanaged, the same failures kept showing up in my projects:
+Coding agents write good code and make bad judgment calls. Working with
+them, I kept hitting the same problems:
 
-- **Silent architecture decisions.** Mid-task, an agent picks a dependency,
-  an interface, a data model — decisions I should have made — and buries
-  them in a diff I'm skimming.
-- **Context burn.** Agents re-explore the codebase every session, workers
-  dump transcripts into orchestrators, and plans embed implementation code
-  that's rewritten (differently) at execution time anyway.
-- **Evaporating memory.** Decisions made in one session get relitigated in
-  the next. Deferred work vanishes instead of being deliberately parked.
-- **Ceremony without proportionality.** The same heavyweight process applied
-  to a typo fix and a new subsystem — I once watched an agent spend 1.5
-  hours bootstrapping a test harness for a one-line edit to a single HTML
-  file.
+- **They make design decisions on their own.** Mid-task, the agent picks a
+  dependency or a data model — a call I wanted to make — and it's buried in
+  a diff I'm skimming.
+- **They waste tokens.** Every session re-explores the codebase, workers
+  report back with full transcripts, and plans stuffed with code get
+  rewritten at execution time anyway.
+- **They forget.** Decisions from one session get relitigated the next.
+  Deferred work just disappears.
+- **They can't scale the process down.** I once watched an agent spend 1.5
+  hours setting up a test harness for a one-line edit to an HTML file.
 
-forge is a set of gates placed exactly where those failures happen, and —
-just as deliberately — nowhere else.
+forge puts a gate at each of those failure points and stays out of the way
+otherwise.
 
 ## The flow
 
-**Brainstorm → spec → plan → TDD execution**, with user approval gates
-between stages:
+**Brainstorm → spec → plan → TDD execution**, with approval gates between
+stages:
 
 ```mermaid
 flowchart LR
@@ -67,9 +63,9 @@ flowchart LR
     E -- "review + full suite" --> D([shipped])
 ```
 
-Proportionality comes first: the flow runs in three gears, and the routing
-test is architectural — does this *create* structure or *operate within*
-it — not size.
+Not everything gets the full flow. The routing question is whether a change
+creates new structure or works within existing structure — size doesn't
+matter:
 
 ```mermaid
 flowchart TD
@@ -79,63 +75,57 @@ flowchart TD
     Q -- "yes" --> G3["⚙⚙⚙ gear 3 · the full flow"]
 ```
 
-**Brainstorming** turns an idea into a spec through dialogue: batched
-clarifying questions, competing approaches with a recommendation, then a
-sectioned walkthrough where each design decision is approved before anything
-is written. The walkthrough *is* the gate — design happens in conversation,
-where steering is cheap, not in a document review after the fact. Specs are
-living documents: telegraphic, contract-only prose (every sentence carries a
-requirement or a decision), amended in place as the system evolves.
+**Brainstorming** turns an idea into a spec through conversation. The agent
+asks questions in small batches, proposes a few approaches with a
+recommendation, and walks through the design section by section for
+approval. The point is to make design decisions in conversation, where
+changing course is cheap. Specs stay short and get amended in place as the
+system changes.
 
-**Planning** turns a spec into tasks that specify **what and where — never
-implementation code**. Code written at plan time is written without compiler
-or test feedback, so it's written twice and wrong the first time. Plans lock
-in files, interfaces, test cases, and acceptance commands; each task gets a
-tier (trivial / standard / complex) judged by what it demands, not its
-category.
+**Planning** turns the spec into tasks: which files, what interfaces, what
+tests, what counts as done. Plans never contain implementation code — code
+written before there's compiler and test feedback gets written twice. Each
+task is tagged trivial, standard, or complex based on what it actually
+requires.
 
-**Execution** routes each task by tier to a pinned worker agent —
-`forge-light` (cheap model), `forge-standard`, `forge-deep` (strongest model,
-maximum reasoning) — so an accidental session-model switch never silently
-degrades a build. Workers implement under strict TDD (test first, verify red,
-verify green) from file-referenced briefs generated by `scripts/extract-brief.py`;
-plan and spec content never transits the orchestrator. Review is proportional:
-trivial tasks are verified by their acceptance commands alone; substantive
-tasks get one combined spec+quality review, a second reviewer only when the
-first finds real problems, and rework capped at two rounds before escalating
-to me. A final integration review runs across the whole-plan diff.
+**Execution** sends each task to a worker agent matched to its tier:
+`forge-light` (cheap model), `forge-standard`, or `forge-deep` (strongest
+model). The model is pinned in the agent definition, so switching models at
+the session level can't quietly downgrade a build. Workers do strict TDD
+(failing test first, then code) and get their instructions from generated
+brief files, so plan and spec content doesn't pile up in the orchestrator.
+Review scales with risk: trivial tasks just have to pass their acceptance
+commands, bigger tasks get a real review, a second reviewer only steps in if
+the first finds problems, and after two fix rounds it comes back to me. A
+final review covers the whole diff.
 
-**Project memory** is three flat markdown files, not a database:
-`docs/forge/DECISIONS.md` (decisions with their why — read before feature
-work; logged decisions are constraints, not suggestions), `DEFERRALS.md`
-(consciously skipped work and why), `ROADMAP.md` (phases, when work
-decomposes). Workers may defer nice-to-haves with a logged reason; spec'd
-requirements can never be silently dropped.
+**Project memory** is three markdown files. `docs/forge/DECISIONS.md` holds
+what was decided and why — it's read before new work, and logged decisions
+are constraints. `DEFERRALS.md` holds work that was skipped on purpose.
+`ROADMAP.md` tracks phases. Workers can skip nice-to-haves if they log it;
+they can't skip anything the spec requires.
 
 ## What it costs
 
-- **You are the brake, on purpose.** Approval gates add latency at every
-  stage boundary. For throwaway code or exploratory prototyping, the flow is
-  pure overhead — that's what gear 1 and plain sessions are for.
-- **Repos accrete documentation.** The flow's memory lives in `docs/forge/`
-  trees. If docs-as-working-memory isn't a discipline you want, this will
-  feel like clutter.
-- **It's tuned to my failure modes** — solo development, long-lived
-  projects, a strong preference for making architecture calls myself. A
-  team, or someone who wants agents making more autonomous decisions, would
-  draw the gates elsewhere.
+- **Approval gates mean waiting on me.** For throwaway code or prototyping
+  that's pure overhead — skip the flow.
+- **Repos fill up with docs.** The flow's memory is files in `docs/forge/`.
+  If you don't want documentation as a working habit, this will feel like
+  clutter.
+- **It's built around how I work:** solo, long-lived projects, making the
+  architecture calls myself. A team would draw the lines differently.
 
 ## Anatomy
 
 | Piece | What it is |
 |---|---|
-| `skills/brainstorming` | Gear routing, then idea → validated design → spec through dialogue. Includes a browser-based visual companion for mockups. |
+| `skills/brainstorming` | Gear routing, then idea → design → spec through dialogue. Includes a browser-based visual companion for mockups. |
 | `skills/planning` | Spec → plan (what/where, no code) → tiered execution. Codex execution notes in `codex-execution.md`. |
-| `skills/tdd` | Red-green-refactor cut to its operational core, with an infrastructure gate: test-harness creation is plan-level work, never drive-by. |
+| `skills/tdd` | Red-green-refactor cut to its operational core. Test-harness creation is plan-level work, never a drive-by. |
 | `skills/project-memory` | Formats and rules for ROADMAP / DECISIONS / DEFERRALS. |
-| `agents/` + `codex/agents/` | The three tier workers, model+effort pinned per harness (Claude: haiku/sonnet/opus; Codex: gpt-5.4-mini/gpt-5.4/gpt-5.5). |
-| `scripts/` | `extract-brief.py` (plan+spec → worker brief), `review-packet.py` (task block + diff → review packet). Stdlib Python, harness-agnostic. |
-| `hooks/session-start` | Conditional SessionStart hook: ~60 words of flow context, only in repos with `docs/forge/` (or legacy `docs/theforge/`, with a rename nudge). Silent everywhere else. |
+| `agents/` + `codex/agents/` | The three tier workers, model pinned per harness (Claude: haiku/sonnet/opus; Codex: gpt-5.4-mini/gpt-5.4/gpt-5.5). |
+| `scripts/` | `extract-brief.py` (plan+spec → worker brief), `review-packet.py` (task block + diff → review packet). Stdlib Python. |
+| `hooks/session-start` | Injects ~60 words of flow context, only in repos with `docs/forge/` (or legacy `docs/theforge/`, with a rename nudge). Silent everywhere else. |
 
 ## Install
 
@@ -156,7 +146,7 @@ codex plugin marketplace add /path/to/forge
 codex plugin install forge@forge
 ```
 
-The `SessionStart` hook works on Codex with no extra wiring — the shared
+The `SessionStart` hook works on Codex without extra wiring — the shared
 `hooks/hooks.json` schema is compatible and Codex sets `CLAUDE_PLUGIN_ROOT`
 for plugin-hook compatibility.
 
@@ -173,16 +163,16 @@ manually by design.
 <details>
 <summary><strong>Known Codex caveats</strong></summary>
 
-- Subagent selection has known regressions in CLI behavior (e.g., custom-agent
-  selection broke in v0.137.0 and spawned agents silently inherited the parent
-  model). If spawned agents run the wrong model, verify via acceptance commands
-  rather than trusting the spawn.
-- Worker accumulation: spawned subagents persist in the CLI's agent list, and
-  completed workers keep counting against the thread limit
+- Subagent selection has known regressions (custom-agent selection broke in
+  v0.137.0 and spawned agents silently inherited the parent model). If
+  spawned agents run the wrong model, check acceptance-command output rather
+  than trusting the spawn.
+- Spawned subagents pile up in the CLI's agent list, and completed workers
+  keep counting against the thread limit
   ([openai/codex#19197](https://github.com/openai/codex/issues/19197),
   [openai/codex#22779](https://github.com/openai/codex/issues/22779)).
-  Sequential dispatch (`skills/planning/codex-execution.md`) is the mitigation;
-  forge deliberately builds no cleanup machinery.
+  Sequential dispatch (`skills/planning/codex-execution.md`) keeps the pile
+  small; forge doesn't build cleanup machinery for a harness bug.
 
 </details>
 
@@ -205,33 +195,30 @@ claude plugin update forge@forge
 # 3. restart the session to apply
 ```
 
-This repo dogfoods its own conventions: design decisions live in
-`docs/forge/DECISIONS.md` (read it before changing skill behavior),
-consciously-skipped work in `docs/forge/DEFERRALS.md`. The presence of
-`docs/forge/` opts this repo into its own session hook.
+This repo uses its own conventions: decisions live in
+`docs/forge/DECISIONS.md` (read it before changing skill behavior), skipped
+work in `docs/forge/DEFERRALS.md`. The `docs/forge/` directory also opts
+this repo into its own session hook.
 
 ## Lineage
 
 forge started as a fork of [superpowers](https://github.com/obra/superpowers)
-v5.1.0, and that origin still shows in the skeleton: discipline packaged as
-skills, a brainstorm → plan → execute spine, TDD as law. But it has diverged
-far past fork territory — plans no longer embed implementation code (the
-single biggest token sink), review is proportional instead of
-three-agents-per-task, the 800-word every-session hook is gone, and the
-gears, tier routing, project memory, brief/packet scripts, and dual-harness
-packaging don't exist upstream. The full skill-by-skill assessment of what
-was kept, cut, and why is in `docs/notes/superpowers-assessment.md`.
+v5.1.0, and the skeleton is still visible: discipline packaged as skills,
+brainstorm → plan → execute, TDD throughout. It has diverged a long way
+since. Plans no longer embed implementation code, review is proportional
+instead of three reviewers per task, the 800-word every-session hook is
+gone, and the gears, tier routing, project memory, brief/packet scripts,
+and Codex packaging don't exist upstream. The full accounting of what was
+kept and cut is in `docs/notes/superpowers-assessment.md`.
 
-Before superpowers, [BMAD](https://github.com/bmadcode/BMAD-METHOD) was the
-formative influence — it's what taught me what deliberate agentic coding
-looks like. The habits it drilled are load-bearing here even where the
-mechanics differ: documentation as working memory, markdown files as the
-system of record for in-flight work, and test-driven development as the
-non-negotiable floor.
+Before superpowers, [BMAD](https://github.com/bmadcode/BMAD-METHOD) taught
+me what deliberate agentic coding looks like. The mechanics here are
+different, but the habits stuck: documentation as working memory, markdown
+files as the record of in-flight work, and TDD as the baseline.
 
-The rest is native-harness pragmatism: where Claude Code grew a capability
-(worktrees, code review, verification, subagent orchestration), the
-corresponding skill was deleted rather than maintained in parallel.
+The rest is pragmatism about the harness itself: when Claude Code grew a
+native feature (worktrees, code review, verification, subagents), the
+matching skill got deleted instead of maintained in parallel.
 
 ---
 
