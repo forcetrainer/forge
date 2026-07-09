@@ -1,5 +1,5 @@
 {
   "name": "forge",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI."
 }

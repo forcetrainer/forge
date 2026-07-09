@@ -4,7 +4,7 @@ Same plan, same tasks, same tiers — dispatched sequentially instead of pipelin
 
 **Sequential dispatch only:** one worker at a time. Spawn a worker by naming the tier agent directly (e.g. "Have forge-standard implement task N"). `Depends on` order is enforced serially — never start task N+1 until task N's worker has reported back and review has passed. No pipelining, no worktree isolation.
 
-**Briefs and review packets unchanged:** generate each worker's brief with `extract-brief.py`; route diffs through `review-packet.py`. Same mechanics as pipelined execution — only the dispatch loop is different.
+**Briefs and review packets unchanged:** generate each worker's brief with `scripts/extract-brief.py`; route diffs through `scripts/review-packet.py`. Same mechanics as pipelined execution — only the dispatch loop is different. Both live in the plugin root's `scripts/` directory (see the location note in SKILL.md).
 
 **Orchestrator no-work rule (hard):** during dispatched execution the orchestrator never opens or edits implementation files — dispatch, read the one-paragraph report, run acceptance commands, update the ledger. Catching yourself about to edit a source file means you owed a dispatch instead. A worker that fails the 2-iteration rework cap escalates to the user with the outstanding findings; the orchestrator never absorbs the work inline.
 

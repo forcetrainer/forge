@@ -67,7 +67,7 @@ declarations only, no bodies. Later tasks must use these exact names.
 
 No placeholders at this level: never "TBD", "handle edge cases", or "add validation" — *name* the edge cases and the validation rules. The line is: name **what** to handle; don't write **how**.
 
-**Spec:** is optional — the spec sections this task's worker needs, named by heading text (unique prefix acceptable; matched case-insensitively at extraction time). Omit when the task needs no spec context. It drives mechanical brief extraction at execution (`extract-brief.py`).
+**Spec:** is optional — the spec sections this task's worker needs, named by heading text (unique prefix acceptable; matched case-insensitively at extraction time). Omit when the task needs no spec context. It drives mechanical brief extraction at execution (`scripts/extract-brief.py`).
 
 **Tier** is judged by what the task demands, not its category: a mechanical edit with no design content is trivial; a well-specified change with a clear test path is standard; novel design, cross-file impact, or ambiguous spec territory is complex. A "code implementation" task that's really one field threaded through one call site is trivial, whatever its name. The tier drives model routing and review depth at execution. When interfaces and test cases are fully enumerated, prefer the lower tier — the worker has less to decide, not less to verify.
 
@@ -89,11 +89,13 @@ Offer the user the choice, with a recommendation by size, and **disclose the res
 
 - **Workflow tool unavailable:** read `codex-execution.md` in this skill directory.
 - **Inline when accumulated context is an asset:** few tasks, and later tasks build on seeing earlier work's output. Execute task-by-task in this session using the **tdd** skill — inline work runs on the session model; say so in the offer. Check off steps, commit per task.
-- **Dispatch otherwise — even for serial phases:** worker context is born, used, and discarded; inline context compounds forever. A Workflow script spawns one worker per task as the task's tier agent via `agentType` — its prompt carries the brief-file path (from `extract-brief.py`), relevant DECISIONS.md content, the deferral rule below, and TDD discipline — pipelined so independent tasks overlap and `Depends on` is respected. All trivial-tier tasks batch into a single `forge-light` dispatch, respecting `Depends on` among them. After each standard or complex task, **one combined review** by `forge:forge-standard` covering spec compliance and code quality together; dispatch a second reviewer on `forge:forge-deep` only if the first finds substantive issues, and loop the implementer until clean.
+- **Dispatch otherwise — even for serial phases:** worker context is born, used, and discarded; inline context compounds forever. A Workflow script spawns one worker per task as the task's tier agent via `agentType` — its prompt carries the brief-file path (from `scripts/extract-brief.py`), relevant DECISIONS.md content, the deferral rule below, and TDD discipline — pipelined so independent tasks overlap and `Depends on` is respected. All trivial-tier tasks batch into a single `forge-light` dispatch, respecting `Depends on` among them. After each standard or complex task, **one combined review** by `forge:forge-standard` covering spec compliance and code quality together; dispatch a second reviewer on `forge:forge-deep` only if the first finds substantive issues, and loop the implementer until clean.
 
-**File-referenced briefs:** worker prompts carry a brief-file path plus the exact file paths the worker needs — never pasted plan or spec content. Generate the brief with `extract-brief.py`; its instructions bound the worker's reading explicitly: "read these N files and spec §X, nothing else."
+`scripts/extract-brief.py` and `scripts/review-packet.py` live at the plugin root (`../../scripts/` from this skill's base directory — see "Base directory for this skill" in the loading message), not in this skill's directory.
 
-**Thin orchestrator:** workers report back in one paragraph, not a transcript. Diffs and review packets travel reviewer-to-file via `review-packet.py`, never through orchestrating context. The orchestrator never pre-rates finding severity when handing a diff to a reviewer.
+**File-referenced briefs:** worker prompts carry a brief-file path plus the exact file paths the worker needs — never pasted plan or spec content. Generate the brief with `scripts/extract-brief.py`; its instructions bound the worker's reading explicitly: "read these N files and spec §X, nothing else."
+
+**Thin orchestrator:** workers report back in one paragraph, not a transcript. Diffs and review packets travel reviewer-to-file via `scripts/review-packet.py`, never through orchestrating context. The orchestrator never pre-rates finding severity when handing a diff to a reviewer.
 
 **Rework guardrails:** review loops cap at 2 iterations, then escalate to the user with the outstanding findings rather than looping further. The end-of-plan summary reports review-cycle counts per task.
 
