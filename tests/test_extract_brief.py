@@ -192,6 +192,20 @@ class ExtractBriefTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertTrue(err.strip())
 
+    def test_wrong_level_task_heading_fails_loud_with_guidance(self):
+        # '## Task N:' (two #) is not the convention — it must fail at brief
+        # generation with a message that names the real cause, not a generic
+        # "not found" that sends the reader hunting.
+        plan = self._write(
+            "plan_wrong_level.md",
+            "**Goal:** Ship a widget.\n\n## Task 1: Build the widget\n- [ ] Done\n",
+        )
+        code, out, err = self._run([plan, "1", "--out", self.tmpdir.name])
+        self.assertNotEqual(code, 0)
+        self.assertIn("### Task 1:", err)
+        self.assertIn("## Task 1:", err)
+        self.assertNotIn("not found", err)
+
     def test_spec_declared_but_no_spec_flag_exits_nonzero(self):
         code, out, err = self._run([self.plan_with_spec, "1", "--out", self.tmpdir.name])
         self.assertNotEqual(code, 0)

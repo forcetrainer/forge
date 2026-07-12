@@ -41,6 +41,8 @@ Omit `**Global Constraints:**` entirely when the plan has none — never an empt
 
 ## Task structure
 
+Task headings are exactly `### Task N:` — three `#`, the number, a colon. The extraction scripts (`extract-brief.py`, `review-packet.py`) key on this literal form; a `## Task N:` at the wrong level fails brief generation.
+
 ```markdown
 ### Task N: [Component]
 - [ ] Done
@@ -73,7 +75,7 @@ No placeholders at this level: never "TBD", "handle edge cases", or "add validat
 
 ## Self-review
 
-Check the finished plan against the spec with fresh eyes: every spec requirement maps to a task (add tasks for gaps); nothing contradicts DECISIONS.md; names and signatures are consistent across tasks; dependency order is sound; no placeholder language; each tier holds in both directions — would a smaller model handle this cleanly, and does any "trivial" task hide a design decision? Fix inline and move on. Log any design decisions the plan locked in to DECISIONS.md.
+Check the finished plan against the spec with fresh eyes: every task heading is `### Task N:` (three `#`, colon — the extraction scripts require it, and one count of `### Task N:` per task should equal the task count); every spec requirement maps to a task (add tasks for gaps); nothing contradicts DECISIONS.md; names and signatures are consistent across tasks; dependency order is sound; no placeholder language; each tier holds in both directions — would a smaller model handle this cleanly, and does any "trivial" task hide a design decision? Fix inline and move on. Log any design decisions the plan locked in to DECISIONS.md.
 
 ## Execution
 

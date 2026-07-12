@@ -26,7 +26,10 @@ import tempfile
 
 
 HEADING_RE = re.compile(r'^(#{1,6})\s+(.*)$')
-TASK_HEADING_RE = re.compile(r'^(#{2,3})\s+Task\s+(\d+):')
+TASK_HEADING_RE = re.compile(r'^###\s+Task\s+(\d+):')
+# Lenient matcher used ONLY to diagnose a wrong-level heading (e.g. '## Task 1:')
+# after the strict match above fails — never for extraction.
+ANY_LEVEL_TASK_HEADING_RE = re.compile(r'^(#{1,6})\s+Task\s+(\d+):')
 
 
 def read_lines(path):
@@ -42,7 +45,7 @@ def extract_task_block(lines, task_number):
     start = None
     for i, line in enumerate(lines):
         m = TASK_HEADING_RE.match(line)
-        if m and int(m.group(2)) == task_number:
+        if m and int(m.group(1)) == task_number:
             start = i
             break
     if start is None:
@@ -53,6 +56,25 @@ def extract_task_block(lines, task_number):
             end = j
             break
     return "".join(lines[start:end]).rstrip("\n")
+
+
+def diagnose_missing_task(lines, task_number, plan_path):
+    """Explain why a strict '### Task N:' match failed.
+
+    If the task heading exists at the wrong level (e.g. '## Task 1:'), name the
+    real cause and point at it — the convention is exactly three '#'. Otherwise
+    fall back to the honest 'not found'.
+    """
+    for i, line in enumerate(lines):
+        m = ANY_LEVEL_TASK_HEADING_RE.match(line)
+        if m and int(m.group(2)) == task_number:
+            level = m.group(1)
+            return (
+                f"task {task_number} heading must be '### Task {task_number}:' "
+                f"(three #), found '{level} Task {task_number}:' at line {i + 1} "
+                f"in {plan_path}"
+            )
+    return f"task {task_number} not found in {plan_path}"
 
 
 def extract_header(lines):
@@ -121,7 +143,7 @@ def build_brief(plan_path, task_number, spec_path):
     lines = read_lines(plan_path)
     task_block = extract_task_block(lines, task_number)
     if task_block is None:
-        raise RuntimeError(f"task {task_number} not found in {plan_path}")
+        raise RuntimeError(diagnose_missing_task(lines, task_number, plan_path))
 
     goal_line, gc_block = extract_header(lines)
     spec_names = parse_spec_names(task_block)
