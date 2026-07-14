@@ -417,7 +417,12 @@ def verdict_to_dict(verdict):
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
-    Verdict. Raises (fail-loud) on an unparseable verdict."""
+    Verdict. Fail-loud on a crashed reviewer or an unparseable verdict — never
+    silently trusts or reuses stale output (Halt spec; ``parse_verdict`` never
+    retries silently). The last-message file is cleared before the call so a prior
+    attempt's verdict can never be re-read, and the reviewer's own exit code is
+    checked (unlike a worker crash, a reviewer crash yields no verdict to judge, so
+    it halts the run rather than consuming a rework iteration)."""
     with open(packet_path, "r", encoding="utf-8") as f:
         packet = f.read()
     prompt = preamble + "\n\n" + REVIEW_VERDICT_INSTRUCTION + "\n\n" + packet
@@ -432,7 +437,20 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
         last_msg_path,
         prompt,
     ]
-    subprocess.run(argv, capture_output=True, text=True)
+    if os.path.exists(last_msg_path):
+        os.remove(last_msg_path)  # never re-read a prior attempt's message
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr_tail = (proc.stderr or "").strip()[:300]
+        raise RuntimeError(
+            "reviewer process ({} at effort {}) exited {} without a usable "
+            "verdict{}".format(
+                model,
+                effort,
+                proc.returncode,
+                ": " + stderr_tail if stderr_tail else "",
+            )
+        )
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
@@ -480,6 +498,31 @@ def _git_head(cwd):
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def _snapshot_worktree(cwd):
+    """Per-task review base: a tree-ish capturing the working tree *before* the
+    task runs, so ``git diff <snapshot>`` afterwards shows only this task's own
+    changes. Nothing commits between tasks (HEAD never advances), so a HEAD base
+    would fold every prior task's still-uncommitted change into this task's packet;
+    ``git stash create`` snapshots the current tracked working tree as a dangling
+    commit without touching the working tree, index, or refs. Returns that commit
+    SHA, or HEAD when the tree is clean (``stash create`` emits nothing), or None
+    when ``cwd`` is not a git repo (callers that reach the reviewer raise loudly).
+    Untracked files are invisible to this base, consistent with ``git diff``
+    (DEFERRALS 2026-07-11)."""
+    head = _git_head(cwd)
+    if head is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "stash", "create"], cwd=cwd, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or head
 
 
 def _git_diff(cwd, base):
@@ -588,14 +631,19 @@ def latest_status(run_dir, task_number):
 
 
 def _clear_task_receipts(run_dir, task_number):
-    """Remove a task's prior receipts so a fresh invocation writes a clean attempt
-    sequence (attempt-1, attempt-2) rather than colliding with a prior run's."""
+    """Remove a task's prior receipts, plus its stale reviewer last-message file,
+    so a re-run writes a clean attempt sequence (attempt-1, attempt-2) and can
+    never re-read a prior run's verdict — the reviewer call also clears the file,
+    this closes the gap on resume when the reviewer is never reached."""
     if not os.path.isdir(run_dir):
         return
     for name in os.listdir(run_dir):
         m = _ATTEMPT_RE.match(name)
         if m and int(m.group(1)) == task_number:
             os.remove(os.path.join(run_dir, name))
+    stale_review = os.path.join(run_dir, "task-{}-review-last.txt".format(task_number))
+    if os.path.exists(stale_review):
+        os.remove(stale_review)
 
 
 def ensure_forge_gitignore(cwd):
@@ -662,9 +710,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd):
     Hitting the cap yields status ``escalated`` with the outstanding findings on
     the final receipt."""
     model, effort = TIER_MAP[task.tier]
-    # HEAD before this task runs is the per-task review base, so `git diff` shows
-    # only this task's changes. Computed once (trivial tiers need no reviewer).
-    review_base = _git_head(cwd) if task.tier != "trivial" else None
+    # Snapshot the working tree before this task runs — the per-task review base.
+    # HEAD does not advance between tasks (nothing commits), so a HEAD base would
+    # include prior tasks' uncommitted changes; the snapshot isolates `git diff`
+    # to this task's own changes. Taken once (trivial tiers need no reviewer).
+    review_base = _snapshot_worktree(cwd) if task.tier != "trivial" else None
     findings_carry = []
 
     attempt = 0
@@ -821,15 +871,14 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd):
     return 0 if overall == "passed" else 2
 
 
-def resume(plan_path, spec_path, run_dir, codex_bin="codex", cwd=None):
+def resume(plan_path, spec_path, run_dir):
     """Re-invoke over an existing ``run_dir``: tasks whose latest receipt status is
     ``passed`` are skipped (not re-dispatched); execution resumes at the first
     incomplete/escalated task. Receipts + plan checkboxes are the only resume
-    state (Resume spec). A thin alias over run_plan, whose skip-passed logic makes
-    every invocation resumable."""
-    if cwd is None:
-        cwd = os.getcwd()
-    return run_plan(plan_path, spec_path, run_dir, codex_bin, cwd)
+    state (Resume spec). A thin, documented alias over ``run_plan`` — whose
+    skip-passed logic already makes every invocation resumable — using the
+    production defaults: ``codex`` on PATH and the current working directory."""
+    return run_plan(plan_path, spec_path, run_dir, "codex", os.getcwd())
 
 
 def _default_run_dir():

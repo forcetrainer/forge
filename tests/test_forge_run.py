@@ -208,6 +208,33 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 # escalation is driven by a worker crash (no reviewer, so no git repo required).
 PLAN_TWO_TRIVIAL = PLAN_DEPS
 
+# Two standard (reviewed) tasks, each appending a distinct marker to its OWN
+# tracked file via its acceptance command. Proves per-task review packets are
+# isolated to that task's own diff even though HEAD never advances between tasks
+# (nothing commits) — task 2's packet must carry only task 2's change.
+PLAN_TWO_STD = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: First standard
+- [ ] Done
+
+**Acceptance:** `echo TASK1MARK >> f1.txt`
+
+**Tier:** standard
+
+**Depends on:** nothing
+
+### Task 2: Second standard
+- [ ] Done
+
+**Acceptance:** `echo TASK2MARK >> f2.txt`
+
+**Tier:** standard
+
+**Depends on:** Task 1
+"""
+
 
 def _pass_msg():
     return '{"verdict": "pass"}'
@@ -805,6 +832,48 @@ class ReviewLoopTests(unittest.TestCase):
             summary = json.load(f)
         self.assertEqual(summary["status"], "escalated-final-review")
 
+    def test_second_reviewed_task_packet_isolated_to_its_own_diff(self):
+        # Two sequential standard tasks, each mutating its OWN tracked file. HEAD
+        # never advances between tasks (nothing commits), so a HEAD-based per-task
+        # base would fold task 1's still-uncommitted change into task 2's packet.
+        # The runner must snapshot the working tree per task so task 2's packet
+        # carries only task 2's change.
+        plan = self._plan(PLAN_TWO_STD)
+        for name in ("f1.txt", "f2.txt"):
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write("base\n")
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},           # t1 worker
+            {"exit": 0, "msg": _pass_msg()},  # t1 review
+            {"exit": 0, "msg": ""},           # t2 worker
+            {"exit": 0, "msg": _pass_msg()},  # t2 review
+            {"exit": 0, "msg": _pass_msg()},  # final review
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            p1 = f.read()
+        with open(os.path.join(self.run_dir, "task-2-review.md")) as f:
+            p2 = f.read()
+        self.assertIn("TASK1MARK", p1)
+        self.assertIn("TASK2MARK", p2)
+        # The task-2 packet must not carry task 1's still-uncommitted change.
+        self.assertNotIn("TASK1MARK", p2)
+
+    def test_reviewer_process_crash_exits_one_naming_cause(self):
+        # The reviewer subprocess exits non-zero but still writes a parseable
+        # verdict. A runner that discards the reviewer's exit code would trust the
+        # message and pass; the runner must instead fail loud on a crashed
+        # reviewer rather than silently trust (or reuse) its output.
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},            # worker
+            {"exit": 3, "msg": _pass_msg()},   # reviewer crashes (exit 3)
+        ])
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("reviewer", res.stderr.lower())
+
 
 class ReviewNonGitTests(unittest.TestCase):
     """Review-path behaviors that need no git repo: trivial tier skips the
@@ -927,6 +996,31 @@ class ResumeTests(unittest.TestCase):
         with open(plan) as f:
             content = f.read()
         self.assertIn("[x] Done", content)
+
+    def test_resume_forwards_to_run_plan_with_declared_signature(self):
+        # resume(plan_path, spec_path, run_dir) is the documented re-invocation
+        # entry: it forwards to run_plan with the production defaults (codex on
+        # PATH, cwd = getcwd()). Guards against signature drift and dead code.
+        calls = []
+        orig = forge_run.run_plan
+
+        def _record(*a, **k):
+            calls.append(a)
+            return 0
+
+        forge_run.run_plan = _record
+        try:
+            rc = forge_run.resume("plan.md", "spec.md", "/run/dir")
+        finally:
+            forge_run.run_plan = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        args = calls[0]
+        self.assertEqual(args[0], "plan.md")
+        self.assertEqual(args[1], "spec.md")
+        self.assertEqual(args[2], "/run/dir")
+        self.assertEqual(args[3], "codex")
+        self.assertEqual(args[4], os.getcwd())
 
 
 if __name__ == "__main__":
