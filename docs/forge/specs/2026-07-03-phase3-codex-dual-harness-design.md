@@ -66,3 +66,4 @@ Goal: forge installable on Codex CLI from this repo, alongside Claude Code. Skil
 ## Changelog
 
 2026-07-03: plugin renamed theforge → forge; manifest names, signal dir (docs/forge/, legacy accepted), and namespace refs updated throughout.
+2026-07-13: execution substrate superseded by the codex exec runner spec (2026-07-13-codex-exec-runner-design.md) — deliverable 2 (TOML tier agents) retired, deliverable 4's in-session sequential dispatch, nickname pools, and checkbox-as-dispatch-ledger replaced by runner receipts; manifests, hook wiring, and README structure still owned here.
