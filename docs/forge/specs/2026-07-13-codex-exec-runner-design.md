@@ -40,7 +40,7 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 
 ## Receipts
 
-- Run dir `.forge/runs/<timestamp>/`, uncommitted (`.forge/` gitignored; README notes it). One receipt per task attempt: `task-<N>-attempt-<i>.json`; plus `run.json` summary.
+- Run dir `.forge/runs/<timestamp>/`, uncommitted — on first creation the runner writes a `.gitignore` containing `*` into `.forge/` (self-ignoring, no target-repo setup); README notes the behavior. One receipt per task attempt: `task-<N>-attempt-<i>.json`; plus `run.json` summary.
 - Receipt fields: task number, title, tier, model + effort requested, brief path + SHA-256, worker exit code, acceptance results (command, exit code, output tail), review verdict, attempt number, status (`passed` | `rework` | `escalated`).
 - Ledger: runner annotates plan checkboxes with outcome (`[x] … — passed, 1 attempt` / `— escalated: <one-liner>`). Plan file remains the durable human-readable record.
 
@@ -75,3 +75,7 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 
 - `codex exec` flag surface may churn (effort values, output flags) — verified live as first plan task; mapping table is the single update point.
 - Reviewer JSON discipline: models may wrap JSON in prose; extraction rule (last fenced/parseable JSON object in the message) must be specified in the reviewer contract, and still fail loud when absent.
+
+## Changelog
+
+2026-07-13: `.forge/` ignore is runner-written (self-ignoring `.gitignore`), not target-repo setup — requirement was unowned by any plan task (Task 2 escalation).
