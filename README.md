@@ -162,23 +162,18 @@ subagent dispatch — one `codex exec` process per task, pinned model/effort
 per tier:
 
 ```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md>
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> --timeout 900
 ```
 
 **Precondition:** the runner requires a clean working tree at start — `git status --porcelain` empty, with `.forge/` self-ignored. Dirty trees cause a contract error (exit 1) naming the dirty paths; commit or discard before re-invoking.
 
 **Per-task commits:** after each task passes, the runner stages all changes and commits with message `forge: task N — <title>`. This establishes a clean checkpoint after every passed task for per-task review and resume. `.forge/` is never staged; the ledger annotation rides in the commit. Escalated tasks commit nothing — uncommitted work stays for human resolution.
 
-**Session awareness (Codex-only):** the runner is meant to be backgrounded to a log. Terminal events surface on their own, and live state is pullable — so a backgrounded run is never blind.
+**Session awareness — run in the foreground.** Foreground is what makes a halt visible: the orchestrator is blocked on the command, so when the runner exits non-zero (escalation exit 2, contract error exit 1) it reads the receipt and relays the halt into the conversation — "task N escalated, needs your decision." The halt hands control straight back to a waiting orchestrator, so it can't go silent; no notifications or hooks needed. `--timeout 900` bounds every `codex exec` call, so a genuinely hung task is killed and escalated rather than sitting forever. Don't background-and-walk-away — that's what reintroduces blindness. Peek at any run on demand (dispatches nothing, exits 0):
 
-- **Notify on every event** — each task completion (`task-passed`), a halt (`escalated`/`contract-error`), and whole-run completion (`completed`) — on by default. macOS with no `--notify` fires a modal `osascript` alert per event; `--notify "<cmd>"` overrides (the command receives the event name + a one-line summary as trailing argv, so it can route progress vs. halts); `FORGE_NOTIFY_DISABLE=1` silences the default modal. Fire-and-forget — never changes the exit code.
-- **`--status`** reads the run state without dispatching anything:
-
-  ```bash
-  python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
-  ```
-
-- **Auto-inject live run state on every Codex prompt** via the `UserPromptSubmit` hook — shipped wired in the shared `hooks/hooks.json` (auto-installed on both harnesses like `SessionStart`, no manual step). It self-gates to Codex: silent under Claude Code (which has native session awareness), fires under Codex, and is silent anywhere there's no active run. Codex may prompt a one-time trust review for the hook via `/hooks`.
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
+```
 
 See `skills/planning/codex-execution.md` for the invocation contract,
 halt/resume, and the orchestrator's reduced role. Receipts land in

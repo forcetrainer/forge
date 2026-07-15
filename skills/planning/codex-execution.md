@@ -6,11 +6,11 @@ drives one fresh `codex exec` process per task instead of in-session
 subagent dispatch. The process boundary is what makes it deterministic: no
 parent-model inheritance, no child-thread quota accumulation.
 
-**Invocation:** after the execution approval gate, the orchestrator backgrounds the runner to a log and walks away — terminal-event notifications are on by default (see Session awareness — never background blind):
+**Invocation:** after the execution approval gate, the orchestrator runs the runner in the **foreground** (not backgrounded) so a halt surfaces in the conversation the instant it happens (see Session awareness):
 
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> \
-  --run-dir .forge/runs/<name> > .forge/runs/<name>/run.log 2>&1 &
+  --run-dir .forge/runs/<name> --timeout 900
 ```
 
 **Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. The runner never resets or stashes user work.
@@ -94,17 +94,17 @@ The runner self-manages `.forge/`'s gitignore on first write — no
 target-repo setup required. Plan-file checkboxes remain the durable,
 human-readable record (`— passed, N attempt(s)` / `— escalated: <one-liner>`).
 
-**Session awareness — never background blind:** the runner is always backgrounded to a redirected log, and its terminal events surface on their own — the orchestrator never polls `ps` and never trusts its own memory of where a run is.
+**Session awareness — run in the foreground:** the runner is run in the foreground, not backgrounded. Foreground is what makes a halt visible: the orchestrator is blocked on the command, so the instant the runner exits non-zero (escalation exit 2, contract error exit 1) control returns to the orchestrator, which reads the receipt/stderr and **relays the halt to the human in the conversation** — "task N escalated: <findings>, needs your decision." A halt that hands control straight back to a waiting orchestrator can't go silent; that is the entire mechanism. No notifications, no hook, no `ps`.
 
-- **Notifications (on by default):** the runner fires on four events — each task completion (`task-passed`), escalation and contract error (halts), and whole-run completion (`completed`). On macOS with no `--notify` given, each is a modal `osascript` alert. `--notify "<cmd>"` overrides with any command; it receives the event name and a one-line summary as trailing argv (so a custom command can route per-task progress differently from halts). `FORGE_NOTIFY_DISABLE=1` silences the default modal for non-interactive/CI runs. Notifications are fire-and-forget — a broken command never changes the runner's exit code.
-- **On re-entry, trust injected state or `--status` — never memory.** State lives in receipts, not stdout (stdout is a human progress narrative for `tail -f`, never load-bearing). Read the current state with:
+- **A hung task can't sit forever:** `--timeout SECONDS` (recommend ~900) bounds every worker/reviewer `codex exec` call. A genuinely stuck task is killed at the timeout, counts as a failed iteration, and escalates — so even a hang becomes a loud, relayed halt rather than silence. The runner's stdout is a per-task progress narrative (`task N: <title> — starting` / `task N: passed`) streamed live in the Codex TUI; a stalled stream on the last "starting" line tells you where it is.
+- **Never background-and-walk-away.** Backgrounding (`… &`) is what reintroduces blindness — the orchestrator fires and moves on, and the halt's exit code is caught by nobody. If a plan is long enough that foregrounding is genuinely painful, that is a signal to split the plan, not to background it.
+- **On-demand state** without touching a run:
 
   ```bash
   python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
   ```
 
-  It prints the run state (`RUNNING` | `COMPLETED` | `HALTED — <reason>` | `CONTRACT-ERROR — <cause>`) and one line per task, from `run.json` + receipts; it dispatches nothing and exits 0.
-- **Auto-injected state:** the `hooks/user-prompt-submit` hook injects a compact live-run block on every prompt so the orchestrator never operates on stale memory. It ships wired in the shared `hooks/hooks.json` (auto-installed on both harnesses like `session-start` — no manual step), and self-gates to Codex: it stays silent under Claude Code (which has native session awareness) and fires under Codex. It is already silent whenever there's no active run.
+  Prints the run state (`RUNNING` | `COMPLETED` | `HALTED — <reason>` | `CONTRACT-ERROR — <cause>`) and one line per task, from `run.json` + receipts; dispatches nothing, exits 0.
 
 **In-session Codex subagents remain acceptable outside plan execution** —
 ad-hoc exploration, one-off review, anything that isn't dispatched by the

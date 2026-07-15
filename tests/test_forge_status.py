@@ -175,47 +175,6 @@ class RenderStatusTests(unittest.TestCase):
             self.assertIn("bad thing at foo.py:10", out)
 
 
-class RenderHookBlockTests(unittest.TestCase):
-    def _state(self, run_dir, status, tasks, **kw):
-        _write_run(run_dir, status, tasks, **kw)
-        return forge_status.read_run_state(run_dir)
-
-    def test_running_block_within_line_cap(self):
-        with tempfile.TemporaryDirectory() as d:
-            tasks = [_summary(n, "passed") for n in range(1, 6)]
-            state = self._state(d, "running", tasks)
-            block = forge_status.render_hook_block(state, now=state["latest_mtime"])
-            self.assertIsNotNone(block)
-            self.assertLessEqual(len(block.splitlines()), 6)
-
-    def test_consecutive_same_status_range_compressed(self):
-        with tempfile.TemporaryDirectory() as d:
-            tasks = [_summary(n, "passed") for n in range(1, 5)]
-            state = self._state(d, "running", tasks)
-            block = forge_status.render_hook_block(state, now=state["latest_mtime"])
-            self.assertIn("1-4", block)
-
-    def test_terminal_past_cutoff_returns_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            state = self._state(d, "passed", [_summary(1, "passed")])
-            future = state["latest_mtime"] + 13 * 3600
-            self.assertIsNone(forge_status.render_hook_block(state, now=future))
-
-    def test_terminal_within_cutoff_returns_block(self):
-        with tempfile.TemporaryDirectory() as d:
-            state = self._state(d, "passed", [_summary(1, "passed")])
-            soon = state["latest_mtime"] + 3600
-            self.assertIsNotNone(forge_status.render_hook_block(state, now=soon))
-
-    def test_halted_block_includes_reason(self):
-        with tempfile.TemporaryDirectory() as d:
-            _write_run(d, "escalated", [_summary(1, "passed"), _summary(2, "escalated")])
-            _write_receipt(d, 2, 2, "escalated", findings=["nope"])
-            state = forge_status.read_run_state(d)
-            block = forge_status.render_hook_block(state, now=state["latest_mtime"])
-            self.assertIn("task 2", block.lower())
-
-
 class StatusCliTests(unittest.TestCase):
     def _status(self, run_dir, codex_bin=None, env=None):
         argv = ["--status", "--run-dir", run_dir]

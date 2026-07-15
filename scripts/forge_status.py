@@ -1,9 +1,8 @@
-"""forge_status — run-state reader and renderers for session awareness.
+"""forge_status — run-state reader and renderer for `forge-run.py --status`.
 
 Reads a run dir (`run.json` + per-task receipts) into a plain state dict and
-renders it two ways: the `forge-run.py --status` multi-line summary and the
-compact `UserPromptSubmit` hook block. Pure file reads — no dispatch, no git,
-no subprocess — so both the runner and the hook can share it.
+renders the multi-line `--status` summary. Pure file reads — no dispatch, no
+git, no subprocess — so a status check never perturbs a run.
 """
 import json
 import os
@@ -134,40 +133,4 @@ def render_status(state):
         if t["finding"]:
             line += " — " + t["finding"]
         lines.append(line)
-    return "\n".join(lines)
-
-
-def _compress_tasks(tasks):
-    """Range-compress consecutive same-status tasks: ``tasks 1-4: passed``."""
-    lines = []
-    i = 0
-    while i < len(tasks):
-        j = i
-        while (
-            j + 1 < len(tasks)
-            and tasks[j + 1]["status"] == tasks[i]["status"]
-            and tasks[j + 1]["number"] == tasks[j]["number"] + 1
-        ):
-            j += 1
-        a, b, status = tasks[i]["number"], tasks[j]["number"], tasks[i]["status"]
-        lines.append(
-            "task {}: {}".format(a, status) if a == b
-            else "tasks {}-{}: {}".format(a, b, status)
-        )
-        i = j + 1
-    return lines
-
-
-def render_hook_block(state, now, max_lines=6, age_cutoff_h=12):
-    """Compact ≤ ``max_lines`` block for the UserPromptSubmit hook, or None when
-    the run is terminal and older than ``age_cutoff_h`` hours."""
-    if state["state"] != "running" and now - state["latest_mtime"] > age_cutoff_h * 3600:
-        return None
-    head = "state: " + state["state"].upper()
-    if state["reason"]:
-        head += " — " + state["reason"]
-    lines = ["run {}".format(os.path.basename(state["run_dir"].rstrip("/"))), head]
-    lines.extend(_compress_tasks(state["tasks"]))
-    if len(lines) > max_lines:
-        lines = lines[: max_lines - 1] + ["…"]
     return "\n".join(lines)
