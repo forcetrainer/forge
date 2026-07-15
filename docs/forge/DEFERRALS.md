@@ -1,5 +1,10 @@
 # Deferrals
 
+## 2026-07-14 — Silent worker stalls recurred during Phase 5 execution; big forge test file loads workers toward the stall band
+**Why:** Phase 5 execution hit the 4b failure mode twice — dispatched `forge-deep` (opus·xhigh) workers went silent mid-turn, no error, right after large context injections (TDD skill load); the workflow buried the hang until a human noticed. Two reinforced findings for the Codex/Claude hardening phases: (1) session awareness (`--notify` + a stall watchdog) is the fix — it would have surfaced the hang instead of waiting on a human, and it is exactly Phase 6 plus the stall-detection deferral preserved at `backup/4b-attempt`; (2) `tests/test_forge_run.py` is ~47KB/1200 lines — a worker ingesting it plus `forge-run.py` (~40KB) plus the TDD skill plus its brief stacks toward the ~80k-context band where the stalls cluster, so splitting that test file is a candidate mitigation independent of transport weather. Phase 5's Task 1 was ultimately completed inline (Claude, this session) after the dispatched workers stalled.
+**From:** Phase 5 commit-discipline execution (2026-07-14)
+**Follow-up:** fold-into-phase-6-session-awareness-and-stall-watchdog; separately, split tests/test_forge_run.py when it next needs edits
+
 ## 2026-07-13 — forge-run.py re-dispatches the final review on re-invocation of a fully-passed run
 **Why:** Resume skips tasks whose receipt is `passed`, per the spec's Resume contract — but the plan-level final review has no receipt-skip, so re-invoking the runner over a run where everything already passed dispatches a fresh sol/high reviewer call. Cost observation from Task 3's escalation review, not a contract violation; re-invoking a fully-passed run is not a normal flow.
 **From:** codex-exec-runner plan, Task 3 escalation review
