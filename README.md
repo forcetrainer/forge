@@ -169,6 +169,27 @@ python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md>
 
 **Per-task commits:** after each task passes, the runner stages all changes and commits with message `forge: task N — <title>`. This establishes a clean checkpoint after every passed task for per-task review and resume. `.forge/` is never staged; the ledger annotation rides in the commit. Escalated tasks commit nothing — uncommitted work stays for human resolution.
 
+**Session awareness (Codex-only):** the runner is meant to be backgrounded to a log. Terminal events surface on their own, and live state is pullable — so a backgrounded run is never blind.
+
+- **Notify on every terminal event** (escalation, contract error, completion) — on by default. macOS with no `--notify` fires a modal `osascript` alert; `--notify "<cmd>"` overrides (the command receives the event name + a one-line summary as trailing argv); `FORGE_NOTIFY_DISABLE=1` silences the default modal. Fire-and-forget — never changes the exit code.
+- **`--status`** reads the run state without dispatching anything:
+
+  ```bash
+  python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
+  ```
+
+- **Auto-inject live run state on every Codex prompt** via the `UserPromptSubmit` hook. Codex-only, wired in **your Codex config, not the shared `hooks/hooks.json`** (both harnesses read that file; Claude Code has native session awareness and needs none of this). Add to `~/.codex/config.toml`:
+
+  ```toml
+  [[hooks.UserPromptSubmit]]
+
+  [[hooks.UserPromptSubmit.hooks]]
+  type = "command"
+  command = 'python3 "/absolute/path/to/forge/hooks/user-prompt-submit"'
+  ```
+
+  Use the absolute path to the installed plugin's hook (a user-level hook can't rely on `$CLAUDE_PLUGIN_ROOT` being set). Codex gates project/user command hooks on a one-time trust review via `/hooks`.
+
 See `skills/planning/codex-execution.md` for the invocation contract,
 halt/resume, and the orchestrator's reduced role. Receipts land in
 `.forge/runs/<timestamp>/`, uncommitted — the runner writes a self-ignoring

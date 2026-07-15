@@ -6,10 +6,11 @@ drives one fresh `codex exec` process per task instead of in-session
 subagent dispatch. The process boundary is what makes it deterministic: no
 parent-model inheritance, no child-thread quota accumulation.
 
-**Invocation:** after the execution approval gate, the orchestrator runs:
+**Invocation:** after the execution approval gate, the orchestrator backgrounds the runner to a log and walks away — terminal-event notifications are on by default (see Session awareness — never background blind):
 
 ```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md>
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> \
+  --run-dir .forge/runs/<name> > .forge/runs/<name>/run.log 2>&1 &
 ```
 
 **Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. The runner never resets or stashes user work.
@@ -92,6 +93,18 @@ a human gate.
 The runner self-manages `.forge/`'s gitignore on first write — no
 target-repo setup required. Plan-file checkboxes remain the durable,
 human-readable record (`— passed, N attempt(s)` / `— escalated: <one-liner>`).
+
+**Session awareness — never background blind:** the runner is always backgrounded to a redirected log, and its terminal events surface on their own — the orchestrator never polls `ps` and never trusts its own memory of where a run is.
+
+- **Notifications (on by default):** on every terminal event — task escalation, contract error, completion — the runner fires a notification. On macOS with no `--notify` given, that is a modal `osascript` alert (completion included — it's the integration decision gate). `--notify "<cmd>"` overrides with any command; it receives the event name and a one-line summary as trailing argv. `FORGE_NOTIFY_DISABLE=1` silences the default modal for non-interactive/CI runs. Notifications are fire-and-forget — a broken command never changes the runner's exit code.
+- **On re-entry, trust injected state or `--status` — never memory.** State lives in receipts, not stdout (stdout is a human progress narrative for `tail -f`, never load-bearing). Read the current state with:
+
+  ```bash
+  python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
+  ```
+
+  It prints the run state (`RUNNING` | `COMPLETED` | `HALTED — <reason>` | `CONTRACT-ERROR — <cause>`) and one line per task, from `run.json` + receipts; it dispatches nothing and exits 0.
+- **Auto-injected state (Codex-only):** the `hooks/user-prompt-submit` hook injects a compact live-run block on every prompt so the orchestrator never operates on stale memory. It is **Codex-only** and wired via `~/.codex/config.toml` (see README) — never the shared `hooks/hooks.json`, which both harnesses read. Claude Code has native session awareness and needs none of this.
 
 **In-session Codex subagents remain acceptable outside plan execution** —
 ad-hoc exploration, one-off review, anything that isn't dispatched by the
