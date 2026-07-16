@@ -5,11 +5,35 @@ the ``base_commit``/``tasks`` carried in ``run.json``, the final-review receipt,
 the self-ignoring ``.forge/.gitignore``, and the plan-checkbox annotations that
 double as the durable ledger.
 """
+import datetime
 import json
 import os
 import re
 
 from forge_common import verdict_to_dict
+
+
+def utc_iso():
+    """Current UTC time as an ISO-8601 ``...Z`` string (run.json timestamps)."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def update_run_progress(run_dir, current_task, current_phase):
+    """Partial-update run.json's live pointer (``current_task``/``current_phase``/
+    ``updated_at``) at a phase transition, preserving every other field, so the
+    monitor's top panel tracks the in-flight task and phase. Silent no-op if
+    run.json is missing or unreadable — a progress ping must never break a run."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    data["current_task"] = current_task
+    data["current_phase"] = current_phase
+    data["updated_at"] = utc_iso()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 def write_receipt(run_dir, task, attempt, receipt_dict):
@@ -33,6 +57,17 @@ def _read_base_commit(run_dir):
         return None
 
 
+def _read_started_at(run_dir):
+    """The ``started_at`` persisted in an existing ``run.json``, or None — so a
+    resume keeps the original run start (and elapsed) rather than resetting it."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("started_at")
+    except (OSError, ValueError):
+        return None
+
+
 def _read_run_tasks(run_dir):
     """The ``tasks`` list from an existing ``run.json`` (used on resume to carry
     a passed task's recorded commit SHA forward), or ``None`` when absent."""
@@ -45,7 +80,12 @@ def _read_run_tasks(run_dir):
 
 
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
-                   contract_error=None):
+                   contract_error=None, current_task=None, current_phase=None,
+                   started_at=None, updated_at=None, pid=None):
+    """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
+    ``started_at``/``updated_at``/``pid``) are additive and optional — omitted when
+    None, so an old run.json shape and a caller that passes none both stay valid.
+    Per-task ``started_at``/``ended_at`` ride inside the caller's task summaries."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -56,6 +96,15 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     }
     if contract_error is not None:
         data["contract_error"] = contract_error
+    for key, value in (
+        ("current_task", current_task),
+        ("current_phase", current_phase),
+        ("started_at", started_at),
+        ("updated_at", updated_at),
+        ("pid", pid),
+    ):
+        if value is not None:
+            data[key] = value
     path = os.path.join(run_dir, "run.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

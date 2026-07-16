@@ -39,7 +39,6 @@ import datetime
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from dataclasses import asdict
 
@@ -78,6 +77,7 @@ from forge_common import (  # noqa: F401
     WorkerResult,
     eb,
     rp,
+    run_teed,
     verdict_to_dict,
 )
 from forge_git import (  # noqa: F401
@@ -98,15 +98,16 @@ from forge_receipts import (  # noqa: F401
     _read_base_commit,
     _read_latest_receipt,
     _read_run_tasks,
+    _read_started_at,
     annotate_ledger,
     ensure_forge_gitignore,
     latest_status,
+    update_run_progress,
+    utc_iso,
     write_final_review_receipt,
     write_receipt,
     write_run_json,
 )
-
-_ACC_TAIL_CHARS = forge_common._ACC_TAIL_CHARS
 
 
 # --- worker dispatch --------------------------------------------------------
@@ -161,29 +162,36 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, effort_override=None,
         last_msg_path,
         prompt,
     ]
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    header = "── worker · codex exec · {} · {} ──".format(model, effort)
+    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    if result.timed_out:
         return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
             last_message = f.read()
-    return WorkerResult(exit_code=proc.returncode, last_message=last_message, argv=argv)
+    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
 
 
-def run_acceptance(task, cwd):
+def run_acceptance(task, cwd, live_path=None):
     """Run each acceptance command directly (shell) in ``cwd``; capture exit code
-    and an output tail."""
+    and an output tail. Output is tee'd to ``live_path`` (the task's live log) so
+    the monitor sees acceptance output scroll; ``live_path=None`` (unit calls)
+    tees to os.devnull, preserving the returned tail either way. A timed-out
+    command is a non-zero (failed) acceptance."""
+    lp = live_path or os.devnull
     results = []
     for cmd in task.acceptance_commands:
-        proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
-        combined = (proc.stdout or "") + (proc.stderr or "")
+        header = "── acceptance ──\n$ {}".format(cmd)
+        result = run_teed(
+            cmd, shell=True, cwd=cwd, timeout=DEFAULT_TIMEOUT, live_path=lp, header=header
+        )
         results.append(
             AcceptanceResult(
                 command=cmd,
-                exit_code=proc.returncode,
-                output_tail=combined[-_ACC_TAIL_CHARS:],
+                exit_code=result.exit_code if not result.timed_out else -1,
+                output_tail=result.tail,
             )
         )
     return results
@@ -239,7 +247,7 @@ def parse_verdict(last_message):
 
 
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
-                           timeout=DEFAULT_TIMEOUT):
+                           live_path, header, timeout=DEFAULT_TIMEOUT):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
     Verdict. Fail-loud on a crashed reviewer, a timed-out reviewer, or an
@@ -266,21 +274,22 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    if result.timed_out:
         raise RuntimeError(
             "reviewer process ({} at effort {}) timed out after {}s without a "
             "usable verdict".format(model, effort, timeout)
         )
-    if proc.returncode != 0:
-        stderr_tail = (proc.stderr or "").strip()[:300]
+    if result.exit_code != 0:
+        # The stderr tail survives teeing (stderr is merged into the tee'd
+        # stream), so a crashed reviewer still names its cause.
+        stderr_tail = (result.tail or "").strip()[:300]
         raise RuntimeError(
             "reviewer process ({} at effort {}) exited {} without a usable "
             "verdict{}".format(
                 model,
                 effort,
-                proc.returncode,
+                result.exit_code,
                 ": " + stderr_tail if stderr_tail else "",
             )
         )
@@ -298,8 +307,11 @@ def dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=DEFAULT_TIM
     model, effort = REVIEW_MAP[task.tier]
     preamble = contract_preamble(task.tier)
     last_msg_path = os.path.join(run_dir, "task-{}-review-last.txt".format(task.number))
+    live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    header = "── review · codex exec · {} · {} ──".format(model, effort)
     return _dispatch_review_call(
-        model, effort, preamble, packet_path, codex_bin, last_msg_path, timeout=timeout
+        model, effort, preamble, packet_path, codex_bin, last_msg_path,
+        live_path, header, timeout=timeout,
     )
 
 
@@ -310,8 +322,11 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, timeout=DEFAULT_TIMEO
     model, effort = REVIEW_MAP["complex"]
     preamble = contract_preamble("complex")
     last_msg_path = os.path.join(run_dir, "final-review-last.txt")
+    live_path = os.path.join(run_dir, "final-review-live.log")
+    header = "── final review · codex exec · {} · {} ──".format(model, effort)
     return _dispatch_review_call(
-        model, effort, preamble, packet_path, codex_bin, last_msg_path, timeout=timeout
+        model, effort, preamble, packet_path, codex_bin, last_msg_path,
+        live_path, header, timeout=timeout,
     )
 
 
@@ -355,6 +370,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     # once (trivial tiers need no reviewer).
     review_base = _git_head(cwd) if task.tier != "trivial" else None
     findings_carry = []
+    live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
 
     attempt = 0
     while True:
@@ -362,11 +378,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         brief_path, brief_sha = _brief_for(
             task, plan_path, spec_path, run_dir, attempt, findings_carry
         )
+        update_run_progress(run_dir, task.number, "worker")
         worker = dispatch_worker(
             task, brief_path, codex_bin, run_dir,
             effort_override=effort_override, timeout=timeout,
         )
-        acceptance = run_acceptance(task, cwd)
+        update_run_progress(run_dir, task.number, "acceptance")
+        acceptance = run_acceptance(task, cwd, live_path)
 
         worker_ok = worker.exit_code == 0 and not worker.timed_out
         acc_ok = all(r.exit_code == 0 for r in acceptance)
@@ -403,6 +421,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
                     "cannot generate review packet for task {}: cwd is not a git "
                     "repository".format(task.number)
                 )
+            update_run_progress(run_dir, task.number, "review")
             packet_path = _packet_for(task, plan_path, run_dir, review_base, cwd)
             verdict = dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=timeout)
             review_verdict = verdict_to_dict(verdict)
@@ -491,57 +510,82 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # persisted in run.json so a resume reuses it rather than a HEAD that has
     # advanced past already-committed tasks.
     run_base = _read_base_commit(run_dir) or _git_head(cwd)
-    prior_commits = {
-        t.get("number"): t.get("commit")
-        for t in (_read_run_tasks(run_dir) or [])
-    }
+    prior_task_list = _read_run_tasks(run_dir) or []
+    prior_commits = {t.get("number"): t.get("commit") for t in prior_task_list}
+    prior_tasks = {t.get("number"): t for t in prior_task_list}
+    # Run start time survives a resume so the monitor's elapsed doesn't reset; pid
+    # is the current process (a liveness hint the monitor/--status can probe).
+    run_started = _read_started_at(run_dir) or utc_iso()
+    run_pid = os.getpid()
 
-    task_summaries = []
+    # Seed the full task roster (dependency order) as `queued` so run.json is a
+    # complete, self-contained record the monitor renders — queued tasks included —
+    # then update each entry in place as it runs. summary_by_num indexes the same
+    # dict objects for O(1) update.
+    task_summaries = [
+        {
+            "number": t.number,
+            "title": t.title,
+            "tier": t.tier,
+            "status": "queued",
+            "attempts": 0,
+            "commit": None,
+            "started_at": None,
+            "ended_at": None,
+        }
+        for t in order
+    ]
+    summary_by_num = {s["number"]: s for s in task_summaries}
     overall = "passed"
     escalated = False
 
     # Incremental run.json: write `running` before the first task so --status/the
-    # hook can distinguish an in-progress run from a dead one, and rewrite after
+    # monitor can distinguish an in-progress run from a dead one, and rewrite after
     # each passed task so live per-task progress is visible. base_commit rides
-    # along so a resume still reads it.
-    write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base)
+    # along so a resume still reads it; started_at/pid feed the monitor.
+    write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
+                   started_at=run_started, pid=run_pid)
+    print("monitor: python scripts/forge-monitor.py --run-dir {}".format(run_dir),
+          flush=True)
 
     # order_tasks yields dependency order (each dependency before its dependents)
     # and the loop breaks on the first escalation, so a dependent is never reached
     # unless every dependency already passed — no separate depends-on guard needed.
     for task in order:
+        summary = summary_by_num[task.number]
         if latest_status(run_dir, task.number) == "passed":
             # Resume: a prior invocation already completed this task.
             prior = _read_latest_receipt(run_dir, task.number) or {}
-            task_summaries.append(
-                {
-                    "number": task.number,
-                    "title": task.title,
-                    "tier": task.tier,
-                    "status": "passed",
-                    "attempts": prior.get("attempt", 1),
-                    "commit": prior_commits.get(task.number),
-                }
-            )
+            prior_summary = prior_tasks.get(task.number, {})
+            summary.update({
+                "status": "passed",
+                "attempts": prior.get("attempt", 1),
+                "commit": prior_commits.get(task.number),
+                "started_at": prior_summary.get("started_at"),
+                "ended_at": prior_summary.get("ended_at"),
+            })
             continue
 
         _clear_task_receipts(run_dir, task.number)
         print("task {}: {} — starting".format(task.number, task.title), flush=True)
+        task_started = utc_iso()
+        # Mark the task `running` with its start time so the monitor lights the row
+        # and shows live per-task elapsed (its summary is otherwise `queued` until
+        # it completes).
+        summary.update({"status": "running", "started_at": task_started})
+        write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
+                       run_base, started_at=run_started, pid=run_pid)
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
         )
         print("task {}: {} ({} attempt(s))".format(
             task.number, outcome.status, outcome.attempts), flush=True)
-        summary = {
-            "number": task.number,
-            "title": task.title,
-            "tier": task.tier,
+        summary.update({
             "status": outcome.status,
             "attempts": outcome.attempts,
-            "commit": None,
-        }
-        task_summaries.append(summary)
+            "ended_at": utc_iso(),
+        })
         if outcome.status == "passed":
             annotate_ledger(
                 plan_path, task, "passed, {} attempt(s)".format(outcome.attempts)
@@ -550,7 +594,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # SHA, or None when the task changed nothing (no empty commit).
             summary["commit"] = _git_commit_task(cwd, task)
             write_run_json(
-                run_dir, plan_path, spec_path, "running", task_summaries, run_base
+                run_dir, plan_path, spec_path, "running", task_summaries, run_base,
+                started_at=run_started, pid=run_pid,
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
@@ -564,13 +609,17 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # diff is empty (nothing to review) or cwd is not a git repo (no baseline).
         diff = _git_diff(cwd, run_base)
         if diff.strip():
+            update_run_progress(run_dir, None, "final-review")
             packet_path = _final_packet(spec_path, run_base, diff, run_dir)
             verdict = dispatch_final_review(packet_path, codex_bin, run_dir, timeout=timeout)
             write_final_review_receipt(run_dir, verdict)
             if verdict.kind == "findings":
                 overall = "escalated-final-review"
 
-    write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base)
+    # Terminal write: no current_task/current_phase, so the pointer is cleared —
+    # the monitor stops the spinner and paints the terminal-state banner.
+    write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base,
+                   started_at=run_started, pid=run_pid)
     return 0 if overall == "passed" else 2
 
 
@@ -661,10 +710,15 @@ def main(argv=None):
         # unaffected (the error may have struck mid-run, after tasks committed).
         if os.path.isdir(run_dir):
             try:
+                # Preserve the run's started_at (monitor elapsed) and record the
+                # current pid; omitting current_task/current_phase clears the live
+                # pointer so the monitor paints the contract-error banner and stops
+                # the spinner rather than freezing a task mid-flight.
                 write_run_json(
                     run_dir, args.plan, args.spec, "contract-error",
                     _read_run_tasks(run_dir) or [], _read_base_commit(run_dir),
                     contract_error=str(e),
+                    started_at=_read_started_at(run_dir), pid=os.getpid(),
                 )
             except OSError:
                 pass

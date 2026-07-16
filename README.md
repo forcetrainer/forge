@@ -175,6 +175,14 @@ python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> --
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
 ```
 
+**Live monitor (optional).** For a live view, the runner prints a `monitor:` command at start; run it in a second terminal to watch a `rich` TUI — the plan ledger with the in-flight task lit, that task's `codex exec` output scrolling, and a full-width banner when the run completes or halts:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-monitor.py" --latest   # or --run-dir .forge/runs/<name>
+```
+
+It only reads the run dir (dispatches nothing) and needs `rich` (`pip install rich`); a killed runner shows as `stalled?` rather than a stuck spinner. `--status` above stays the zero-dependency peek.
+
 See `skills/planning/codex-execution.md` for the invocation contract,
 halt/resume, and the orchestrator's reduced role. Receipts land in
 `.forge/runs/<timestamp>/`, uncommitted — the runner writes a self-ignoring

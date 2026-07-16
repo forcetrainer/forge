@@ -9,6 +9,10 @@ preserved across forge_plan/forge_git/forge_receipts and the test suite.
 """
 import importlib.util
 import os
+import signal
+import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 
 
@@ -122,3 +126,65 @@ def verdict_to_dict(verdict):
     if verdict.kind == "pass":
         return {"verdict": "pass"}
     return {"verdict": "findings", "findings": list(verdict.findings)}
+
+
+@dataclass
+class TeeResult:
+    exit_code: "int | None"  # None when timed out
+    timed_out: bool
+    tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr
+
+
+def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
+    """Run a subprocess, streaming its merged stdout+stderr line-by-line into
+    ``live_path`` (append) under a ``header`` line, while returning the exit code,
+    a timed-out flag, and the output tail the runner loop needs.
+
+    A behavior-preserving replacement for ``subprocess.run(capture_output=True)``:
+    the returned ``tail`` matches the old ``combined[-_ACC_TAIL_CHARS:]``, and a
+    child that outlives ``timeout`` is killed (whole process group) and reported
+    as ``timed_out`` — never hangs the run. ``start_new_session`` puts the child
+    in its own group so ``shell=True`` command trees die with it. The live file is
+    flushed per line so a tailing monitor sees output as it happens."""
+    with open(live_path, "a", encoding="utf-8") as live:
+        live.write(header + "\n")
+        live.flush()
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        buf = []
+
+        def _pump():
+            for line in proc.stdout:
+                live.write(line)
+                live.flush()
+                buf.append(line)
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait()
+        reader.join(timeout=5)
+
+    merged = "".join(buf)
+    return TeeResult(
+        exit_code=None if timed_out else proc.returncode,
+        timed_out=timed_out,
+        tail=merged[-_ACC_TAIL_CHARS:],
+    )

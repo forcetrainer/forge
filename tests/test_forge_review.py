@@ -303,6 +303,59 @@ class ReviewLoopTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1, res.stderr)
         self.assertIn("reviewer", res.stderr.lower())
 
+    def test_reviewer_crash_message_preserves_stderr_tail(self):
+        # Teeing must not lose the reviewer's stderr tail used in the crash
+        # message — it is now sourced from the tee'd stream, not proc.stderr.
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 3, "msg": "", "stderr": "REVIEWER_BOOM_DETAIL"},
+        ])
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("REVIEWER_BOOM_DETAIL", res.stderr)
+
+    def test_passed_task_writes_live_log_with_phase_headers(self):
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "task-1-live.log")) as f:
+            log = f.read()
+        self.assertIn("── worker · codex exec", log)
+        self.assertIn("── acceptance ──", log)
+        self.assertIn("── review · codex exec", log)
+
+    def test_run_records_per_task_timestamps_and_run_metadata(self):
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        self.assertIn("started_at", data)
+        self.assertIn("pid", data)
+        t1 = data["tasks"][0]
+        self.assertTrue(t1.get("started_at"))
+        self.assertTrue(t1.get("ended_at"))
+
+    def test_run_start_announces_monitor_command(self):
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("monitor:", res.stdout)
+        self.assertIn("forge-monitor.py", res.stdout)
+
 
 class ReviewNonGitTests(unittest.TestCase):
     """Review-path behaviors that need no git repo: trivial tier skips the
