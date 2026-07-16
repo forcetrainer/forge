@@ -164,7 +164,12 @@ def _live_panel(state, log_lines):
     else:
         title = "▸ log"
     if log_lines:
-        body = Text("\n".join(log_lines), style=FG, no_wrap=True, overflow="crop")
+        # Parse the raw codex-exec stream as ANSI so its own color codes render
+        # as styles inside the panel instead of leaking escape sequences that
+        # corrupt the box; crop (never wrap) so a long line can't break the frame.
+        body = Text.from_ansi("\n".join(log_lines))
+        body.no_wrap = True
+        body.overflow = "crop"
     else:
         body = Text("waiting for output…", style=DIM)
     return Panel(body, title=title, title_align="left",
@@ -264,12 +269,26 @@ def _wait_for_quit():  # pragma: no cover - interactive
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def _live_capacity(height, state):
+    """How many log lines the live panel can show without pushing any panel's
+    border off-screen: the terminal height minus the ledger panel (task rows +
+    its chrome), the terminal-state banner (when present), and the live panel's
+    own two borders. Sized so ledger + live + banner exactly fit the viewport."""
+    tasks = state.get("tasks") or []
+    ledger_h = len(tasks) + 6  # 3 meta lines + 1 blank + N rows + 2 borders
+    terminal = state["state"] in ("completed", "halted", "contract-error")
+    banner_h = 4 if terminal else 0
+    return max(3, height - ledger_h - banner_h - 2)
+
+
 def _watch(run_dir, poll):  # pragma: no cover - interactive Live loop
     console = Console()
-    log_lines_cap = max(8, console.size.height - 16)
     fi = 0
     terminal = False
-    with Live(console=console, refresh_per_second=10, screen=False) as live:
+    # screen=True takes over the alternate screen buffer (full-screen, clears on
+    # entry, restores the prompt on exit); auto_refresh=False means the screen is
+    # repainted only when we call update() — one paint per poll, so no flicker.
+    with Live(console=console, screen=True, auto_refresh=False) as live:
         while True:
             state = forge_status.read_run_state(run_dir)
             if state is None:
@@ -277,15 +296,17 @@ def _watch(run_dir, poll):  # pragma: no cover - interactive Live loop
             frame = _SPINNER[fi % len(_SPINNER)]
             fi += 1
             log_path = _current_log_path(run_dir, state)
-            lines = _tail(log_path, log_lines_cap) if log_path else []
-            live.update(_render(state, lines, frame=frame))
+            cap = _live_capacity(console.size.height, state)
+            lines = _tail(log_path, cap) if log_path else []
+            live.update(_render(state, lines, frame=frame), refresh=True)
             if _is_terminal(state):
                 terminal = True
                 break
             time.sleep(poll)
-    # Keep the final frame + banner up until the operator dismisses it.
-    if terminal:
-        _wait_for_quit()
+        # Hold the final frame + banner on the alternate screen until the operator
+        # presses q/Ctrl-C, then exiting the context restores their prompt.
+        if terminal:
+            _wait_for_quit()
     return 0
 
 

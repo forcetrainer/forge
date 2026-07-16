@@ -226,6 +226,35 @@ class TerminalAndBannerTests(unittest.TestCase):
             self.assertIn("interrupted", out)
 
 
+class CapacityTests(unittest.TestCase):
+    def _state(self, st, n):
+        return {"state": st, "tasks": [{"number": i} for i in range(n)]}
+
+    def test_shrinks_with_more_tasks(self):
+        self.assertGreater(
+            forge_monitor._live_capacity(40, self._state("running", 3)),
+            forge_monitor._live_capacity(40, self._state("running", 8)))
+
+    def test_reserves_banner_when_terminal(self):
+        self.assertGreater(
+            forge_monitor._live_capacity(40, self._state("running", 3)),
+            forge_monitor._live_capacity(40, self._state("halted", 3)))
+
+    def test_floors_at_three(self):
+        self.assertEqual(
+            forge_monitor._live_capacity(5, self._state("running", 20)), 3)
+
+    def test_panels_fit_the_viewport(self):
+        # ledger + live panel + banner must not exceed the terminal height, so no
+        # border is ever pushed off-screen.
+        h, state = 40, self._state("halted", 4)
+        cap = forge_monitor._live_capacity(h, state)
+        ledger_h = len(state["tasks"]) + 6
+        live_h = cap + 2  # body + two borders
+        banner_h = 4
+        self.assertLessEqual(ledger_h + live_h + banner_h, h)
+
+
 class CliTests(unittest.TestCase):
     def test_missing_run_dir_prints_and_exits_nonzero(self):
         code = forge_monitor.main(["--run-dir", "/no/such/run"])
