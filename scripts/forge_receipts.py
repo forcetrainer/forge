@@ -5,11 +5,35 @@ the ``base_commit``/``tasks`` carried in ``run.json``, the final-review receipt,
 the self-ignoring ``.forge/.gitignore``, and the plan-checkbox annotations that
 double as the durable ledger.
 """
+import datetime
 import json
 import os
 import re
 
 from forge_common import verdict_to_dict
+
+
+def utc_iso():
+    """Current UTC time as an ISO-8601 ``...Z`` string (run.json timestamps)."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def update_run_progress(run_dir, current_task, current_phase):
+    """Partial-update run.json's live pointer (``current_task``/``current_phase``/
+    ``updated_at``) at a phase transition, preserving every other field, so the
+    monitor's top panel tracks the in-flight task and phase. Silent no-op if
+    run.json is missing or unreadable — a progress ping must never break a run."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    data["current_task"] = current_task
+    data["current_phase"] = current_phase
+    data["updated_at"] = utc_iso()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 def write_receipt(run_dir, task, attempt, receipt_dict):
@@ -29,6 +53,17 @@ def _read_base_commit(run_dir):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f).get("base_commit")
+    except (OSError, ValueError):
+        return None
+
+
+def _read_started_at(run_dir):
+    """The ``started_at`` persisted in an existing ``run.json``, or None — so a
+    resume keeps the original run start (and elapsed) rather than resetting it."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("started_at")
     except (OSError, ValueError):
         return None
 

@@ -42,6 +42,8 @@ if log:
 exit_code = 0
 msg = ""
 sleep_s = 0
+out = ""
+err = ""
 resp = os.environ.get("FORGE_FAKE_RESPONSES")
 if resp and os.path.exists(resp):
     with open(resp) as f:
@@ -51,8 +53,16 @@ if resp and os.path.exists(resp):
         exit_code = r.get("exit", 0)
         msg = r.get("msg", "")
         sleep_s = r.get("sleep", 0)
+        out = r.get("stdout", "")
+        err = r.get("stderr", "")
 if sleep_s:
     time.sleep(sleep_s)
+if out:
+    sys.stdout.write(out)
+    sys.stdout.flush()
+if err:
+    sys.stderr.write(err)
+    sys.stderr.flush()
 if "--output-last-message" in argv:
     p = argv[argv.index("--output-last-message") + 1]
     with open(p, "w") as f:

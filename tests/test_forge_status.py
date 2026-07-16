@@ -257,6 +257,20 @@ class IncrementalRunJsonTests(unittest.TestCase):
                 final = json.load(f)
             self.assertEqual(final["status"], "passed")
 
+    def test_progress_pointer_live_mid_run_then_cleared(self):
+        with tempfile.TemporaryDirectory() as d:
+            rd = os.path.join(d, "run")
+            r = self._run_plan(d, _plan(run_dir_for_capture=rd), rd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(rd, "captured.json")) as f:
+                mid = json.load(f)
+            self.assertEqual(mid["current_task"], 1)
+            self.assertEqual(mid["current_phase"], "acceptance")
+            with open(os.path.join(rd, "run.json")) as f:
+                final = json.load(f)
+            self.assertNotIn("current_task", final)
+            self.assertNotIn("current_phase", final)
+
     def test_contract_error_before_run_dir_writes_no_run_json(self):
         with tempfile.TemporaryDirectory() as d:
             rd = os.path.join(d, "run")

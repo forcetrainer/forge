@@ -94,7 +94,7 @@ def read_run_state(run_dir, now=None) -> dict   # now defaults to time.time()
 **Depends on:** nothing
 
 ### Task 3: Runner integration — tee + progress pointer
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (wire `run_teed` into the three phases; write progress pointer + timestamps; announce the monitor command)
