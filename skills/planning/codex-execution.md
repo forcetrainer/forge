@@ -24,7 +24,11 @@ mechanical changes, small plans) that never needed the runner.
 `codex exec` process per task instead of in-session subagent dispatch. The
 process boundary is what makes it deterministic: no parent-model inheritance,
 no child-thread quota accumulation. The rest of this document specifies the
-runner (the dispatch branch).
+runner (the dispatch branch). The disposition-matrix and convergence decision
+logic described below (Convergence stop) lives in shared `scripts/forge_dispose.py`
+(Phase 12b) — the runner calls it in-process; the Claude dispatch path (planning
+skill `SKILL.md`) calls the identical logic via its CLI. One tested decision, two
+callers, so the two harnesses' rework/halt rules can't drift apart.
 
 **Invocation:** after the execution approval gate, the orchestrator runs the runner in the **foreground** (not backgrounded) so a halt surfaces in the conversation the instant it happens (see Session awareness):
 

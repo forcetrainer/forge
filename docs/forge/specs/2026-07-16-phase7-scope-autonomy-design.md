@@ -127,3 +127,7 @@ Runs once, after final review PASSES (never masks a code defect as drift — eve
 - Convergence labels depend on the reviewer tracking finding identity across attempts. Mitigation: prior findings + ids are supplied in the re-review packet; `carried_from` echoes the id. A mislabeled `resolved` that is actually unresolved re-appears as `new`/`carried` next attempt and is caught by the regression/stuck rules.
 - Backstop of 5 is a starting value; tune on the halt-mix data Phase 5's receipts produce.
 - Doc-sync auto-edits docs. Bounded to reconciliation of existing docs, gated behind an all-green run, committed separately so a bad sync is trivially revertible.
+
+## Changelog
+
+2026-07-17 (phase 12b): The disposition-matrix and convergence functions specified here (`diff_line_ranges`, `verify_provenance`, `derive_disposition`, `classify_findings`, `ConvergenceState`, `convergence_decision`, `advance_state`) were extracted from `forge-run.py` into shared `scripts/forge_dispose.py`, with a CLI so the Claude dispatch path can call the identical decision logic. Behavior unchanged on Codex; the Claude path gains the same disposition matrix + convergence this spec designed, reaching cross-harness parity. See `2026-07-17-phase12b-claude-dispatch-parity-design.md`.
