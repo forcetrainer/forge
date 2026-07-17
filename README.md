@@ -107,11 +107,28 @@ commands, bigger tasks get a real review that **classifies** each finding —
 **fix** it, **defer** it (logged), or **halt** for a human decision — and
 reworks until the findings *converge* rather than for a fixed number of rounds.
 A final review runs the same loop over the whole diff. This
-review→classify→fix/defer/halt→converge cycle is the heart of forge's execution;
-[**The execution loop**](docs/forge/execution-loop.md) is the full explanation,
-including how the Codex runner and the Claude path apply it differently today. On
-Claude Code this dispatch happens in-session; on Codex CLI the same shape runs
-through a deterministic runner instead — see [Running on Codex](#running-on-codex).
+review→classify→fix/defer/halt→converge cycle is the heart of forge's execution,
+and the decision itself — the classification and convergence rules — lives in
+one shared, tested module, `scripts/forge_dispose.py`: the Codex runner calls
+it in-process, the Claude orchestrator calls the identical logic through its
+CLI. One referee, two callers, so the rules can't quietly drift apart between
+harnesses. [**The execution loop**](docs/forge/execution-loop.md) is the full
+explanation. On Claude Code this dispatch happens in-session; on Codex CLI the
+same shape runs through a deterministic runner instead — see
+[Running on Codex](#running-on-codex).
+
+**Why forge runs implementation serially.** Both harnesses dispatch tasks one
+at a time, even though parallelizing independent tasks is technically possible
+(Claude's Workflow tool can fan out subagents). Parallelism buys only
+wall-clock time — it doesn't improve correctness, quality, or the decision
+logic above — and forge's commit discipline depends on a **linear** history:
+each task's review base is `git diff <prior commit>`, meaningful only when
+commits form a clean chain of vertical slices. Parallel writers mutating the
+tree at once break that chain and force worktree isolation plus ordered
+merge-back, and merge conflicts reintroduce exactly the integration mess
+per-task commits exist to prevent. Fan-out stays for **read-only** work —
+research, independent review lenses — where there's no shared mutable state to
+race. Coding writes; that's the part that stays serial.
 
 **Project memory** is three markdown files. `docs/forge/DECISIONS.md` holds
 what was decided and why — it's read before new work, and logged decisions
