@@ -49,8 +49,10 @@ def _run_cli(argv, cwd=None, env=None):
     )
 
 
-def _write_run(run_dir, status, tasks, base_commit="abc123", contract_error=None):
-    """Write a run.json with the given top-level status and task summaries."""
+def _write_run(run_dir, status, tasks, base_commit="abc123", contract_error=None, **extra):
+    """Write a run.json with the given top-level status and task summaries.
+    ``**extra`` merges additional top-level fields (e.g. deferrals, autofix_mode,
+    doc_sync) so callers opt in without a separate writer."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": "/p/plan.md",
@@ -61,11 +63,12 @@ def _write_run(run_dir, status, tasks, base_commit="abc123", contract_error=None
     }
     if contract_error is not None:
         data["contract_error"] = contract_error
+    data.update(extra)
     with open(os.path.join(run_dir, "run.json"), "w") as f:
         json.dump(data, f)
 
 
-def _write_receipt(run_dir, number, attempt, status, findings=None):
+def _write_receipt(run_dir, number, attempt, status, findings=None, halt_reason=None):
     os.makedirs(run_dir, exist_ok=True)
     receipt = {
         "task_number": number,
@@ -75,10 +78,21 @@ def _write_receipt(run_dir, number, attempt, status, findings=None):
         "status": status,
         "outstanding_findings": findings or [],
     }
+    if halt_reason is not None:
+        receipt["halt_reason"] = halt_reason
     path = os.path.join(run_dir, "task-{}-attempt-{}.json".format(number, attempt))
     with open(path, "w") as f:
         json.dump(receipt, f)
     return path
+
+
+def _write_final_review(run_dir, verdict="findings", findings=None, halt_reason=None):
+    os.makedirs(run_dir, exist_ok=True)
+    data = {"verdict": verdict, "findings": findings or []}
+    if halt_reason is not None:
+        data["halt_reason"] = halt_reason
+    with open(os.path.join(run_dir, "final-review.json"), "w") as f:
+        json.dump(data, f)
 
 
 def _summary(number, status, attempts=1):
@@ -121,6 +135,17 @@ class ReadRunStateTests(unittest.TestCase):
             state = forge_status.read_run_state(d)
             self.assertEqual(state["state"], "halted")
             self.assertIn("final review", state["reason"].lower())
+            # No final-review.json in this fixture (backcompat / no-receipt case):
+            # halt_class must tolerate absence, not crash.
+            self.assertIsNone(state["halt_class"])
+
+    def test_final_review_escalation_surfaces_halt_reason_class(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")])
+            _write_final_review(d, findings=["legacy bug"], halt_reason="scope-decision")
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["state"], "halted")
+            self.assertEqual(state["halt_class"], "scope-decision")
 
     def test_contract_error_status_maps_with_message(self):
         with tempfile.TemporaryDirectory() as d:
@@ -144,6 +169,44 @@ class ReadRunStateTests(unittest.TestCase):
             t2 = next(t for t in state["tasks"] if t["number"] == 2)
             self.assertIsNotNone(t2["finding"])
             self.assertLessEqual(len(t2["finding"]), 110)
+
+    def test_escalated_task_surfaces_halt_reason_class(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated", [_summary(1, "passed"), _summary(2, "escalated")])
+            _write_receipt(d, 2, 2, "escalated", findings=["bad thing"], halt_reason="stuck")
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["halt_class"], "stuck")
+            t2 = next(t for t in state["tasks"] if t["number"] == 2)
+            self.assertEqual(t2["halt_reason"], "stuck")
+
+    def test_surfaces_deferrals_from_run_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            deferrals = [
+                {"summary": "unused import", "location": {"file": "a.py", "lines": "1"}},
+            ]
+            _write_run(d, "passed", [_summary(1, "passed")], deferrals=deferrals)
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["deferrals"], deferrals)
+
+    def test_backcompat_missing_scope_autonomy_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "passed", [_summary(1, "passed")])
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["deferrals"], [])
+            self.assertIsNone(state["autofix_mode"])
+            self.assertIsNone(state["doc_sync"])
+            self.assertIsNone(state["halt_class"])
+
+    def test_doc_sync_halt_maps_to_halted_with_contradiction_reason(self):
+        # The terminal doc-sync stage's own halt (escalated-doc-sync) is a third
+        # terminal state --status must report; its cause is doc_sync.contradiction.
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-doc-sync", [_summary(1, "passed")],
+                       doc_sync={"status": "halt",
+                                 "contradiction": "README claims X, code does Y"})
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["state"], "halted")
+            self.assertIn("README claims X", state["reason"])
 
 
 class RenderStatusTests(unittest.TestCase):
@@ -175,6 +238,46 @@ class RenderStatusTests(unittest.TestCase):
             out = forge_status.render_status(forge_status.read_run_state(d))
             self.assertIn("task 1", out)
             self.assertIn("bad thing at foo.py:10", out)
+
+    def test_render_shows_doc_sync_contradiction(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-doc-sync", [_summary(1, "passed")],
+                       doc_sync={"status": "halt",
+                                 "contradiction": "README claims X, code does Y"})
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("HALTED", out)
+            self.assertIn("README claims X", out)
+
+    def test_render_shows_halt_reason_class(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated", [_summary(1, "escalated")])
+            _write_receipt(d, 1, 1, "escalated", findings=["bad thing"],
+                           halt_reason="scope-decision")
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("scope-decision", out)
+
+    def test_render_shows_halt_reason_class_for_final_review(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")])
+            _write_final_review(d, findings=["legacy bug"], halt_reason="scope-decision")
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("HALTED", out)
+            self.assertIn("scope-decision", out)
+
+    def test_render_shows_deferrals_count_and_summaries(self):
+        with tempfile.TemporaryDirectory() as d:
+            deferrals = [{"summary": "unused import"}, {"summary": "dead comment"}]
+            _write_run(d, "passed", [_summary(1, "passed")], deferrals=deferrals)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("deferrals: 2", out)
+            self.assertIn("unused import", out)
+            self.assertIn("dead comment", out)
+
+    def test_render_no_deferrals_line_when_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = forge_status.render_status(
+                self._state(d, "passed", [_summary(1, "passed")]))
+            self.assertNotIn("deferrals", out)
 
 
 class StatusCliTests(unittest.TestCase):
@@ -209,6 +312,28 @@ class StatusCliTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn("CONTRACT-ERROR", r.stdout)
             self.assertIn("malformed plan", r.stdout)
+
+    def test_halted_run_with_deferrals_prints_halt_reason_and_deferrals(self):
+        with tempfile.TemporaryDirectory() as d:
+            rd = os.path.join(d, "run")
+            deferrals = [{"summary": "unused import"}]
+            _write_run(rd, "escalated", [_summary(1, "passed"), _summary(2, "escalated")],
+                       deferrals=deferrals)
+            _write_receipt(rd, 2, 2, "escalated", findings=["bad thing"], halt_reason="stuck")
+            r = self._status(rd)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("stuck", r.stdout)
+            self.assertIn("deferrals: 1", r.stdout)
+            self.assertIn("unused import", r.stdout)
+
+    def test_status_without_scope_autonomy_fields_renders_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            rd = os.path.join(d, "run")
+            _write_run(rd, "passed", [_summary(1, "passed")])
+            r = self._status(rd)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("COMPLETED", r.stdout)
+            self.assertNotIn("deferrals", r.stdout)
 
     def test_nonexistent_dir_prints_no_run_exit_0(self):
         r = self._status("/no/such/run/dir")

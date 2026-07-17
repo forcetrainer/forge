@@ -97,6 +97,24 @@ class WriteFinalReviewReceiptTests(unittest.TestCase):
         self.assertEqual(got["impact"], "contract-breaking")
         self.assertEqual(got["disposition"], "fix")
 
+    def test_persists_halt_reason_when_given(self):
+        d = tempfile.mkdtemp(prefix="forge-final-review-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        verdict = forge_common.Verdict(kind="pass", findings=[])
+        path = forge_run.write_final_review_receipt(d, verdict, halt_reason="scope-decision")
+        with open(path) as f:
+            data = json.load(f)
+        self.assertEqual(data["halt_reason"], "scope-decision")
+
+    def test_omits_halt_reason_when_not_given(self):
+        d = tempfile.mkdtemp(prefix="forge-final-review-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        verdict = forge_common.Verdict(kind="pass", findings=[])
+        path = forge_run.write_final_review_receipt(d, verdict)
+        with open(path) as f:
+            data = json.load(f)
+        self.assertNotIn("halt_reason", data)
+
 
 class AnnotateLedgerTests(unittest.TestCase):
     def test_checks_box_and_appends_status(self):

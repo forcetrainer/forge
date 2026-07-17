@@ -230,7 +230,7 @@ Deferral aggregation: defer-disposition findings from every task and the final r
 **Depends on:** Task 4, Task 6.
 
 ### Task 8: --status surfacing and docs
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_status.py` (read_run_state/render_status surface deferrals + halt-reason class)

@@ -574,6 +574,12 @@ class FinalReviewLoopTests(unittest.TestCase):
         self.assertEqual(outcome.halt_reason, "scope-decision")
         self.assertEqual(outcome.repair_task, repair)
         self.assertNotIn("fix: final-review", self._log_lines())
+        # The halt-reason class must land on the persisted final-review receipt
+        # too (not just the in-memory TaskOutcome) — `--status` reads run.json +
+        # receipts only, never the live return value.
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["halt_reason"], "scope-decision")
 
     def test_improvement_finding_defers_run_completes(self):
         run_base = self._init_repo_with_task_work()

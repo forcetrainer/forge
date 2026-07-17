@@ -10,17 +10,19 @@ parent-model inheritance, no child-thread quota accumulation.
 
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> \
-  --run-dir .forge/runs/<name> --timeout 900
+  --run-dir .forge/runs/<name> --timeout 900 --autofix auto
 ```
+
+**`--autofix auto|gate`** (chosen at the execution offer, alongside the disclosed tier routing; default `auto`): `auto` runs the fix/defer/halt disposition matrix (below) so the runner reworks its own in-diff, contract-breaking findings without stopping; `gate` is the conservative escape hatch — any reviewer finding halts, no auto-fix, matching pre-Phase-7 behavior. Disclose the chosen mode in the offer alongside tier routing.
 
 **Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. The runner never resets or stashes user work.
 
 That single call is whole-plan scope. The runner owns the task loop
 (`Depends on` order, sequential, one worker at a time — no pipelining, no
 worktree isolation), brief generation, worker dispatch, acceptance-command
-execution, review dispatch, the rework cap, receipts, and plan-checkbox
-ledger annotations. It reuses `extract-brief.py` and `review-packet.py` for
-all plan/spec parsing — no duplicated heading grammar.
+execution, review dispatch, the convergence-based rework loop, receipts, and
+plan-checkbox ledger annotations. It reuses `extract-brief.py` and
+`review-packet.py` for all plan/spec parsing — no duplicated heading grammar.
 
 **Commit discipline:** after each task reaches `passed` and its ledger checkbox is annotated, the runner stages all changes and commits with message `forge: task N — <title>`. Nothing staged (e.g., uncommitted changes from a human pre-fix on resume) means the commit is skipped; no empty commits are created. The `.forge/` directory is never staged; the ledger annotation rides in the task's commit. Escalated tasks commit nothing — the rejected attempt stays uncommitted for the human to resolve. This establishes a clean checkpoint after every passed task, so HEAD is a reliable base for per-task review and resume.
 
@@ -31,11 +33,17 @@ work inline. If a `codex exec` call inside the runner fails or halts, the
 fix is a human decision and a re-invocation — not the orchestrator editing
 source files or reasoning through the fix itself.
 
+**Disposition matrix (`--autofix auto`):** every reviewer finding is classified on two runner-verified axes — provenance (`in-diff` vs `pre-existing`, checked against the actual diff, never trusted from the reviewer) × contract impact (`contract-breaking` only when the reviewer names an acceptance criterion/spec section; otherwise `improvement`). `in-diff` × `contract-breaking` → **fix** (reworked in-loop, the only auto-fixed cell); `improvement` findings (either provenance) → **defer** (logged, never fixed — no gold-plating the phase's own new code); `pre-existing` × `contract-breaking` → **halt** (a real scope decision, carries a drafted repair task). `--autofix gate` skips the matrix: any finding at all halts.
+
+**Convergence stop (replaces the old 2-iteration cap):** each attempt re-runs worker → acceptance → reviewer → classify, and the runner picks deterministically: any **halt**-disposition finding stops the run (reason `scope-decision`); a **regression** (a finding the runner previously tracked resolved reappears, or acceptance goes green→red) stops the run (reason `regression`); a **stuck** fix finding carried across two consecutive attempts stops the run (reason `stuck`); no fix findings left and acceptance green → pass; otherwise rework. Net progress each round isn't required — a round may resolve one finding and surface a new one and still rework, not halt. A `MAX_ATTEMPTS_BACKSTOP` of **5** (raised from the old 2) is a seatbelt against slow non-convergence only, halting with reason `backstop`. Final review (below) runs the same loop.
+
 **Halt / escalation:** the runner halts mechanically at two points, with
 distinct semantics:
 
-- **Task escalation (exit 2)** — rework cap reached (2 iterations: initial
-  attempt + 1 rework). A receipt is written with outstanding findings; the
+- **Task or final-review escalation (exit 2)** — the convergence loop above
+  stopped for one of `scope-decision` | `regression` | `stuck` | `backstop` |
+  `gate`. A receipt is written with outstanding findings and the halt-reason
+  class (`scope-decision` also carries a drafted `repair_task`); the
   orchestrator relays the receipt's contents to the user verbatim, and
   execution stops.
 
@@ -69,8 +77,10 @@ is a human decision among:
   human-only escalation, never a default, and never `ultra` at any tier
   (prohibited everywhere because it spawns subagents inside the worker,
   breaking brief isolation);
-- defer the finding (`docs/forge/DEFERRALS.md`) if it's non-spec scope, then
-  resume.
+- fix the code directly, matching or accepting the halt's drafted
+  `repair_task` (a `scope-decision` halt only — the disposition matrix already
+  auto-defers harmless improvement findings, so anything reaching a human halt
+  is by construction a real pre-existing/contract-breaking call), then resume.
 
 **Tier routing:** unchanged in substance from the pipelined path — trivial
 tasks skip reviewer dispatch (acceptance commands are the whole
@@ -85,15 +95,39 @@ stale against `TIER_MAP` on a model-churn edit.
 **Final review:** once every task passes, the runner dispatches one more
 `codex exec` call, at the model/effort for the **plan's highest task tier**
 (read from `TIER_MAP` — not a pinned sol/high), against the whole-plan diff
-and spec — integration issues a per-task review can't see. Findings there
-halt with `escalated-final-review` status; there's no rework loop at plan
-level, only a human gate.
+and spec — integration issues a per-task review can't see. It now runs
+through the **same disposition matrix + convergence loop** as a per-task
+review: a fix dispatch reworks its own in-diff/contract-breaking findings,
+committing a single `fix: final-review` commit when it applied any; only a
+genuine `scope-decision`/`regression`/`stuck`/`backstop`/`--gate` halt stops
+the run, with `escalated-final-review` status.
+
+**Terminal doc-sync stage:** once final review passes, the runner dispatches
+one more `codex exec` call that reconciles **existing** documentation to the
+shipped whole-plan diff — stale references, changed signatures/behavior, spec
+changelog entries, ROADMAP status. It never authors new docs (that would be
+the gold-plating the disposition matrix already forbids) and never touches
+code. Landed edits commit as `docs: sync`; no drift found → no commit. A
+doc/contract contradiction it can't mechanically reconcile halts the run for
+a human decision, named in `run.json`'s `doc_sync.contradiction`.
 
 **Receipts:** ephemeral, `.forge/runs/<timestamp>/` (or an explicit
 `--run-dir`), one JSON receipt per task attempt plus a `run.json` summary.
 The runner self-manages `.forge/`'s gitignore on first write — no
 target-repo setup required. Plan-file checkboxes remain the durable,
 human-readable record (`— passed, N attempt(s)` / `— escalated: <one-liner>`).
+Receipts also carry each finding's classification (provenance, impact,
+disposition) and, on an escalated receipt, the halt-reason class and any
+drafted `repair_task`. `run.json` aggregates every task's and the final
+review's defer-disposition findings under `deferrals`, plus `autofix_mode`
+and the terminal `doc_sync` record; `--status` surfaces the deferrals
+count/list and the halt-reason class alongside the existing per-task summary.
+
+**DEFERRALS write-back:** the runner never writes `docs/forge/DEFERRALS.md`
+itself — deferrals stay in `run.json` through the run. At clean completion,
+the orchestrator reads the aggregated `deferrals` list from `run.json` (or
+`--status`'s summary) and appends them to `docs/forge/DEFERRALS.md` as one
+reviewed batch, in the project-memory format (see the project-memory skill).
 
 **Session awareness — run in the foreground:** the runner is run in the foreground, not backgrounded. Foreground is what makes a halt visible: the orchestrator is blocked on the command, so the instant the runner exits non-zero (escalation exit 2, contract error exit 1) control returns to the orchestrator, which reads the receipt/stderr and **relays the halt to the human in the conversation** — "task N escalated: <findings>, needs your decision." A halt that hands control straight back to a waiting orchestrator can't go silent; that is the entire mechanism. No notifications, no hook, no `ps`.
 
@@ -105,7 +139,7 @@ human-readable record (`— passed, N attempt(s)` / `— escalated: <one-liner>`
   python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
   ```
 
-  Prints the run state (`RUNNING` | `COMPLETED` | `HALTED — <reason>` | `CONTRACT-ERROR — <cause>`) and one line per task, from `run.json` + receipts; dispatches nothing, exits 0.
+  Prints the run state (`RUNNING` | `COMPLETED` | `HALTED — <reason> (<halt-reason class>)` | `CONTRACT-ERROR — <cause>`), one line per task, and a `deferrals: N — <summaries>` line when any were collected, from `run.json` + receipts; dispatches nothing, exits 0.
 - **Live monitor** (optional, second terminal): a full-screen `rich` TUI — the plan ledger with the in-flight task lit and its `codex exec` stream scrolling, plus a terminal-state banner on completion/halt. Best used as a **standing monitor**: leave it open once and it attaches to every run. The runner writes a `.forge/watch` launcher and prints a short command at start:
 
   ```bash

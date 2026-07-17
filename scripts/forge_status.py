@@ -24,6 +24,7 @@ _STATE_MAP = {
     "passed": "completed",
     "escalated": "halted",
     "escalated-final-review": "halted",
+    "escalated-doc-sync": "halted",
     "contract-error": "contract-error",
 }
 
@@ -148,17 +149,20 @@ def read_run_state(run_dir, now=None):
     for s in sorted(summaries, key=lambda x: x.get("number", 0)):
         number = s.get("number")
         finding = None
+        halt_reason = None
         if s.get("status") == "escalated":
             r = receipts.get(number)
             outstanding = (r or {}).get("outstanding_findings") or []
             if outstanding:
                 finding = _truncate(outstanding[0])
+            halt_reason = (r or {}).get("halt_reason")
         tasks.append(
             {
                 "number": number,
                 "status": s.get("status"),
                 "attempts": s.get("attempts", 1),
                 "finding": finding,
+                "halt_reason": halt_reason,
                 "title": s.get("title"),
                 "tier": s.get("tier"),
                 "started_at": s.get("started_at"),
@@ -166,15 +170,29 @@ def read_run_state(run_dir, now=None):
             }
         )
 
+    # Halt-reason class (Disposition matrix spec: scope-decision | regression |
+    # stuck | backstop | gate) rides the escalated receipt — the escalated
+    # task's own attempt receipt for a task halt, or `final-review.json`'s
+    # `halt_reason` field for a final-review halt. Absent on older/no-receipt
+    # runs; `halt_class` stays None there, tolerated by render_status.
+    final_review = _read_final_review(run_dir)
     reason = None
+    halt_class = None
     if state == "contract-error":
         reason = (run or {}).get("contract_error") or "contract error"
     elif state == "halted":
         if raw_status == "escalated-final-review":
             reason = "final review escalated"
+            halt_class = (final_review or {}).get("halt_reason")
+        elif raw_status == "escalated-doc-sync":
+            # Terminal doc-sync stage halt: the cause is the named doc/contract
+            # contradiction on run.json's doc_sync record (no matrix halt class).
+            ds = (run or {}).get("doc_sync") or {}
+            reason = ds.get("contradiction") or "doc-sync contradiction"
         else:
             first = next((t for t in tasks if t["status"] == "escalated"), None)
             reason = "task {} escalated".format(first["number"]) if first else "escalated"
+            halt_class = first["halt_reason"] if first else None
 
     current_task = run.get("current_task") if run else None
     current_phase = run.get("current_phase") if run else None
@@ -187,14 +205,21 @@ def read_run_state(run_dir, now=None):
         "plan": run.get("plan") if run else None,
         "state": state,
         "reason": reason,
+        "halt_class": halt_class,
         "latest_mtime": _latest_mtime(run_dir),
         "current_task": current_task,
         "current_phase": current_phase,
         "started_at": started_at,
         "updated_at": updated_at,
         "stale": _is_stale(state, run_dir, updated_at, pid, now),
-        "final_review": _read_final_review(run_dir),
+        "final_review": final_review,
         "tasks": tasks,
+        # Scope-autonomy fields (Receipts / run.json spec): additive, absent on
+        # old run.json shapes — deferrals defaults to [] (always a list),
+        # autofix_mode/doc_sync default to None like the other optional fields.
+        "deferrals": (run.get("deferrals") if run else None) or [],
+        "autofix_mode": run.get("autofix_mode") if run else None,
+        "doc_sync": run.get("doc_sync") if run else None,
     }
 
 
@@ -204,10 +229,15 @@ def render_status(state):
     header = "run {}: {}".format(state["run_dir"], label)
     if state["reason"] and state["state"] in ("halted", "contract-error"):
         header += " — " + state["reason"]
+        if state.get("halt_class"):
+            header += " ({})".format(state["halt_class"])
     lines = [header]
     for t in state["tasks"]:
         line = "task {}: {}, attempts {}".format(t["number"], t["status"], t["attempts"])
         if t["finding"]:
             line += " — " + t["finding"]
         lines.append(line)
+    if state.get("deferrals"):
+        summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
+        lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
     return "\n".join(lines)
