@@ -9,11 +9,15 @@ mechanism is Codex-specific (the runner below).
 
 **Inline (mode = inline):** the Codex session executes the plan task-by-task
 itself — the **tdd** skill (test first, then implementation), an orchestrator
-**self-review** before each commit, and a commit per task, on a clean working
-tree. Inline does **not** invoke the runner and does **not** dispatch a
-separate reviewer — TDD + acceptance commands are the objective check (the
-same inline contract Claude follows). Use it for the low end (simple edits,
-doc updates, mechanical changes, small plans) that never needed the runner.
+**self-review** before each commit that **disposes of findings by the inline
+finding-handling canon in the planning skill's `SKILL.md`** (the four-quadrant
+disposition matrix, convergence-based rework, and the draft-a-disposition-then-
+surface halt gate — not silent resolution), and a commit per task, on a clean
+working tree. Inline does **not** invoke the runner and does **not** dispatch a
+separate reviewer — TDD + acceptance commands are the objective check. The
+finding-handling canon is shared, so Codex inline follows the **same** process
+Claude inline does. Use it for the low end (simple edits, doc updates,
+mechanical changes, small plans) that never needed the runner.
 
 **Dispatch (mode = dispatch):** plan execution runs through
 `scripts/forge-run.py` — a deterministic runner that drives one fresh
