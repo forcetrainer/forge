@@ -282,9 +282,12 @@ class ReviewLoopTests(unittest.TestCase):
         self.assertTrue(receipt["outstanding_findings"])
         # The attempt-2 re-review packet carries the prior attempt's finding set so
         # the reviewer can label convergence against it (task-N-review.md is
-        # overwritten each attempt, so this is attempt 2's packet).
+        # overwritten each attempt, so this is attempt 2's packet). Assert on
+        # the prior finding's own summary text — true regardless of which
+        # packet builder produced this lap's packet or what its section
+        # headers are called.
         with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
-            self.assertIn("Prior findings", f.read())
+            self.assertIn("issue", f.read())
         # Task 2 is never dispatched.
         self.assertFalse(
             os.path.exists(os.path.join(self.run_dir, "task-2-worker-last.txt"))

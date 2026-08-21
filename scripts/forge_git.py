@@ -43,6 +43,41 @@ def _working_tree_dirty(cwd):
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
+def snapshot_tree(cwd):
+    """Pre-repair working-tree snapshot for a later ``git diff <ref>`` (Delta-
+    scoped verification packets spec): taken just before a repair dispatch so
+    the next verification packet's delta is scoped to that repair alone.
+    ``git stash create`` records a commit-ish of the current index + tracked
+    working-tree state without touching either (unlike plain ``git stash``,
+    it never updates the stash ref or the working tree, and — like ``git
+    diff`` — it never looks at untracked files) — the usual path. When there
+    is nothing tracked to stash, ``stash create`` prints nothing; that means
+    the tracked tree already equals HEAD, so the snapshot ref is simply
+    ``HEAD`` itself — no ``git add``, no index mutation, not even for an
+    untracked file sitting in the tree (a prior fallback staged those via
+    ``git add -A``, which a later ``git add -A && git commit`` would then
+    sweep into the task or final-review commit — fixed 2026-08-21). Never
+    mutates the working tree or the index either way. Returns ``None``
+    outside a git repo (mirrors ``_git_head``); raises RuntimeError naming the
+    cause on a git failure (a packet-generation error — halt per the Halt
+    spec)."""
+    head = _git_head(cwd)
+    if head is None:
+        return None
+    try:
+        stash = subprocess.run(
+            ["git", "stash", "create"], cwd=cwd, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    if stash.returncode != 0:
+        raise RuntimeError(
+            "git stash create failed in {}: {}".format(cwd, stash.stderr.strip())
+        )
+    ref = stash.stdout.strip()
+    return ref if ref else head
+
+
 def _git_commit_task(cwd, task):
     """Commit this passed task's work as one slice: ``git add -A`` then
     ``git commit -m "forge: task <N> — <title>"``. Returns the new HEAD SHA, or

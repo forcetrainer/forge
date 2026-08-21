@@ -168,7 +168,7 @@
 **Depends on:** Task 3.
 
 ### Task 6: Delta-scoped verification packets
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_git.py` (pre-repair tree snapshot helper)

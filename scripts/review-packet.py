@@ -174,6 +174,48 @@ def build_packet(task_block, base, diff_output, prior_findings=None, checklist=N
     return packet
 
 
+def build_verification_packet(findings, delta_diff, checklist):
+    """Delta-scoped verification packet for a resumed reviewer (Delta-scoped
+    verification packets spec): the outstanding findings + the repair delta +
+    the reduced checklist — never the task block, the full spec, or the
+    whole-plan diff, all of which the resumed reviewer already holds in
+    session. ``findings`` is a list of finding dicts (a persisted
+    finding_to_dict() list, same shape as ``build_prior_findings_section``'s
+    input) embedded verbatim as JSON. ``delta_diff`` is ``git diff
+    <pre-repair snapshot>`` — just this repair's changes. ``checklist`` is
+    the reduced item list (forge_checklist.reduce_checklist output, or an
+    object exposing ``id``/``text`` like ``build_checklist_section``
+    expects); ``None`` (the empty-checklist skip case, or a reduction with no
+    matching items to render) omits the section entirely, mirroring
+    ``build_packet``'s own None-skips-section handling. Reuses
+    ``build_packet``'s fence-safety: a dynamic-length fence sized past the
+    longest backtick run in the delta, so a delta line containing ``` can't
+    close the block early."""
+    body = json.dumps(findings, indent=2)
+    if not body.endswith("\n"):
+        body += "\n"
+    findings_section = (
+        "## Outstanding findings\n\n```json\n" + body + "```\n"
+    )
+
+    if delta_diff.strip() == "":
+        delta_body = "no changes\n"
+    else:
+        delta_body = delta_diff
+        if not delta_body.endswith("\n"):
+            delta_body += "\n"
+    longest_run = max(
+        (len(m.group(0)) for m in re.finditer(r"`+", delta_body)), default=0
+    )
+    fence = "`" * max(3, longest_run + 1)
+    delta_section = "## Repair delta\n\n" + fence + "diff\n" + delta_body + fence + "\n"
+
+    packet = findings_section + "\n" + delta_section
+    if checklist is not None:
+        packet += "\n" + build_checklist_section(checklist)
+    return packet
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="review-packet.py")
     parser.add_argument("plan")

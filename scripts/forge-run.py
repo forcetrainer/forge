@@ -634,6 +634,14 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # on this attempt's receipt, never fatal (Continuity scope and failure).
         worker_resume_thread = threads.get(worker_role) if attempt > 1 else None
         worker_resume_fallback = attempt > 1 and worker_resume_thread is None
+        # Pre-repair snapshot (Delta-scoped verification packets spec): every
+        # rework lap dispatches a repair (resumed worker, or its cold
+        # fallback below) — snapshot the tree just before that dispatch so a
+        # later verification packet's delta is `git diff <repair_snapshot>`,
+        # scoped to this repair alone rather than the task's whole
+        # accumulated diff. Never taken on attempt 1 (nothing has repaired
+        # anything yet); never mutates the working tree.
+        repair_snapshot = forge_git.snapshot_tree(cwd) if attempt > 1 else None
         if worker_resume_thread:
             resume_prompt_path = _resume_findings_prompt(
                 findings_carry, run_dir, task, attempt
@@ -699,10 +707,6 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 forge_checklist.build_task_checklist, plan_path, spec_path,
                 task.number,
             )
-            packet_path = _packet_for(
-                task, plan_path, run_dir, review_base, cwd,
-                prior_findings=prior_findings or None, checklist=checklist,
-            )
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
             # separate reviewer (DECISIONS 2026-07-16, 2026-07-17); resuming it
@@ -714,6 +718,40 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             # within this attempt, the coverage-retry call (if any) also
             # stays cold rather than re-attempting a session already known bad.
             is_verification = review_attempts > 0
+            if is_verification and repair_snapshot is not None:
+                # Delta-scoped verification packet (Delta-scoped verification
+                # packets spec): the resumed reviewer already holds the task
+                # block, the full spec, and the whole-plan diff in session —
+                # re-sending them is exactly the waste this phase removes.
+                # Packet = outstanding findings + this repair's own delta
+                # (`git diff <repair_snapshot>`) + the reduced checklist
+                # (only items an outstanding finding's contract_ref names).
+                # `checklist` is reassigned to that same reduced list so the
+                # coverage validation below judges the verdict against
+                # exactly what the reviewer was shown — validating against
+                # the full checklist here would demand coverage of items the
+                # packet never mentioned, forcing a spurious retry-then-error
+                # on every verification lap of any multi-item checklist
+                # (fixed 2026-08-21; the spec's own words: "Verification laps
+                # carry the reduced checklist ... not the full one").
+                delta_diff = _git_diff(cwd, repair_snapshot)
+                checklist = (
+                    forge_checklist.reduce_checklist(checklist, prior_findings)
+                    if checklist else checklist
+                )
+                packet_text = rp.build_verification_packet(
+                    prior_findings, delta_diff, checklist
+                )
+                packet_path = os.path.join(
+                    run_dir, "task-{}-review.md".format(task.number)
+                )
+                with open(packet_path, "w", encoding="utf-8") as f:
+                    f.write(packet_text)
+            else:
+                packet_path = _packet_for(
+                    task, plan_path, run_dir, review_base, cwd,
+                    prior_findings=prior_findings or None, checklist=checklist,
+                )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
             }
