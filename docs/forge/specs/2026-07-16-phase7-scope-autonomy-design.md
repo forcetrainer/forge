@@ -131,3 +131,4 @@ Runs once, after final review PASSES (never masks a code defect as drift — eve
 ## Changelog
 
 2026-07-17 (phase 12b): The disposition-matrix and convergence functions specified here (`diff_line_ranges`, `verify_provenance`, `derive_disposition`, `classify_findings`, `ConvergenceState`, `convergence_decision`, `advance_state`) were extracted from `forge-run.py` into shared `scripts/forge_dispose.py`, with a CLI so the Claude dispatch path can call the identical decision logic. Behavior unchanged on Codex; the Claude path gains the same disposition matrix + convergence this spec designed, reaching cross-harness parity. See `2026-07-17-phase12b-claude-dispatch-parity-design.md`.
+2026-08-21 (phase 13): Phase 13 added a required `coverage` array to the reviewer verdict contract this spec defined, with runner-side validation and one retry; convergence rules, the disposition matrix, and the backstop of 5 are unchanged.

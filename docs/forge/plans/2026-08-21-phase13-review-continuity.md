@@ -234,7 +234,7 @@
 **Depends on:** Task 2, Task 5.
 
 ### Task 9: Changelog pointers, roadmap, lockstep version bump
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `docs/forge/specs/2026-07-16-phase7-scope-autonomy-design.md` (changelog line), `docs/forge/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md` (changelog line)
