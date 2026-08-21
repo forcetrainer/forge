@@ -128,7 +128,8 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
 
 
 def write_final_review_receipt(run_dir, verdict, halt_reason=None,
-                                coverage_skipped=None, coverage_retry=None):
+                                coverage_skipped=None, coverage_retry=None,
+                                resume_fallback=None):
     """Persist the plan-level final-review verdict alongside the task receipts.
     ``halt_reason`` (the convergence loop's disposition-matrix class —
     scope-decision | regression | stuck | backstop | gate) is additive and
@@ -139,7 +140,10 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
     ``coverage_retry`` mirror the per-task receipt's contract-checklist
     fields (Contract checklist spec) — both additive and optional, omitted
     when None so a caller that doesn't pass them leaves the receipt
-    unchanged."""
+    unchanged. ``resume_fallback`` mirrors the per-task receipt's field of
+    the same name (Session continuity / Continuity scope and failure specs)
+    — True when a final-reviewer or final-review-fixer resume fell back to a
+    cold spawn this attempt; additive and optional, omitted when None."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "final-review.json")
     data = verdict_to_dict(verdict)
@@ -149,6 +153,8 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
         data["coverage_skipped"] = coverage_skipped
     if coverage_retry is not None:
         data["coverage_retry"] = coverage_retry
+    if resume_fallback is not None:
+        data["resume_fallback"] = resume_fallback
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return path

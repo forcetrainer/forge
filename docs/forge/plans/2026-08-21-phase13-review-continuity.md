@@ -192,7 +192,7 @@
 **Depends on:** Task 4, Task 5.
 
 ### Task 7: Final-review fixer continuity + de-pasted brief
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`_final_review_fix_brief`, `dispatch_final_review_fix`, `run_final_review_loop`)

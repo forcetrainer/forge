@@ -629,7 +629,12 @@ class FinalReviewLoopTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "passed")
         packet = open(os.path.join(self.run_dir, "final-review.md")).read()
-        self.assertIn("Prior findings", packet)
+        # The a2 re-review is a verification lap (Session continuity /
+        # Delta-scoped verification packets specs) — its packet is the
+        # resumed reviewer's delta-scoped packet ("## Outstanding findings"),
+        # not the cold-packet "Prior findings" labeling section, but the
+        # prior attempt's outstanding finding is still carried into it.
+        self.assertIn("Outstanding findings", packet)
         self.assertIn("issue", packet)
 
     def test_transient_fix_dispatch_crash_reworks_not_regression(self):
@@ -652,69 +657,6 @@ class FinalReviewLoopTests(unittest.TestCase):
         self.assertEqual(outcome.status, "passed")
         self.assertNotEqual(outcome.halt_reason, "regression")
         self.assertEqual(outcome.attempts, 3)
-
-
-class FinalReviewFixBriefFenceTests(unittest.TestCase):
-    """_final_review_fix_brief must fence the whole-plan diff with a
-    dynamic-length fence (review-packet.py's build_packet precedent), not a
-    hardcoded ```diff, since the whole-plan diff can itself contain triple-
-    backtick runs (e.g. a diffed line touching a plan/spec .md file full of
-    ```python interface fences) that would close the fence early."""
-
-    def setUp(self):
-        self.d = tempfile.mkdtemp(prefix="forge-run-finalreviewbrief-")
-        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
-        self.spec = os.path.join(self.d, "spec.md")
-        with open(self.spec, "w") as f:
-            f.write(MINIMAL_SPEC)
-        self.run_dir = os.path.join(self.d, "run")
-        os.makedirs(self.run_dir)
-
-    def test_fence_survives_triple_backtick_run_in_diff(self):
-        # A diff hunk containing a context (unchanged) ``` fenced block, as
-        # would appear in a diff touching a plan/spec markdown file alongside
-        # the fix target. Context lines carry a single leading space in
-        # unified diff output -- a ≤3-space indent that markdown still
-        # recognizes as a fence closer, so " ```" closes a hardcoded ```diff
-        # fence early (review-packet.py's build_packet docstring, verbatim).
-        diff = (
-            "diff --git a/docs/plan.md b/docs/plan.md\n"
-            " ```python\n"
-            " def f(): pass\n"
-            " ```\n"
-            "+tail line after the embedded fence\n"
-        )
-        finding = forge_common.Finding(
-            id="f1", summary="issue", file="scripts/foo.py", lines="12",
-            provenance="in-diff", impact="contract-breaking",
-        )
-        brief_path = forge_run._final_review_fix_brief(
-            self.spec, diff, [finding], self.run_dir, 1
-        )
-        with open(brief_path) as f:
-            lines = f.read().splitlines()
-
-        open_idx, fence = next(
-            (i, l[: len(l) - len(l.lstrip("`"))])
-            for i, l in enumerate(lines)
-            if l.startswith("`") and l.endswith("diff")
-        )
-        close_idx = open_idx + 1 + next(
-            i for i, l in enumerate(lines[open_idx + 1 :]) if l == fence
-        )
-        body = lines[open_idx + 1 : close_idx]
-        self.assertIn(" ```python", body)
-        self.assertIn("+tail line after the embedded fence", body)
-        for line in body:
-            # Markdown fence closers permit a ≤3-space indent, so strip
-            # leading spaces before counting the backtick run (matches
-            # review-packet.py's test_fence_survives_backtick_lines_in_diff).
-            stripped = line.lstrip(" ")
-            run = len(stripped) - len(stripped.lstrip("`"))
-            self.assertLess(
-                run, len(fence),
-                "diff body line closes the outer fence early: %r" % line,
-            )
 
 
 class ReviewNonGitTests(unittest.TestCase):
