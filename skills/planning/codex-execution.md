@@ -61,6 +61,10 @@ source files or reasoning through the fix itself.
 
 **Convergence stop (replaces the old 2-iteration cap):** each attempt re-runs worker → acceptance → reviewer → classify, and the runner picks deterministically: any **halt**-disposition finding stops the run (reason `scope-decision`); a **regression** (a finding the runner previously tracked resolved reappears, or acceptance goes green→red) stops the run (reason `regression`); a **stuck** fix finding carried across two consecutive attempts stops the run (reason `stuck`); no fix findings left and acceptance green → pass; otherwise rework. Net progress each round isn't required — a round may resolve one finding and surface a new one and still rework, not halt. A `MAX_ATTEMPTS_BACKSTOP` of **5** (raised from the old 2) is a seatbelt against slow non-convergence only, halting with reason `backstop`. Final review (below) runs the same loop.
 
+**Session continuity (Codex mechanics):** every `codex exec` dispatch runs with `--json` (never `--ephemeral` — it defeats persistence). The runner parses the first `{"type":"thread.started","thread_id":...}` event and persists `thread_id` into a per-role `threads` map (`task-N-worker`, `task-N-reviewer`, `final-reviewer`, `final-fixer`); the map is cleared at the start of every invocation, including a resume, and never read back from a prior `run.json`, so a stale thread id can never leak across runs. `~/.codex/sessions` is never inspected and `--last` is never used (wrong-session hazard). Resume form: `codex exec resume --json --output-last-message <path> -m <model> -c 'model_reasoning_effort="<effort>"' <thread_id> <prompt>` — tier pinning and last-message verdict capture are preserved on resume. Workers and reviewers are cold on lap 1; on rework laps the worker resumes with the findings-only prompt as its brief, and the task/final reviewer resumes **only for verification** — discovery review (a task's first review, and the final review's first pass) stays **cold on both harnesses**, deliberately: independence is the entire justification for a separate reviewer (DECISIONS 2026-07-16, 2026-07-17), and this is a qualification of the fresh-context rule, not an exception to it. A failed resume (missing thread, non-zero exit before any event) falls back to a cold spawn with the full packet, recorded as `resume_fallback` on the task's receipt — degraded, never fatal. Resume is scoped to **one runner invocation**: a halted run's re-invocation always spawns cold, since a human may have hand-edited code in between and the persisted session's context would then be stale and misleading.
+
+**Coverage checklist:** before each review dispatch, the runner generates the checklist via `scripts/forge_checklist.py` (a task checklist for a task review, a final checklist for the final review) and folds it into the review packet; the reviewer's verdict must carry a `coverage` array satisfying it (Reviewer verdict contract, planning skill `SKILL.md`). Verification laps get the **reduced** checklist — only items referenced by the outstanding findings' `contract_ref` — not the full one. An empty checklist is a runner-level **SKIP**, not an error: the review dispatches without a coverage requirement and the receipt records `coverage_skipped`; `forge_checklist.py` invoked directly still raises on an empty checklist, since the tolerance belongs to the runner, not the generator. `forge_dispose.py` validates the coverage array (missing/unknown ids, an unbacked `violated` id, empty evidence) alongside the verdict parse; an invalid array gets **one retry** naming the specific defect, which does not advance the attempt counter or convergence state, then a contract error on a second invalid verdict.
+
 **Halt / escalation:** the runner halts mechanically at two points, with
 distinct semantics:
 
@@ -124,7 +128,12 @@ through the **same disposition matrix + convergence loop** as a per-task
 review: a fix dispatch reworks its own in-diff/contract-breaking findings,
 committing a single `fix: final-review` commit when it applied any; only a
 genuine `scope-decision`/`regression`/`stuck`/`backstop`/`--gate` halt stops
-the run, with `escalated-final-review` status.
+the run, with `escalated-final-review` status. The fix dispatch is **cold on its
+first repair, then resumed on every subsequent repair** — not cold every
+attempt — with a findings-only resume prompt carrying the new outstanding
+findings and affected paths, never the spec and whole-plan diff re-pasted;
+the same missing-thread/failed-resume fallback and `resume_fallback` receipt
+field apply.
 
 **Terminal doc-sync stage:** once final review passes, the runner dispatches
 one more `codex exec` call that reconciles **existing** documentation to the

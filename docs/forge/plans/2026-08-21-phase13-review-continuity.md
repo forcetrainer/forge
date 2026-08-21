@@ -215,7 +215,7 @@
 **Depends on:** Task 5, Task 6.
 
 ### Task 8: Cross-harness canon
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (reviewer verdict contract gains `coverage`; discovery-cold/verification-resumed rule; Claude `Agent`/`SendMessage` adapter and its fallback; checklist generation step in the dispatch loop)
