@@ -1,5 +1,12 @@
 # Deferrals
 
+## 2026-08-21 — Phase 13 run: deferred improvement findings (batch)
+**Why:** Improvement-disposition findings collected across the Phase 13 run, logged rather than fixed per the anti-gold-plating rule (in-diff improvements are deferred strict; no polishing our own new code mid-phase). Both come from Task 0's review.
+- **Unpaired backtick stripping in `parse_plan_tasks`** — tier-level normalization strips a leading and a trailing backtick independently rather than as a matched pair, so a lone stray backtick (`` standard` ``) normalizes to a valid tier instead of erroring on malformed markup. Only edge characters are touched, so a misspelled level can never become a valid TIER_MAP key; the looseness is real but low-risk, and unpaired stripping is *required* by real plans that wrap the whole `level — justification` clause in a single backtick span (2026-07-17-phase12b, task 5).
+- **Stray backtick artifact in stored justification text** — because normalization is level-only by contract, phase12b task 5's justification retains a trailing `` `. `` in parsed output. Visible downstream, harmless, and fixing it would mean normalizing justification text the contract says to leave byte-identical.
+**From:** Phase 13, Task 0 review (2026-08-21).
+**Follow-up:** revisit both if a malformed tier line ever reaches a user as a confusing error rather than a clear one. Neither justifies touching the parser again on its own.
+
 ## 2026-08-21 — Live-watcher output readability deferred until the new review loop has run
 **Why:** Phase 13 forces every `codex exec` dispatch onto `--json` (the only documented way to capture `thread.started` for session resume), so the runner must translate the event stream back into the readable `task-N-live.log` the monitor renders. That translation is required and in scope. **Redesigning what the watcher shows is not.** The operator's assessment is that the panel already reads like a debug trace and is hard to follow *today* — so the useful design input is what the new two-agent loop actually looks like in flight, which does not exist yet. Designing the render now would be guessing at a layout for a loop nobody has watched. Phase 13's bar is therefore **parity**: plain-text worker messages and command output, no raw JSON objects, existing monitor render tests green.
 **From:** Phase 13 planning (2026-08-21).
