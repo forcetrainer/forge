@@ -161,41 +161,19 @@ def build_task_checklist(plan_path, spec_path, task_number):
     return items
 
 
-def _list_tasks(lines):
-    """(number, title) for every '### Task N:' heading, in file order.
-
-    Deliberately independent of forge_plan.parse_plan_tasks: that parser also
-    validates **Tier:**, and this module needs only task identity — pulling in
-    an unrelated field's validation would make checklist generation fail on a
-    tier it has no business caring about."""
-    mask = eb.fence_mask(lines)
-    tasks = []
-    for i, line in enumerate(lines):
-        if mask[i]:
-            continue
-        m = eb.TASK_HEADING_RE.match(line)
-        if not m:
-            continue
-        tm = re.match(r"^###\s+Task\s+\d+:\s*(.*)$", line)
-        title = tm.group(1).strip() if tm else ""
-        tasks.append((int(m.group(1)), title))
-    if not tasks:
-        raise RuntimeError("no '### Task N:' headings found in plan")
-    return tasks
-
-
 def build_final_checklist(plan_path, spec_path):
     """Union of every task's **Spec:** sections + global constraints + every
     task's acceptance prose clauses + one t<N> integration item per task."""
     lines = eb.read_lines(plan_path)
     _, gc_block = eb.extract_header(lines)
-    tasks = _list_tasks(lines)
+    tasks = forge_plan.parse_plan_tasks(plan_path)
 
     items = list(_global_constraint_items(gc_block))
     seen_spec_ids = set()
     spec_lines = None
 
-    for task_number, title in tasks:
+    for task in tasks:
+        task_number, title = task.number, task.title
         task_block = eb.extract_task_block(lines, task_number)
         spec_names = eb.parse_spec_names(task_block)
         _require_spec_path(task_number, spec_names, spec_path)

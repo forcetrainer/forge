@@ -58,6 +58,23 @@ def _parse_depends(text):
     return [int(n) for n in re.findall(r"Task\s+(\d+)", text)]
 
 
+def _normalize_tier_level(raw):
+    """Strip a surrounding pair of backticks and one trailing '.' from a tier
+    LEVEL string (never the justification). The template teaches the
+    backtick-wrapped form (``**Tier:** `standard` ``) and either form may
+    also trail a sentence-ending period; both are equivalent to the bare
+    level. Period is stripped before backticks so ``` `standard`. ``` (period
+    outside the backtick pair) normalizes correctly."""
+    s = raw.strip()
+    if s.endswith("."):
+        s = s[:-1].strip()
+    if s.startswith("`"):
+        s = s[1:].strip()
+    if s.endswith("`"):
+        s = s[:-1].strip()
+    return s
+
+
 def parse_plan_tasks(plan_path):
     """Parse every ``### Task N:`` block into a Task. Raises RuntimeError naming
     the cause on a wrong-level task heading or a duplicate task number — never
@@ -107,10 +124,10 @@ def parse_plan_tasks(plan_path):
             raise RuntimeError("task {} is missing the **Tier:** line".format(num))
         if "—" in tier_raw:
             level_part, justification_part = tier_raw.split("—", 1)
-            tier = level_part.strip().lower()
+            tier = _normalize_tier_level(level_part).lower()
             tier_justification = justification_part.strip() or None
         else:
-            tier = tier_raw.strip().lower()
+            tier = _normalize_tier_level(tier_raw).lower()
             tier_justification = None
         if tier not in TIER_MAP:
             raise RuntimeError(

@@ -22,7 +22,7 @@
 - `docs/forge/specs/2026-07-16-phase7-scope-autonomy-design.md`, `docs/forge/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md`, `docs/forge/ROADMAP.md`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` (modify) — changelog pointers, phase status, lockstep 0.9.0.
 
 ### Task 0: Tier-field parsing tolerance
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_plan.py` (`parse_plan_tasks` tier-value normalization)
