@@ -121,7 +121,7 @@
 **Depends on:** nothing.
 
 ### Task 4: Checklist into packets + coverage retry
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/review-packet.py` (`--checklist PATH` → renders the checklist section into the packet)

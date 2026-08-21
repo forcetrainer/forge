@@ -96,13 +96,18 @@ def _git_diff(cwd, base):
     return proc.stdout
 
 
-def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None):
+def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
+                 checklist=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
     attempt's outstanding findings into the packet so the re-reviewer labels each
     current finding resolved/carried/new against them (Rework loop & convergence:
-    carry the finding set into the next re-review packet)."""
+    carry the finding set into the next re-review packet). ``checklist`` (a list
+    of forge_checklist.ChecklistItem, or None) threads the contract checklist
+    into the packet, rendered after the diff and before the prior-findings
+    section — omitted (None, the empty-checklist skip case) leaves the packet
+    unchanged (Contract checklist spec)."""
     with open(plan_path, "r", encoding="utf-8") as f:
         plan_text = f.read()
     block = rp.extract_task_block(plan_text, task.number)
@@ -111,23 +116,31 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None):
             "review packet: " + rp.diagnose_missing_task(plan_text, task.number, plan_path)
         )
     diff = _git_diff(cwd, base)
-    packet = rp.build_packet(block, base, diff, prior_findings=prior_findings)
+    packet = rp.build_packet(
+        block, base, diff, prior_findings=prior_findings, checklist=checklist
+    )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:
         f.write(packet)
     return path
 
 
-def _final_packet(spec_path, base, diff, run_dir, prior_findings=None):
+def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
+                   checklist=None):
     """Whole-plan final-review packet: the spec + the whole-plan ``git diff
     <base>``, assembled by review-packet.py's fence-safe builder. On a re-review
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
     attempt's outstanding fix findings into the packet so the fresh-context final
     reviewer labels each current finding resolved/carried/new against them —
-    identical to the per-task path (Final review spec: "the same loop")."""
+    identical to the per-task path (Final review spec: "the same loop").
+    ``checklist`` mirrors ``_packet_for``'s: the final contract checklist (or
+    None, the empty-checklist skip case), rendered after the diff and before
+    the prior-findings section."""
     with open(spec_path, "r", encoding="utf-8") as f:
         spec_text = f.read()
-    packet = rp.build_packet(spec_text, base, diff, prior_findings=prior_findings)
+    packet = rp.build_packet(
+        spec_text, base, diff, prior_findings=prior_findings, checklist=checklist
+    )
     path = os.path.join(run_dir, "final-review.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(packet)

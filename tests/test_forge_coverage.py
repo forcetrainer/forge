@@ -22,6 +22,13 @@ sys.path.insert(0, SCRIPTS_DIR)
 import forge_common  # noqa: E402
 import forge_dispose  # noqa: E402
 
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
+from _forge_support import (  # noqa: E402
+    forge_run, write_fake_codex, SCRIPT_PATH,
+)
+
 
 def _checklist(ids):
     return [{"id": i, "source": "spec", "text": i} for i in ids]
@@ -307,6 +314,256 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
         self.assertFalse(d_with["coverage_valid"])
         self.assertEqual(len(d_with["coverage_defects"]), 1)
         self.assertIn("spec:A", d_with["coverage_defects"][0])
+
+
+SPEC_WITH_SECTION = "# Spec\n\n## Some Section\n\nDetails.\n"
+
+# No **Spec:**, no plan **Global Constraints:**, acceptance is a bare
+# inline-code command -> build_task_checklist raises "is empty", which the
+# runner-layer skip catches (Contract checklist spec, 2026-08-21 amendment).
+PLAN_EMPTY_CHECKLIST = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `true`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+# **Spec:** + a prose acceptance clause -> a non-empty checklist, so the
+# runner validates coverage.
+PLAN_NONEMPTY_CHECKLIST = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Spec:** Some Section
+
+**Acceptance:** must handle X correctly; `true`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+
+class RunnerCoverageWiringTests(unittest.TestCase):
+    """End-to-end coverage wiring through forge-run.py's execute_task: an
+    empty checklist is a runner-level skip (receipt ``coverage_skipped``
+    True, packet unchanged, no validation, no retry); a non-empty checklist
+    is validated, with the coverage-stubbing fake codex (added to
+    _forge_support.py for this task) either auto-satisfying coverage or
+    driving the one-retry-then-contract-error path when a canned response's
+    coverage is deliberately incomplete."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-coverage-runner-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(SPEC_WITH_SECTION)
+        self.run_dir = os.path.join(self.d, "run")
+        self.log = os.path.join(self.d, "fakelog")
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        )
+
+    def _init_repo(self):
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+
+    def _plan(self, content, name="plan.md"):
+        p = os.path.join(self.d, name)
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def _run(self, plan_path, responses):
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), plan_path,
+             "--spec", self.spec, "--run-dir", self.run_dir,
+             "--codex-bin", self.fake],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+
+    def _receipt(self, task_number=1, attempt=1):
+        path = os.path.join(
+            self.run_dir, "task-{}-attempt-{}.json".format(task_number, attempt)
+        )
+        with open(path) as f:
+            return json.load(f)
+
+    def test_empty_checklist_skips_coverage_receipt_flag_set(self):
+        plan = self._plan(PLAN_EMPTY_CHECKLIST)
+        self._init_repo()
+        res = self._run(plan, [
+            {"exit": 0, "msg": ""},                      # worker
+            {"exit": 0, "msg": '{"verdict": "pass"}'},    # reviewer
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        receipt = self._receipt()
+        self.assertTrue(receipt["coverage_skipped"])
+        self.assertFalse(receipt["coverage_retry"])
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        self.assertNotIn("## Contract checklist", packet)
+
+    def test_nonempty_checklist_validated_first_try_via_fake_stub(self):
+        plan = self._plan(PLAN_NONEMPTY_CHECKLIST)
+        self._init_repo()
+        res = self._run(plan, [
+            {"exit": 0, "msg": ""},                      # worker
+            {"exit": 0, "msg": '{"verdict": "pass"}'},    # reviewer: fake auto-stubs coverage
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        receipt = self._receipt()
+        self.assertFalse(receipt["coverage_skipped"])
+        self.assertFalse(receipt["coverage_retry"])
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        self.assertIn("## Contract checklist", packet)
+        self.assertIn("spec:Some Section", packet)
+
+    def test_incomplete_coverage_triggers_one_retry_naming_missing_ids(self):
+        plan = self._plan(PLAN_NONEMPTY_CHECKLIST)
+        self._init_repo()
+        res = self._run(plan, [
+            {"exit": 0, "msg": ""},  # worker
+            # attempt 1: coverage key present but empty -> the fake only
+            # fills in a *missing* key, so this is left as-is -> every
+            # checklist id is flagged missing.
+            {"exit": 0, "msg": '{"verdict": "pass", "coverage": []}'},
+            # retry: no coverage key -> the fake auto-stubs it fully from
+            # the retry packet's (carried-over) checklist section.
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        receipt = self._receipt()
+        self.assertFalse(receipt["coverage_skipped"])
+        self.assertTrue(receipt["coverage_retry"])
+        with open(os.path.join(self.run_dir, "task-1-coverage-retry.md")) as f:
+            retry_packet = f.read()
+        self.assertIn("Coverage retry", retry_packet)
+        self.assertIn("missing coverage for checklist id(s)", retry_packet)
+
+    def test_second_invalid_coverage_is_contract_error_naming_defects(self):
+        plan = self._plan(PLAN_NONEMPTY_CHECKLIST)
+        self._init_repo()
+        res = self._run(plan, [
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": '{"verdict": "pass", "coverage": []}'},
+            {"exit": 0, "msg": '{"verdict": "pass", "coverage": []}'},
+        ])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("coverage", res.stderr.lower())
+        self.assertIn("still invalid after one retry", res.stderr)
+        self.assertIn("missing coverage for checklist id(s)", res.stderr)
+
+    def test_retry_does_not_advance_attempt_counter_or_state(self):
+        # The coverage retry must not look like a rework attempt: exactly one
+        # attempt-1 receipt, status passed, attempt == 1.
+        plan = self._plan(PLAN_NONEMPTY_CHECKLIST)
+        self._init_repo()
+        res = self._run(plan, [
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": '{"verdict": "pass", "coverage": []}'},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        receipt = self._receipt()
+        self.assertEqual(receipt["attempt"], 1)
+        self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["coverage_retry"])
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(self.run_dir, "task-1-attempt-2.json")
+            )
+        )
+
+
+class FakeCodexCoverageStubTests(unittest.TestCase):
+    """Direct exercise of the coverage-stubbing behavior added to
+    _forge_support.py's FAKE_CODEX_SRC for this task: it injects a coverage
+    array when the dispatched prompt carries a '## Contract checklist'
+    section and the canned message has none; it never overrides an explicit
+    coverage array; and it passes a response through untouched when the
+    prompt carries no checklist section at all (a worker dispatch, or a
+    reviewer packet in the empty-checklist skip case)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="fake-codex-stub-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+
+    def _invoke(self, prompt, msg):
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump([{"exit": 0, "msg": msg}], f)
+        last_msg_path = os.path.join(self.d, "last.txt")
+        env = os.environ.copy()
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        env.pop("FORGE_FAKE_LOG", None)
+        subprocess.run(
+            [sys.executable, self.fake, "exec", "--json",
+             "--output-last-message", last_msg_path, prompt],
+            check=True, capture_output=True, text=True, env=env,
+        )
+        with open(last_msg_path) as f:
+            return json.load(f)
+
+    def test_injects_coverage_when_checklist_present_and_msg_has_none(self):
+        prompt = (
+            "some preamble\n\n"
+            "## Contract checklist\n\n"
+            "- spec:A — Section A\n"
+            "- g1 — No new deps\n\n"
+            "## Prior findings\n\nirrelevant\n"
+        )
+        out = self._invoke(prompt, '{"verdict": "pass"}')
+        self.assertEqual(out["verdict"], "pass")
+        self.assertEqual(
+            sorted(e["id"] for e in out["coverage"]), ["g1", "spec:A"]
+        )
+        for entry in out["coverage"]:
+            self.assertEqual(entry["status"], "satisfied")
+            self.assertTrue(entry["evidence"].strip())
+
+    def test_passes_through_untouched_without_checklist_section(self):
+        prompt = "some preamble with no checklist section\n\n```diff\n```\n"
+        out = self._invoke(prompt, '{"verdict": "pass"}')
+        self.assertNotIn("coverage", out)
+
+    def test_does_not_override_explicit_coverage(self):
+        prompt = "## Contract checklist\n\n- spec:A — Section A\n"
+        out = self._invoke(prompt, json.dumps({
+            "verdict": "pass",
+            "coverage": [{"id": "spec:A", "status": "n/a", "evidence": "manual"}],
+        }))
+        self.assertEqual(
+            out["coverage"],
+            [{"id": "spec:A", "status": "n/a", "evidence": "manual"}],
+        )
 
 
 if __name__ == "__main__":

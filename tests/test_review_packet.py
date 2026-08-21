@@ -299,6 +299,98 @@ class ReviewPacketGitFixtureTests(unittest.TestCase):
         self.assertIn("f1", content)
         self.assertIn("f2", content)
 
+    # --- --checklist (Phase 13 Task 4) ---
+
+    def test_no_checklist_flag_output_unchanged(self):
+        # Byte-identical to pre-Task-4 behavior: omitting --checklist must not
+        # add a section or otherwise perturb the packet.
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script(
+            [self.plan_path, "1", "--base", self.commit1, "--out", out_dir]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            content = f.read()
+        expected = (
+            "### Task 1: First task\n- [ ] Done\n\n**Files:**\n"
+            "- Modify: `foo.txt`\n\n**Acceptance:** `true`\n\n"
+            "**Tier:** trivial\n\n**Depends on:** nothing\n\n"
+            "```diff\ndiff --git a/src.txt b/src.txt\n"
+            "index 2d00bd5..e5c5c55 100644\n--- a/src.txt\n+++ b/src.txt\n"
+            "@@ -1 +1,2 @@\n line one\n+line two\n```\n"
+        )
+        self.assertEqual(content, expected)
+
+    def test_checklist_flag_appends_contract_checklist_section(self):
+        checklist = [
+            {"id": "spec:A", "source": "spec", "text": "Section A must hold"},
+            {"id": "g1", "source": "global", "text": "No new deps"},
+        ]
+        checklist_path = os.path.join(self.repo_dir, "checklist.json")
+        with open(checklist_path, "w") as f:
+            json.dump(checklist, f)
+
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script(
+            [
+                self.plan_path, "1", "--base", self.commit1, "--out", out_dir,
+                "--checklist", checklist_path,
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            content = f.read()
+        self.assertIn("## Contract checklist", content)
+        self.assertIn("- spec:A — Section A must hold", content)
+        self.assertIn("- g1 — No new deps", content)
+
+    def test_checklist_and_prior_findings_ordering(self):
+        # task block -> diff -> checklist -> prior findings.
+        checklist = [{"id": "spec:A", "source": "spec", "text": "Section A"}]
+        checklist_path = os.path.join(self.repo_dir, "checklist2.json")
+        with open(checklist_path, "w") as f:
+            json.dump(checklist, f)
+        prior_findings = [{"id": "f1", "summary": "issue"}]
+        findings_path = os.path.join(self.repo_dir, "prior-findings2.json")
+        with open(findings_path, "w") as f:
+            json.dump(prior_findings, f)
+
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script(
+            [
+                self.plan_path, "1", "--base", self.commit1, "--out", out_dir,
+                "--checklist", checklist_path,
+                "--prior-findings", findings_path,
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            content = f.read()
+        task_idx = content.index("### Task 1")
+        diff_idx = content.index("```diff")
+        checklist_idx = content.index("## Contract checklist")
+        findings_idx = content.index("Prior findings")
+        self.assertLess(task_idx, diff_idx)
+        self.assertLess(diff_idx, checklist_idx)
+        self.assertLess(checklist_idx, findings_idx)
+
+    def test_checklist_bad_json_exits_nonzero(self):
+        checklist_path = os.path.join(self.repo_dir, "checklist-bad.json")
+        with open(checklist_path, "w") as f:
+            f.write("not json")
+
+        result = run_script(
+            [
+                self.plan_path, "1", "--base", self.commit1,
+                "--checklist", checklist_path,
+            ]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(checklist_path, result.stderr)
+
     def test_prior_findings_bad_json_exits_nonzero(self):
         findings_path = os.path.join(self.repo_dir, "prior-findings.json")
         with open(findings_path, "w") as f:

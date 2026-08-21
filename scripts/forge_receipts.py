@@ -127,19 +127,28 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     return path
 
 
-def write_final_review_receipt(run_dir, verdict, halt_reason=None):
+def write_final_review_receipt(run_dir, verdict, halt_reason=None,
+                                coverage_skipped=None, coverage_retry=None):
     """Persist the plan-level final-review verdict alongside the task receipts.
     ``halt_reason`` (the convergence loop's disposition-matrix class —
     scope-decision | regression | stuck | backstop | gate) is additive and
     optional, like the per-task receipt's field of the same name — omitted
     when None so an in-progress or passed final review's receipt is unchanged,
     and read back by `forge_status.read_run_state` for an
-    ``escalated-final-review`` run's halt class."""
+    ``escalated-final-review`` run's halt class. ``coverage_skipped``/
+    ``coverage_retry`` mirror the per-task receipt's contract-checklist
+    fields (Contract checklist spec) — both additive and optional, omitted
+    when None so a caller that doesn't pass them leaves the receipt
+    unchanged."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "final-review.json")
     data = verdict_to_dict(verdict)
     if halt_reason is not None:
         data["halt_reason"] = halt_reason
+    if coverage_skipped is not None:
+        data["coverage_skipped"] = coverage_skipped
+    if coverage_retry is not None:
+        data["coverage_retry"] = coverage_retry
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return path

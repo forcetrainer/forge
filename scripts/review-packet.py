@@ -4,7 +4,7 @@ self-contained review packet for a reviewer.
 
 Usage:
     review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
-        [--prior-findings <path>]
+        [--prior-findings <path>] [--checklist <path>]
 
 Never emits a silently thin packet: any failure to locate the task block or
 to run git exits nonzero with a message on stderr.
@@ -13,6 +13,11 @@ to run git exits nonzero with a message on stderr.
 (a persisted finding_to_dict() list replays straight through); when given,
 the packet gains a section instructing the reviewer to label each current
 finding resolved/carried/new against them. Omitted, the packet is unchanged.
+
+``--checklist`` points at a JSON file of checklist items (forge_checklist.py's
+``--format json`` output: a list of ``{"id", "source", "text"}``); when given,
+the packet gains a ``## Contract checklist`` section, appended after the diff
+and before any prior-findings section. Omitted, the packet is unchanged.
 
 The diff is ``git diff <base>``: committed, staged, and unstaged *tracked*
 changes — untracked files are invisible to it. Commit (or at least ``git
@@ -117,6 +122,20 @@ def diagnose_missing_task(text, task_number, plan_path):
     return "Task {} not found in {}".format(task_number, plan_path)
 
 
+def build_checklist_section(checklist):
+    """Render a '## Contract checklist' markdown section, one line per item
+    as '- <id> — <text>' — mirrors forge_checklist.render_section's format.
+    ``checklist`` items only need attribute access to ``id``/``text``; the
+    CLI (main(), below) constructs actual forge_checklist.ChecklistItem
+    instances from ``--checklist``'s JSON via a deferred import, and an
+    in-process caller (forge-run.py) passes forge_checklist.ChecklistItem
+    instances directly — one implementation, imported by both callers
+    (Contract checklist spec: "Codex's review-packet.py imports it")."""
+    lines = ["## Contract checklist", ""]
+    lines.extend("- {} — {}".format(it.id, it.text) for it in checklist)
+    return "\n".join(lines) + "\n"
+
+
 def build_prior_findings_section(prior_findings):
     """Render the prior attempt's findings (as loaded from --prior-findings)
     into a packet section instructing the reviewer to label each current
@@ -133,7 +152,7 @@ def build_prior_findings_section(prior_findings):
     )
 
 
-def build_packet(task_block, base, diff_output, prior_findings=None):
+def build_packet(task_block, base, diff_output, prior_findings=None, checklist=None):
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -148,6 +167,8 @@ def build_packet(task_block, base, diff_output, prior_findings=None):
     fence = "`" * max(3, longest_run + 1)
     diff_section = fence + "diff\n" + diff_body + fence + "\n"
     packet = task_block.rstrip("\n") + "\n\n" + diff_section
+    if checklist is not None:
+        packet += "\n" + build_checklist_section(checklist)
     if prior_findings is not None:
         packet += "\n" + build_prior_findings_section(prior_findings)
     return packet
@@ -165,6 +186,13 @@ def main(argv=None):
         metavar="PATH",
         help="JSON file of the prior attempt's findings; appends a "
         "resolved/carried/new labeling section to the packet",
+    )
+    parser.add_argument(
+        "--checklist",
+        default=None,
+        metavar="PATH",
+        help="JSON file of checklist items (forge_checklist.py --format json "
+        "output); appends a '## Contract checklist' section to the packet",
     )
     args = parser.parse_args(argv)
 
@@ -189,6 +217,44 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 1
+
+    checklist = None
+    if args.checklist is not None:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                raw_checklist = json.load(f)
+        except OSError as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        except json.JSONDecodeError as e:
+            print(
+                "error: checklist file {} is not valid JSON: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        # Deferred import: main() runs only at CLI-invocation time, long
+        # after forge_common has finished its sibling-load sequence (which
+        # loads this module as `rp` *before* forge_common finishes defining
+        # the names forge_checklist needs at import time, via forge_plan —
+        # TIER_MAP/ALLOWED_EFFORTS/Task). A module-level import here would
+        # hit that circular-import hazard; a deferred one never does.
+        SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+        if SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, SCRIPTS_DIR)
+        import forge_checklist
+        checklist = [
+            forge_checklist.ChecklistItem(
+                id=it["id"], source=it["source"], text=it["text"]
+            )
+            for it in raw_checklist
+        ]
 
     try:
         with open(args.plan, "r", encoding="utf-8") as f:
@@ -231,7 +297,9 @@ def main(argv=None):
         print(result.stderr, end="", file=sys.stderr)
         return 1
 
-    packet = build_packet(task_block, args.base, result.stdout, prior_findings)
+    packet = build_packet(
+        task_block, args.base, result.stdout, prior_findings, checklist
+    )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()
     try:

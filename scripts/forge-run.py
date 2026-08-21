@@ -56,6 +56,7 @@ REPO_ROOT = os.path.dirname(SCRIPTS_DIR)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+import forge_checklist
 import forge_common
 import forge_dispose
 import forge_git
@@ -387,6 +388,84 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
     )
 
 
+# --- contract checklist + coverage retry ------------------------------------
+
+
+def _checklist_or_skip(builder, *args):
+    """Call a forge_checklist builder (build_task_checklist / build_final_
+    checklist). An empty checklist is a *runner-level* skip, not an error: a
+    task with no ``**Spec:**``, no plan ``**Global Constraints:**``, and only
+    command-only ``**Acceptance:**`` clauses is a legal plan (both fields are
+    optional) with no contract material for a reviewer to cover — forcing an
+    error there would make legal plans unexecutable (Contract checklist spec,
+    2026-08-21 amendment). forge_checklist.py's own CLI/library contract is
+    unchanged: it still raises on an empty checklist; this only catches that
+    specific raise at the runner boundary. Any other RuntimeError (an
+    unresolvable ``**Spec:**`` name, a task declaring ``**Spec:**`` with no
+    ``--spec`` given) is a genuine contract error and still propagates
+    fail-loud. Returns ``(checklist_or_None, skipped)``."""
+    try:
+        return builder(*args), False
+    except RuntimeError as e:
+        if "is empty" in str(e):
+            return None, True
+        raise
+
+
+def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
+    """Build the coverage-retry packet: the original packet plus a defects
+    note naming exactly what's missing/unbacked, so the re-dispatched
+    reviewer fixes only its coverage array. Written to a distinct path so the
+    original packet (and its receipt) are untouched."""
+    with open(packet_path, "r", encoding="utf-8") as f:
+        packet = f.read()
+    lines = [
+        "",
+        "",
+        "## Coverage retry — your prior verdict's coverage array was invalid",
+        "",
+        "Fix these defects and resubmit your full verdict (unchanged apart "
+        "from the corrected coverage array, unless a defect requires a real "
+        "correction):",
+        "",
+    ]
+    lines.extend("- {}".format(d) for d in defects)
+    packet = packet.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    path = os.path.join(run_dir, "{}-coverage-retry.md".format(label))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(packet)
+    return path
+
+
+def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label):
+    """Dispatch a review and validate its verdict's coverage against
+    ``checklist``. ``checklist`` falsy (None or empty — the empty-checklist
+    skip case) skips validation entirely: no retry, coverage untouched
+    (Contract checklist spec). Otherwise: validate the first verdict; on
+    defects, re-dispatch **exactly once** with the defects named in the
+    retry packet's prompt; a second invalid verdict is a contract error
+    (raised, uncaught — same class as an unparseable verdict, never a halt).
+    This is not a rework attempt: the caller must not advance the
+    convergence attempt counter or touch ConvergenceState for the retry.
+    Returns ``(verdict, coverage_retried)``."""
+    verdict = dispatch_call(packet_path)
+    if not checklist:
+        return verdict, False
+    defects = forge_dispose.validate_coverage(verdict, checklist)
+    if not defects:
+        return verdict, False
+    retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
+    verdict = dispatch_call(retry_path)
+    defects = forge_dispose.validate_coverage(verdict, checklist)
+    if defects:
+        raise RuntimeError(
+            "reviewer verdict coverage still invalid after one retry: {}".format(
+                "; ".join(defects)
+            )
+        )
+    return verdict, True
+
+
 # --- per-task execution & plan loop -----------------------------------------
 
 
@@ -471,6 +550,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         review_verdict = None
         findings = []       # classified Finding objects for this attempt
         cause = None        # short human-readable cause for an execution failure
+        coverage_skipped = None  # None: no review this attempt (unchanged)
+        coverage_retry = False
 
         if worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
@@ -499,12 +580,19 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     "repository".format(task.number)
                 )
             update_run_progress(run_dir, task.number, "review")
+            checklist, coverage_skipped = _checklist_or_skip(
+                forge_checklist.build_task_checklist, plan_path, spec_path,
+                task.number,
+            )
             packet_path = _packet_for(
                 task, plan_path, run_dir, review_base, cwd,
-                prior_findings=prior_findings or None,
+                prior_findings=prior_findings or None, checklist=checklist,
             )
-            verdict = dispatch_reviewer(
-                task, packet_path, codex_bin, run_dir, threads, timeout=timeout
+            verdict, coverage_retry = _review_with_coverage(
+                lambda p: dispatch_reviewer(
+                    task, p, codex_bin, run_dir, threads, timeout=timeout
+                ),
+                packet_path, checklist, run_dir, "task-{}".format(task.number),
             )
             classify_findings(verdict, _git_diff(cwd, review_base))
             review_verdict = verdict_to_dict(verdict)
@@ -538,6 +626,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             "halt_reason": halt_reason,
             "outstanding_findings": outstanding,
             "repair_task": repair_task,
+            "coverage_skipped": coverage_skipped,
+            "coverage_retry": coverage_retry,
         }
         write_receipt(run_dir, task, attempt, receipt)
 
@@ -699,7 +789,8 @@ def _git_commit_final_review_fixes(cwd):
 
 
 def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
-                          autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT):
+                          autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
+                          plan_path=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -713,13 +804,20 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     dispatch_final_review_fix call scoped to the outstanding ``fix`` findings — a
     fix-dispatch crash/timeout preempts the re-review as an implicit
     execution-failure finding, exactly like ``execute_task``. Halt carries the
-    drafted ``repair_task``."""
+    drafted ``repair_task``. ``plan_path`` (optional; omitted -> no checklist
+    generated, coverage validation skipped) is required to build the final
+    contract checklist (the union of every task's Spec/acceptance clauses +
+    integration items) — a caller with no plan handy (e.g. a unit test
+    exercising the loop in isolation) still gets the loop's pre-Task-4
+    behavior unchanged."""
     if threads is None:
         threads = {}
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
     prior_findings = []  # outstanding reviewer fix findings (dicts) -> next packet
     applied_fix = False
+    coverage_skipped = None  # carries forward across a fix-dispatch-only attempt
+    coverage_retry = False
     attempt = 0
     while True:
         attempt += 1
@@ -750,15 +848,26 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
         if exec_ok:
             update_run_progress(run_dir, None, "final-review")
             diff = _git_diff(cwd, run_base)
+            checklist = None
+            if plan_path is not None:
+                checklist, coverage_skipped = _checklist_or_skip(
+                    forge_checklist.build_final_checklist, plan_path, spec_path,
+                )
             packet_path = _final_packet(
                 spec_path, run_base, diff, run_dir,
-                prior_findings=prior_findings or None,
+                prior_findings=prior_findings or None, checklist=checklist,
             )
-            verdict = dispatch_final_review(
-                packet_path, codex_bin, run_dir, tier, threads, timeout=timeout
+            verdict, coverage_retry = _review_with_coverage(
+                lambda p: dispatch_final_review(
+                    p, codex_bin, run_dir, tier, threads, timeout=timeout
+                ),
+                packet_path, checklist, run_dir, "final",
             )
             classify_findings(verdict, diff)
-            write_final_review_receipt(run_dir, verdict)
+            write_final_review_receipt(
+                run_dir, verdict, coverage_skipped=coverage_skipped,
+                coverage_retry=coverage_retry,
+            )
             findings = verdict.findings
 
         # The final review has no acceptance command that can regress, so the
@@ -796,7 +905,10 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             # attempt 1 never has fix_findings so it always runs the `exec_ok`
             # branch that sets it; only a later fix-dispatch attempt can hit
             # `exec_ok=False`, and it carries the prior attempt's verdict forward.
-            write_final_review_receipt(run_dir, verdict, halt_reason=halt_reason)
+            write_final_review_receipt(
+                run_dir, verdict, halt_reason=halt_reason,
+                coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
+            )
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,
@@ -1190,7 +1302,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_outcome = run_final_review_loop(
                 spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
-                autofix_mode, threads, timeout=timeout,
+                autofix_mode, threads, timeout=timeout, plan_path=plan_path,
             )
             deferrals.extend(final_outcome.deferrals)
             if final_outcome.status == "escalated":

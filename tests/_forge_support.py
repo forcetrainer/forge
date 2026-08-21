@@ -31,6 +31,23 @@ _spec.loader.exec_module(forge_run)
 # ``append_file``/``append_text`` (an absolute path; a real `codex exec` worker
 # edits repo files directly, which this fake cannot do — used to exercise commit
 # discipline around a fix dispatch), and exits with the scripted code.
+#
+# Coverage stubbing (Phase 13 Task 4): REVIEW_VERDICT_INSTRUCTION now requires
+# a `coverage` array on every reviewer verdict. A canned `_pass_msg()`/
+# `_findings_msg()`-style fixture response predates that and carries none —
+# obeying it verbatim would make every fixture fail the runner's own coverage
+# validation, asserting runner behavior against a reviewer that couldn't
+# exist. So: when the dispatched prompt (the final argv element) contains a
+# '## Contract checklist' section AND the canned message parses as a JSON
+# verdict object with no `coverage` key already, the fake parses the
+# checklist ids out of the prompt (the same '- <id> — <text>' lines
+# build_checklist_section renders) and injects one `coverage` entry per id —
+# "status": "satisfied", non-empty "evidence" — before writing the message.
+# A canned message that already sets its own `coverage` (a test deliberately
+# exercising the coverage/retry path) is never touched. No checklist section
+# in the prompt (a worker dispatch, or a reviewer packet with no checklist —
+# the empty-checklist skip case), or a message that isn't a JSON verdict
+# object: passed through untouched.
 FAKE_CODEX_SRC = '''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
@@ -62,6 +79,34 @@ if resp and os.path.exists(resp):
         err = r.get("stderr", "")
         append_file = r.get("append_file")
         append_text = r.get("append_text", "")
+if msg:
+    prompt = argv[-1] if argv else ""
+    if "## Contract checklist" in prompt:
+        try:
+            obj = json.loads(msg)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and "verdict" in obj and "coverage" not in obj:
+            ids = []
+            in_section = False
+            for line in prompt.splitlines():
+                if line.strip() == "## Contract checklist":
+                    in_section = True
+                    continue
+                if in_section:
+                    if line.startswith("## "):
+                        break
+                    if line.startswith("- "):
+                        cid = line[2:].split(" \\u2014 ", 1)[0].strip()
+                        if cid:
+                            ids.append(cid)
+            if ids:
+                obj["coverage"] = [
+                    {"id": cid, "status": "satisfied",
+                     "evidence": "stub: " + cid}
+                    for cid in ids
+                ]
+                msg = json.dumps(obj)
 if sleep_s:
     time.sleep(sleep_s)
 if out:
