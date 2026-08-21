@@ -82,6 +82,8 @@ Verification laps (below) carry the **reduced** checklist — only the items ref
 
 `--json` replaces the human-readable stream `run_teed` currently tees to `task-N-live.log`, which `forge-monitor.py` renders. The runner must translate the event stream into readable lines in the live log so the monitor is unaffected. Raw JSONL is retained alongside for thread capture and debugging. **A monitor that shows JSON noise is a failed implementation of this spec.**
 
+The bar is **parity with today's live view, not improvement** — the existing output already reads like a debug trace, and redesigning it is explicitly deferred until the new loop has run a few cycles (DEFERRALS 2026-08-21). No task in this phase may spend effort on live-log readability beyond preserving what is there.
+
 ### Continuity scope and failure
 
 - Resume is scoped to **one runner invocation**. After a halt the human may hand-edit code; the persisted session's context is then stale and misleading, so re-invocation spawns cold. Thread ids are not carried across invocations.
