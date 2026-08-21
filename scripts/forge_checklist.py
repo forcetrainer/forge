@@ -71,14 +71,35 @@ def _split_global_constraints(gc_block):
     return [p.strip() for p in _SENTENCE_SPLIT_RE.split(body) if p.strip()]
 
 
+def _split_on_semicolons_outside_inline_code(text):
+    """Split ``text`` on ';', but never at a semicolon inside a single
+    backtick-quoted inline-code span (e.g. `python3 -c "import sys; ..."`) —
+    a semicolon there is part of the command, not a clause boundary."""
+    clauses = []
+    current = []
+    in_span = False
+    for ch in text:
+        if ch == "`":
+            in_span = not in_span
+            current.append(ch)
+        elif ch == ";" and not in_span:
+            clauses.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    clauses.append("".join(current))
+    return clauses
+
+
 def _split_acceptance_clauses(text):
-    """Split a task's **Acceptance:** text on ';', dropping any clause whose
-    content is solely an inline-code command — already executed
-    deterministically by the acceptance runner, dead checklist weight."""
+    """Split a task's **Acceptance:** text on ';' outside inline-code spans,
+    dropping any clause whose content is solely an inline-code command —
+    already executed deterministically by the acceptance runner, dead
+    checklist weight."""
     if not text:
         return []
     kept = []
-    for clause in text.split(";"):
+    for clause in _split_on_semicolons_outside_inline_code(text):
         clause = clause.strip()
         if not clause:
             continue

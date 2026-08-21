@@ -1213,11 +1213,6 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             )
             review_attempts += 1
             classify_findings(verdict, diff)
-            write_final_review_receipt(
-                run_dir, verdict, coverage_skipped=coverage_skipped,
-                coverage_retry=coverage_retry,
-                resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
-            )
             findings = verdict.findings
 
         # The final review has no acceptance command that can regress, so the
@@ -1241,6 +1236,20 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
         repair_task = halted[0].repair_task if halted else None
         outstanding = [f.summary for f in findings] if action == "halt" else []
 
+        # Persist this attempt's state onto the final-review receipt
+        # unconditionally — including an `exec_ok=False` attempt whose fix
+        # dispatch itself crashed/timed out (no review this attempt) — matching
+        # execute_task's unconditional per-attempt receipt write (Receipts
+        # spec). `verdict` is always bound by here: attempt 1 never has
+        # fix_findings so it always runs the `exec_ok` branch that sets it;
+        # only a later fix-dispatch attempt can hit `exec_ok=False`, and it
+        # carries the prior attempt's verdict forward.
+        write_final_review_receipt(
+            run_dir, verdict, halt_reason=halt_reason if action == "halt" else None,
+            coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
+            resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
+        )
+
         if action == "pass":
             if applied_fix:
                 _git_commit_final_review_fixes(cwd)
@@ -1248,18 +1257,6 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 status="passed", attempts=attempt, summary="", deferrals=deferrals
             )
         if action == "halt":
-            # Persist the halt-reason class onto the final-review receipt itself
-            # (not just this in-memory TaskOutcome) — `--status` reads run.json +
-            # receipts only, exactly like a per-task halt's receipt-carried
-            # `halt_reason` (Receipts spec). `verdict` is always bound by here:
-            # attempt 1 never has fix_findings so it always runs the `exec_ok`
-            # branch that sets it; only a later fix-dispatch attempt can hit
-            # `exec_ok=False`, and it carries the prior attempt's verdict forward.
-            write_final_review_receipt(
-                run_dir, verdict, halt_reason=halt_reason,
-                coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
-                resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
-            )
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,

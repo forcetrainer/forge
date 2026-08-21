@@ -135,6 +135,51 @@ class ForgeChecklistTests(unittest.TestCase):
         acceptance_items = [it for it in items if it.source == "acceptance"]
         self.assertEqual(acceptance_items, [])
 
+    def test_semicolon_inside_inline_code_span_does_not_split(self):
+        text = "Run `python3 -c \"import sys; print(1)\"` and confirm output"
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(len(clauses), 1)
+        self.assertEqual(clauses[0], text)
+
+    def test_semicolons_outside_inline_code_spans_still_split(self):
+        text = "`cmd one` runs clean; `cmd two` also runs clean"
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(clauses, ["`cmd one` runs clean", "`cmd two` also runs clean"])
+
+    def test_clause_solely_inline_code_with_internal_semicolon_still_dropped(self):
+        text = "`python3 -c \"a=1; b=2\"`"
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(clauses, [])
+
+    def test_clause_mixing_prose_and_code_with_internal_semicolon_kept(self):
+        text = "`python3 -c \"a=1; b=2\"` succeeds"
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(clauses, ['`python3 -c "a=1; b=2"` succeeds'])
+
+    def test_multiple_inline_code_spans_on_one_line(self):
+        text = "`cmd; with; semis` passes; and `other; cmd` also passes"
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(
+            clauses,
+            ["`cmd; with; semis` passes", "and `other; cmd` also passes"],
+        )
+
+    def test_task0_style_multiline_acceptance_no_fragments(self):
+        # Regression for the f1 bug report: sys.path.insert(0,'scripts')
+        # inside a backtick command must not become clause fragments.
+        text = (
+            "`python3 -c \"import sys; sys.path.insert(0,'scripts')\"` succeeds; "
+            "second real clause of prose"
+        )
+        clauses = fc._split_acceptance_clauses(text)
+        self.assertEqual(
+            clauses,
+            [
+                '`python3 -c "import sys; sys.path.insert(0,\'scripts\')"` succeeds',
+                "second real clause of prose",
+            ],
+        )
+
     def test_clause_mixing_prose_and_code_included(self):
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
         by_id = {it.id: it for it in items}

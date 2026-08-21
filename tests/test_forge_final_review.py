@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from _forge_support import *  # noqa: F401,F403
 
@@ -455,6 +456,52 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         with open(os.path.join(self.run_dir, "final-review.json")) as f:
             receipt = json.load(f)
         self.assertTrue(receipt["resume_fallback"])
+
+    def test_fix_dispatch_resume_and_cold_fallback_both_crash_still_writes_receipt(self):
+        # A fixer resume that fails, falls back cold, and the cold fallback
+        # ALSO crashes (exec_ok=False) with convergence resolving to rework
+        # (not halt) must still record that attempt's state — matching
+        # execute_task's unconditional per-attempt receipt write — rather
+        # than silently dropping the resume_fallback flag for that attempt.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        f1 = os.path.join(self.d, "f1.txt")
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "first issue", contract_ref="spec:Alpha section",
+            ), "stdout": _stream("th-rev1")},                        # a1 review (discovery)
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "PARTIAL\n",
+             "stdout": _stream("th-fix1")},                           # a2 fix (cold)
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "second issue", id="f2", contract_ref="spec:Alpha section",
+            ), "stdout": _stream("th-rev1")},                        # a2 review (verification) -> still fix
+            {"exit": 1, "msg": ""},                                   # a3 fix resume -> crash
+            {"exit": 1, "msg": ""},                                   # a3 fix cold fallback -> crash too
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "FINAL\n"},  # a4 fix (cold, thread lost)
+            {"exit": 0, "msg": _pass_msg()},                          # a4 review (verification) -> pass
+        ])
+        threads = {}
+        calls = []
+        real_write = forge_run.write_final_review_receipt
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs)
+            return real_write(*args, **kwargs)
+
+        with mock.patch.object(
+            forge_run, "write_final_review_receipt", side_effect=spy,
+        ):
+            outcome = forge_run.run_final_review_loop(
+                self.spec, run_base, self.run_dir, self.fake, self.d,
+                "standard", "auto", threads, plan_path=plan,
+            )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(outcome.attempts, 4)
+        # One receipt write per attempt (1, 2, 3, 4) — attempt 3 is the
+        # double-crash (exec_ok=False, rework) attempt that was previously
+        # dropped entirely.
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(calls[2]["resume_fallback"])
 
     def test_halt_payload_and_repair_task_unchanged(self):
         run_base = self._init_repo_with_task_work()
