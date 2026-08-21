@@ -125,4 +125,3 @@
 - Full-suite close-out after all tasks: `python3 -m pytest -q` green, then the branch-finishing preferences (CLAUDE.md).
 - This plan touches the forge plugin itself — after merge, `claude plugin update forge@forge` + restart to load 0.8.0.
 - Terminal doc-sync on the Claude path is intentionally **not** in this plan (DEFERRALS 2026-07-17 — folded into the coming doc revamp).
-</content>
