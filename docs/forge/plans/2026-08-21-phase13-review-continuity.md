@@ -96,7 +96,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: `--json` dispatch, thread capture, live-log parity
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`--json` on every `codex exec` argv, event-stream parsing, `_render_event_line`, thread persistence in `run.json`)

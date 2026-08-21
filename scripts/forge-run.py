@@ -83,6 +83,7 @@ from forge_common import (  # noqa: F401
     eb,
     finding_to_dict,
     rp,
+    run_json_teed,
     run_teed,
     verdict_to_dict,
 )
@@ -157,14 +158,59 @@ def contract_preamble(tier):
     return text.strip()
 
 
-def dispatch_worker(task, brief_path, codex_bin, run_dir, effort_override=None,
-                     timeout=DEFAULT_TIMEOUT):
+def _render_event_line(event):
+    """Map one ``codex exec --json`` event to a plain-text ``task-N-live.log``
+    line, or ``None`` for an event with no textual content to show. Only
+    ``item.completed`` events carry renderable text (the terminal state of one
+    output item — ``item.started``/``item.updated`` are progress deltas on the
+    same item, and rendering those too would duplicate the same text); every
+    other event type here (``thread.started``, ``turn.started``,
+    ``turn.completed``, ``turn.failed``, and any other control/bookkeeping
+    event) is control-only and renders nothing — that is how a JSONL event
+    stream becomes a live log with **zero raw JSON object lines** (the parity
+    bar this function exists to meet, not an improvement over the old
+    human-readable stream it replaces)."""
+    if not isinstance(event, dict):
+        return None
+    etype = event.get("type")
+    if etype == "item.completed":
+        item = event.get("item") or {}
+        item_type = item.get("item_type") or item.get("type")
+        if item_type == "command_execution":
+            lines = []
+            command = item.get("command")
+            if command:
+                lines.append("$ {}".format(command))
+            output = item.get("aggregated_output")
+            if output:
+                lines.append(output.rstrip("\n"))
+            return "\n".join(lines) if lines else None
+        # agent_message, reasoning, file_change, and any other item type this
+        # runner doesn't specifically special-case: fall back to its own `text`
+        # field when present (still zero raw JSON — a text field is a string).
+        text = item.get("text")
+        return text if text else None
+    if etype == "error":
+        message = event.get("message")
+        return "error: {}".format(message) if message else None
+    return None
+
+
+def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
+                     effort_override=None, timeout=DEFAULT_TIMEOUT):
     """One ``codex exec`` worker process, tier-pinned model/effort (``effort_
     override`` replaces only the effort, never the model, for a per-task
     ``--effort N=LEVEL`` bump). Prompt = contract preamble + brief. Returns the
     exit code, last message, and the exact argv emitted. A hung process is
     killed at ``timeout`` seconds and reported as ``timed_out=True`` — the
-    caller treats that exactly like a failed iteration, never hangs the run."""
+    caller treats that exactly like a failed iteration, never hangs the run.
+    Dispatched with ``--json`` (never ``--ephemeral``); the captured
+    ``thread_id`` (Codex mechanics spec) is written into ``threads`` under this
+    task's worker role and also carried on the returned ``WorkerResult``.
+    ``threads`` is optional — omitted (or None), a fresh dict is used and the
+    captured id is simply not persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -176,6 +222,7 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, effort_override=None,
     argv = [
         codex_bin,
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
@@ -185,15 +232,28 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, effort_override=None,
         prompt,
     ]
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    events_path = os.path.join(run_dir, "task-{}-worker-events.jsonl".format(task.number))
     header = "── worker · codex exec · {} · {} ──".format(model, effort)
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line,
+    )
+    role = "task-{}-worker".format(task.number)
+    if result.thread_id:
+        threads[role] = result.thread_id
     if result.timed_out:
-        return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
+        return WorkerResult(
+            exit_code=None, last_message="", argv=argv, timed_out=True,
+            thread_id=result.thread_id,
+        )
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
             last_message = f.read()
-    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
+    return WorkerResult(
+        exit_code=result.exit_code, last_message=last_message, argv=argv,
+        thread_id=result.thread_id,
+    )
 
 
 def run_acceptance(task, cwd, live_path=None):
@@ -220,7 +280,8 @@ def run_acceptance(task, cwd, live_path=None):
 
 
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
-                           live_path, header, timeout=DEFAULT_TIMEOUT):
+                           live_path, events_path, header, role, threads,
+                           timeout=DEFAULT_TIMEOUT):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
     Verdict. Fail-loud on a crashed reviewer, a timed-out reviewer, or an
@@ -230,13 +291,16 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     and the reviewer's own exit code is checked (unlike a worker crash, a
     reviewer crash yields no verdict to judge, so it halts the run rather than
     consuming a rework iteration). A reviewer that hangs past ``timeout`` is
-    handled the same way — it also yields no verdict to judge."""
+    handled the same way — it also yields no verdict to judge. Dispatched with
+    ``--json`` (never ``--ephemeral``); the captured ``thread_id`` (Codex
+    mechanics spec) is written into ``threads`` under ``role``."""
     with open(packet_path, "r", encoding="utf-8") as f:
         packet = f.read()
     prompt = preamble + "\n\n" + REVIEW_VERDICT_INSTRUCTION + "\n\n" + packet
     argv = [
         codex_bin,
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
@@ -247,15 +311,20 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line,
+    )
+    if result.thread_id:
+        threads[role] = result.thread_id
     if result.timed_out:
         raise RuntimeError(
             "reviewer process ({} at effort {}) timed out after {}s without a "
             "usable verdict".format(model, effort, timeout)
         )
     if result.exit_code != 0:
-        # The stderr tail survives teeing (stderr is merged into the tee'd
-        # stream), so a crashed reviewer still names its cause.
+        # The raw-stream tail survives (a non-JSON line is still teed into it),
+        # so a crashed reviewer still names its cause.
         stderr_tail = (result.tail or "").strip()[:300]
         raise RuntimeError(
             "reviewer process ({} at effort {}) exited {} without a usable "
@@ -273,35 +342,48 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     return parse_verdict(last_message)
 
 
-def dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=DEFAULT_TIMEOUT):
+def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
+                       timeout=DEFAULT_TIMEOUT):
     """Per-task reviewer via ``codex exec`` — fresh context at the *same tier as
     the task it reviews* (routed by TIER_MAP[task.tier]; reviewer strength never
     escalates past the task's own tier). Preamble = the tier agent's review
-    paragraph. Returns the parsed Verdict."""
+    paragraph. Returns the parsed Verdict. ``threads`` is optional — omitted
+    (or None), a fresh dict is used and the captured thread id is not
+    persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[task.tier]
     preamble = contract_preamble(task.tier)
     last_msg_path = os.path.join(run_dir, "task-{}-review-last.txt".format(task.number))
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    events_path = os.path.join(run_dir, "task-{}-reviewer-events.jsonl".format(task.number))
     header = "── review · codex exec · {} · {} ──".format(model, effort)
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
-        live_path, header, timeout=timeout,
+        live_path, events_path, header, "task-{}-reviewer".format(task.number),
+        threads, timeout=timeout,
     )
 
 
-def dispatch_final_review(packet_path, codex_bin, run_dir, tier, timeout=DEFAULT_TIMEOUT):
+def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
+                          timeout=DEFAULT_TIMEOUT):
     """Whole-plan final review: one ``codex exec`` call at ``tier`` (TIER_MAP[tier]
     — the plan's highest task tier, not a pinned ceiling) with that tier's
     contract preamble against the whole-plan diff + spec. Returns the parsed
-    Verdict; the header records the resolved model+effort."""
+    Verdict; the header records the resolved model+effort. ``threads`` is
+    optional — omitted (or None), a fresh dict is used and the captured
+    thread id is not persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
     last_msg_path = os.path.join(run_dir, "final-review-last.txt")
     live_path = os.path.join(run_dir, "final-review-live.log")
+    events_path = os.path.join(run_dir, "final-reviewer-events.jsonl")
     header = "── final review · codex exec · {} · {} ──".format(model, effort)
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
-        live_path, header, timeout=timeout,
+        live_path, events_path, header, "final-reviewer", threads, timeout=timeout,
     )
 
 
@@ -339,7 +421,7 @@ def _execution_failure_finding(detail):
     )
 
 
-def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
+def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                   effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
@@ -352,7 +434,10 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     regression (green->red) and the backstop. ``autofix_mode`` ``gate``
     short-circuits any reviewer finding to a halt. ``effort_override`` (from a
     per-task ``--effort N=LEVEL`` CLI flag) replaces only this task's worker
-    effort, never the reviewer's."""
+    effort, never the reviewer's. ``threads`` is the run-wide per-role
+    ``codex exec`` session-id map (Codex mechanics spec); this task's worker
+    and reviewer dispatches write their captured thread ids into it in
+    place."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -374,7 +459,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         )
         update_run_progress(run_dir, task.number, "worker")
         worker = dispatch_worker(
-            task, brief_path, codex_bin, run_dir,
+            task, brief_path, codex_bin, run_dir, threads,
             effort_override=effort_override, timeout=timeout,
         )
         update_run_progress(run_dir, task.number, "acceptance")
@@ -418,7 +503,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
                 task, plan_path, run_dir, review_base, cwd,
                 prior_findings=prior_findings or None,
             )
-            verdict = dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=timeout)
+            verdict = dispatch_reviewer(
+                task, packet_path, codex_bin, run_dir, threads, timeout=timeout
+            )
             classify_findings(verdict, _git_diff(cwd, review_base))
             review_verdict = verdict_to_dict(verdict)
             findings = verdict.findings
@@ -517,13 +604,20 @@ def _final_review_fix_brief(spec_path, diff, findings, run_dir, attempt):
     return brief_path
 
 
-def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt,
+def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, threads=None,
                               timeout=DEFAULT_TIMEOUT):
     """Final-review fix dispatch: one ``codex exec`` call scoped to the
     outstanding ``fix`` findings against the whole-plan diff — the final-review
     "worker" (Final review spec), never a full task brief re-dispatch. Same call
     shape as dispatch_worker (contract preamble + prompt, --output-last-message,
-    timeout-bounded); tier = the plan's highest task tier."""
+    timeout-bounded); tier = the plan's highest task tier. Dispatched with
+    ``--json`` (never ``--ephemeral``); the captured ``thread_id`` is written
+    into ``threads`` under the ``final-fixer`` role (shared across every
+    fix-dispatch attempt in this run, like the live/events files below).
+    ``threads`` is optional — omitted (or None), a fresh dict is used and the
+    captured id is not persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
     with open(brief_path, "r", encoding="utf-8") as f:
@@ -535,6 +629,7 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt,
     argv = [
         codex_bin,
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
@@ -544,15 +639,27 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt,
         prompt,
     ]
     live_path = os.path.join(run_dir, "final-review-live.log")
+    events_path = os.path.join(run_dir, "final-fixer-events.jsonl")
     header = "── final-review fix · codex exec · {} · {} ──".format(model, effort)
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line,
+    )
+    if result.thread_id:
+        threads["final-fixer"] = result.thread_id
     if result.timed_out:
-        return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
+        return WorkerResult(
+            exit_code=None, last_message="", argv=argv, timed_out=True,
+            thread_id=result.thread_id,
+        )
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
             last_message = f.read()
-    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
+    return WorkerResult(
+        exit_code=result.exit_code, last_message=last_message, argv=argv,
+        thread_id=result.thread_id,
+    )
 
 
 def _git_commit_final_review_fixes(cwd):
@@ -592,18 +699,23 @@ def _git_commit_final_review_fixes(cwd):
 
 
 def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
-                          autofix_mode, timeout=DEFAULT_TIMEOUT):
+                          autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
     edits are left uncommitted, so each re-review's diff simply accumulates them;
     a single ``fix: final-review`` commit lands once the loop converges to pass,
-    only if a fix was ever applied (Commit discipline). Attempt 1 is review-only
-    (nothing to fix yet); from attempt 2 on, the "worker" is a
+    only if a fix was ever applied (Commit discipline). ``threads`` is the
+    run-wide per-role session-id map; the final reviewer and fix dispatches
+    write their captured thread ids into it in place. Optional — omitted (or
+    None), a fresh dict is used and no caller can see the captured ids. Attempt
+    1 is review-only (nothing to fix yet); from attempt 2 on, the "worker" is a
     dispatch_final_review_fix call scoped to the outstanding ``fix`` findings — a
     fix-dispatch crash/timeout preempts the re-review as an implicit
     execution-failure finding, exactly like ``execute_task``. Halt carries the
     drafted ``repair_task``."""
+    if threads is None:
+        threads = {}
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
     prior_findings = []  # outstanding reviewer fix findings (dicts) -> next packet
@@ -621,7 +733,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 spec_path, diff, fix_findings, run_dir, attempt
             )
             worker = dispatch_final_review_fix(
-                brief_path, codex_bin, run_dir, tier, attempt, timeout=timeout
+                brief_path, codex_bin, run_dir, tier, attempt, threads, timeout=timeout
             )
             applied_fix = True
             if worker.timed_out:
@@ -643,7 +755,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 prior_findings=prior_findings or None,
             )
             verdict = dispatch_final_review(
-                packet_path, codex_bin, run_dir, tier, timeout=timeout
+                packet_path, codex_bin, run_dir, tier, threads, timeout=timeout
             )
             classify_findings(verdict, diff)
             write_final_review_receipt(run_dir, verdict)
@@ -835,7 +947,11 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
 
     A dispatch that crashes or times out also halts with the cause named — it
     produced no usable result, and silently treating that as "no drift" would
-    mask the failure (fail-loud, like a reviewer crash)."""
+    mask the failure (fail-loud, like a reviewer crash). Dispatched with
+    ``--json`` (never ``--ephemeral``) like every other stage; the doc-sync
+    stage has no role in ``run.json``'s ``threads`` map (Interface: worker |
+    reviewer | final-reviewer | final-fixer only) — it is terminal and never
+    resumed, so its captured thread id is discarded rather than persisted."""
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
     brief_path = _doc_sync_brief(spec_path, diff, run_dir)
@@ -846,6 +962,7 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     argv = [
         codex_bin,
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
@@ -857,9 +974,13 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior stage's message
     live_path = os.path.join(run_dir, "doc-sync-live.log")
+    events_path = os.path.join(run_dir, "doc-sync-events.jsonl")
     header = "── doc-sync · codex exec · {} · {} ──".format(model, effort)
     update_run_progress(run_dir, None, "doc-sync")
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line,
+    )
     if result.timed_out:
         return DocSyncResult(
             status="halt",
@@ -904,7 +1025,11 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     orchestrator does, at completion). ``effort_overrides`` (``{task_number:
     level}``, from repeatable ``--effort N=LEVEL``) must reference only task
     numbers present in the plan — an unknown number raises naming the cause.
-    ``timeout`` bounds every worker and reviewer ``codex exec`` call."""
+    ``timeout`` bounds every worker and reviewer ``codex exec`` call.
+    ``run.json``'s ``threads`` map (Codex mechanics / Receipts spec) is reset to
+    empty at the start of every invocation — including a resume — since a
+    persisted session may be stale once a halt lets a human hand-edit code; a
+    thread id is never carried across runner invocations, only within one."""
     # Clean-tree precondition (every invocation, first run and resume): commit
     # discipline only yields clean per-task/whole-plan boundaries if the tree
     # starts clean. Checked before creating the run dir or `.forge/` gitignore so
@@ -970,13 +1095,18 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # DEFERRALS.md at completion — the runner never touches that curated doc).
     deferrals = []
     doc_sync_record = None
+    # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at
+    # invocation start (never read back from a prior run.json), populated in
+    # place by dispatch_worker/_dispatch_review_call/dispatch_final_review_fix as
+    # the run proceeds, and rewritten into run.json alongside every other field.
+    threads = {}
 
     # Incremental run.json: write `running` before the first task so --status/the
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
     # each passed task so live per-task progress is visible. base_commit rides
     # along so a resume still reads it; started_at/pid feed the monitor.
     write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
-                   started_at=run_started, pid=run_pid)
+                   started_at=run_started, pid=run_pid, threads=threads)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -1008,9 +1138,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # it completes).
         summary.update({"status": "running", "started_at": task_started})
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads)
         outcome = execute_task(
-            task, plan_path, spec_path, run_dir, codex_bin, cwd,
+            task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
             autofix_mode=autofix_mode,
         )
@@ -1031,7 +1161,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             summary["commit"] = _git_commit_task(cwd, task)
             write_run_json(
                 run_dir, plan_path, spec_path, "running", task_summaries, run_base,
-                started_at=run_started, pid=run_pid,
+                started_at=run_started, pid=run_pid, threads=threads,
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
@@ -1045,7 +1175,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # whole final-review phase. Flush the corrected summaries before entering it.
     if not escalated:
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -1060,7 +1190,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_outcome = run_final_review_loop(
                 spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
-                autofix_mode, timeout=timeout,
+                autofix_mode, threads, timeout=timeout,
             )
             deferrals.extend(final_outcome.deferrals)
             if final_outcome.status == "escalated":
@@ -1092,7 +1222,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base,
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
-                   doc_sync=doc_sync_record)
+                   doc_sync=doc_sync_record, threads=threads)
     return 0 if overall == "passed" else 2
 
 

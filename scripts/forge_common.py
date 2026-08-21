@@ -8,6 +8,7 @@ forge_common``) so ``sys.modules`` caches a single object — dataclass identity
 preserved across forge_plan/forge_git/forge_receipts and the test suite.
 """
 import importlib.util
+import json
 import os
 import signal
 import subprocess
@@ -142,6 +143,7 @@ class WorkerResult:
     last_message: str
     argv: list
     timed_out: bool = False
+    thread_id: "str | None" = None
 
 
 @dataclass
@@ -223,56 +225,137 @@ class TeeResult:
     tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr
 
 
+@dataclass
+class JsonTeeResult:
+    exit_code: "int | None"  # None when timed out
+    timed_out: bool
+    tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr (raw, pre-render)
+    thread_id: "str | None"  # from the first `thread.started` event, or None
+
+
+def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line):
+    """Spawn ``argv``, calling ``pump_line(line)`` for each merged stdout+stderr
+    line as it arrives, and return ``(exit_code_or_None, timed_out)``. Shared
+    plumbing between ``run_teed`` and ``run_json_teed`` — the process
+    spawn/kill/timeout handling is identical; only what happens per line differs.
+    A child that outlives ``timeout`` is killed (whole process group) and
+    reported as ``timed_out`` — never hangs the run. ``start_new_session`` puts
+    the child in its own group so ``shell=True`` command trees die with it."""
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+
+    def _pump():
+        for line in proc.stdout:
+            pump_line(line)
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait()
+    reader.join(timeout=5)
+
+    return (None if timed_out else proc.returncode), timed_out
+
+
 def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
     """Run a subprocess, streaming its merged stdout+stderr line-by-line into
     ``live_path`` (append) under a ``header`` line, while returning the exit code,
     a timed-out flag, and the output tail the runner loop needs.
 
     A behavior-preserving replacement for ``subprocess.run(capture_output=True)``:
-    the returned ``tail`` matches the old ``combined[-_ACC_TAIL_CHARS:]``, and a
-    child that outlives ``timeout`` is killed (whole process group) and reported
-    as ``timed_out`` — never hangs the run. ``start_new_session`` puts the child
-    in its own group so ``shell=True`` command trees die with it. The live file is
-    flushed per line so a tailing monitor sees output as it happens."""
+    the returned ``tail`` matches the old ``combined[-_ACC_TAIL_CHARS:]``. The
+    live file is flushed per line so a tailing monitor sees output as it
+    happens."""
     with open(live_path, "a", encoding="utf-8") as live:
         live.write(header + "\n")
         live.flush()
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            shell=shell,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
         buf = []
 
-        def _pump():
-            for line in proc.stdout:
-                live.write(line)
-                live.flush()
-                buf.append(line)
+        def _pump_line(line):
+            live.write(line)
+            live.flush()
+            buf.append(line)
 
-        reader = threading.Thread(target=_pump, daemon=True)
-        reader.start()
-
-        timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-            proc.wait()
-        reader.join(timeout=5)
+        exit_code, timed_out = _spawn_and_pump(
+            argv, cwd=cwd, shell=shell, timeout=timeout, pump_line=_pump_line
+        )
 
     merged = "".join(buf)
     return TeeResult(
-        exit_code=None if timed_out else proc.returncode,
+        exit_code=exit_code, timed_out=timed_out, tail=merged[-_ACC_TAIL_CHARS:]
+    )
+
+
+def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
+                   render_line):
+    """Run a ``codex exec --json`` child: each stdout line is one JSONL event.
+    Raw JSONL is appended to ``events_path`` (thread capture + debugging); each
+    event is translated via ``render_line(event) -> str | None`` into a plain-
+    text line appended to ``live_path`` under ``header`` — ``None`` emits nothing,
+    so control/progress events produce no live-log noise (parity with the old
+    human-readable stream, never raw JSON). A merged-stream line that fails to
+    parse as JSON (stray stderr text, not an event) is teed to ``live_path``
+    verbatim instead — fail-open, matching ``run_teed``'s behavior for that line
+    — and is not written to ``events_path``. The child's ``thread_id`` is
+    captured from the first ``{"type": "thread.started", "thread_id": ...}``
+    event seen; absent from the stream, it stays ``None`` without raising."""
+    with open(live_path, "a", encoding="utf-8") as live, \
+         open(events_path, "a", encoding="utf-8") as events:
+        live.write(header + "\n")
+        live.flush()
+        buf = []
+        thread_id = None
+
+        def _pump_line(line):
+            nonlocal thread_id
+            buf.append(line)
+            stripped = line.rstrip("\n")
+            if not stripped:
+                return
+            try:
+                event = json.loads(stripped)
+            except ValueError:
+                live.write(line)
+                live.flush()
+                return
+            events.write(stripped + "\n")
+            events.flush()
+            if (
+                thread_id is None
+                and isinstance(event, dict)
+                and event.get("type") == "thread.started"
+            ):
+                thread_id = event.get("thread_id")
+            rendered = render_line(event) if isinstance(event, dict) else None
+            if rendered is not None:
+                live.write(rendered if rendered.endswith("\n") else rendered + "\n")
+                live.flush()
+
+        exit_code, timed_out = _spawn_and_pump(
+            argv, cwd=cwd, shell=False, timeout=timeout, pump_line=_pump_line
+        )
+
+    merged = "".join(buf)
+    return JsonTeeResult(
+        exit_code=exit_code,
         timed_out=timed_out,
         tail=merged[-_ACC_TAIL_CHARS:],
+        thread_id=thread_id,
     )
