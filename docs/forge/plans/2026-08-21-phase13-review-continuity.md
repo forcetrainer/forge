@@ -145,7 +145,7 @@
 **Depends on:** Task 1, Task 2.
 
 ### Task 5: Resume dispatch + cold-spawn fallback
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`resume_thread` parameter on worker and reviewer dispatch, fallback path, receipt flag)

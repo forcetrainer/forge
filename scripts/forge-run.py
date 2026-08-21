@@ -198,14 +198,23 @@ def _render_event_line(event):
 
 
 def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
-                     effort_override=None, timeout=DEFAULT_TIMEOUT):
+                     effort_override=None, timeout=DEFAULT_TIMEOUT,
+                     resume_thread=None):
     """One ``codex exec`` worker process, tier-pinned model/effort (``effort_
     override`` replaces only the effort, never the model, for a per-task
-    ``--effort N=LEVEL`` bump). Prompt = contract preamble + brief. Returns the
-    exit code, last message, and the exact argv emitted. A hung process is
-    killed at ``timeout`` seconds and reported as ``timed_out=True`` — the
-    caller treats that exactly like a failed iteration, never hangs the run.
-    Dispatched with ``--json`` (never ``--ephemeral``); the captured
+    ``--effort N=LEVEL`` bump). Cold (``resume_thread=None``): prompt = contract
+    preamble + brief. Resumed (``resume_thread`` set to a prior ``codex exec``
+    thread id): prompt = ``brief_path``'s content verbatim, no preamble — the
+    resumed worker already holds the contract and the original brief from its
+    cold-spawn attempt (Session continuity spec), so the caller passes a
+    findings-only prompt file on a rework resume rather than the full brief.
+    Argv is ``codex exec resume --json --output-last-message <path> -m <model>
+    -c 'model_reasoning_effort="<effort>"' <thread_id> <prompt>`` on resume —
+    tier pinning and last-message capture preserved exactly as on a cold spawn.
+    Returns the exit code, last message, and the exact argv emitted. A hung
+    process is killed at ``timeout`` seconds and reported as ``timed_out=True``
+    — the caller treats that exactly like a failed iteration, never hangs the
+    run. Dispatched with ``--json`` (never ``--ephemeral``); the captured
     ``thread_id`` (Codex mechanics spec) is written into ``threads`` under this
     task's worker role and also carried on the returned ``WorkerResult``.
     ``threads`` is optional — omitted (or None), a fresh dict is used and the
@@ -215,26 +224,45 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
-    preamble = contract_preamble(task.tier)
     with open(brief_path, "r", encoding="utf-8") as f:
         brief = f.read()
-    prompt = preamble + "\n\n" + brief
     last_msg_path = os.path.join(run_dir, "task-{}-worker-last.txt".format(task.number))
-    argv = [
-        codex_bin,
-        "exec",
-        "--json",
-        "-m",
-        model,
-        "-c",
-        "model_reasoning_effort={}".format(effort),
-        "--output-last-message",
-        last_msg_path,
-        prompt,
-    ]
+    if resume_thread:
+        prompt = brief
+        argv = [
+            codex_bin,
+            "exec",
+            "resume",
+            "--json",
+            "--output-last-message",
+            last_msg_path,
+            "-m",
+            model,
+            "-c",
+            'model_reasoning_effort="{}"'.format(effort),
+            resume_thread,
+            prompt,
+        ]
+    else:
+        preamble = contract_preamble(task.tier)
+        prompt = preamble + "\n\n" + brief
+        argv = [
+            codex_bin,
+            "exec",
+            "--json",
+            "-m",
+            model,
+            "-c",
+            "model_reasoning_effort={}".format(effort),
+            "--output-last-message",
+            last_msg_path,
+            prompt,
+        ]
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
     events_path = os.path.join(run_dir, "task-{}-worker-events.jsonl".format(task.number))
-    header = "── worker · codex exec · {} · {} ──".format(model, effort)
+    header = "── worker · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
         header=header, render_line=_render_event_line,
@@ -282,7 +310,7 @@ def run_acceptance(task, cwd, live_path=None):
 
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
                            live_path, events_path, header, role, threads,
-                           timeout=DEFAULT_TIMEOUT):
+                           timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
     Verdict. Fail-loud on a crashed reviewer, a timed-out reviewer, or an
@@ -294,22 +322,46 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     consuming a rework iteration). A reviewer that hangs past ``timeout`` is
     handled the same way — it also yields no verdict to judge. Dispatched with
     ``--json`` (never ``--ephemeral``); the captured ``thread_id`` (Codex
-    mechanics spec) is written into ``threads`` under ``role``."""
+    mechanics spec) is written into ``threads`` under ``role``. ``resume_thread``
+    (Session continuity spec), when set, resumes that prior ``codex exec``
+    thread instead of spawning cold — argv becomes ``codex exec resume --json
+    --output-last-message <path> -m <model> -c 'model_reasoning_effort=
+    "<effort>"' <thread_id> <prompt>``, tier pinning and last-message capture
+    preserved exactly as on a cold spawn. The prompt (preamble + verdict
+    instruction + packet) is unchanged by resuming — only the dispatch
+    mechanics differ; scoping the packet itself down for a resumed verification
+    lap is a separate concern (Delta-scoped verification packets)."""
     with open(packet_path, "r", encoding="utf-8") as f:
         packet = f.read()
     prompt = preamble + "\n\n" + REVIEW_VERDICT_INSTRUCTION + "\n\n" + packet
-    argv = [
-        codex_bin,
-        "exec",
-        "--json",
-        "-m",
-        model,
-        "-c",
-        "model_reasoning_effort={}".format(effort),
-        "--output-last-message",
-        last_msg_path,
-        prompt,
-    ]
+    if resume_thread:
+        argv = [
+            codex_bin,
+            "exec",
+            "resume",
+            "--json",
+            "--output-last-message",
+            last_msg_path,
+            "-m",
+            model,
+            "-c",
+            'model_reasoning_effort="{}"'.format(effort),
+            resume_thread,
+            prompt,
+        ]
+    else:
+        argv = [
+            codex_bin,
+            "exec",
+            "--json",
+            "-m",
+            model,
+            "-c",
+            "model_reasoning_effort={}".format(effort),
+            "--output-last-message",
+            last_msg_path,
+            prompt,
+        ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
     result = run_json_teed(
@@ -344,13 +396,17 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
 
 
 def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
-                       timeout=DEFAULT_TIMEOUT):
+                       timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Per-task reviewer via ``codex exec`` — fresh context at the *same tier as
     the task it reviews* (routed by TIER_MAP[task.tier]; reviewer strength never
     escalates past the task's own tier). Preamble = the tier agent's review
     paragraph. Returns the parsed Verdict. ``threads`` is optional — omitted
     (or None), a fresh dict is used and the captured thread id is not
-    persisted anywhere the caller can see."""
+    persisted anywhere the caller can see. ``resume_thread`` (Session
+    continuity spec), when set, resumes that prior thread instead of spawning
+    cold — the caller is responsible for the discovery-cold /
+    verification-resumed rule; this function only carries out whichever mode
+    it is asked for."""
     if threads is None:
         threads = {}
     model, effort = TIER_MAP[task.tier]
@@ -358,22 +414,28 @@ def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
     last_msg_path = os.path.join(run_dir, "task-{}-review-last.txt".format(task.number))
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
     events_path = os.path.join(run_dir, "task-{}-reviewer-events.jsonl".format(task.number))
-    header = "── review · codex exec · {} · {} ──".format(model, effort)
+    header = "── review · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
         live_path, events_path, header, "task-{}-reviewer".format(task.number),
-        threads, timeout=timeout,
+        threads, timeout=timeout, resume_thread=resume_thread,
     )
 
 
 def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
-                          timeout=DEFAULT_TIMEOUT):
+                          timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Whole-plan final review: one ``codex exec`` call at ``tier`` (TIER_MAP[tier]
     — the plan's highest task tier, not a pinned ceiling) with that tier's
     contract preamble against the whole-plan diff + spec. Returns the parsed
     Verdict; the header records the resolved model+effort. ``threads`` is
     optional — omitted (or None), a fresh dict is used and the captured
-    thread id is not persisted anywhere the caller can see."""
+    thread id is not persisted anywhere the caller can see. ``resume_thread``
+    accepted for interface parity with ``dispatch_reviewer`` (Session
+    continuity spec); wiring it into ``run_final_review_loop`` is a later
+    task's concern — this runner still dispatches this call cold unless a
+    caller explicitly passes one."""
     if threads is None:
         threads = {}
     model, effort = TIER_MAP[tier]
@@ -381,10 +443,13 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
     last_msg_path = os.path.join(run_dir, "final-review-last.txt")
     live_path = os.path.join(run_dir, "final-review-live.log")
     events_path = os.path.join(run_dir, "final-reviewer-events.jsonl")
-    header = "── final review · codex exec · {} · {} ──".format(model, effort)
+    header = "── final review · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
         live_path, events_path, header, "final-reviewer", threads, timeout=timeout,
+        resume_thread=resume_thread,
     )
 
 
@@ -487,6 +552,24 @@ def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings):
     return brief_path, sha
 
 
+def _resume_findings_prompt(findings, run_dir, task, attempt):
+    """Rework-resume prompt: the outstanding findings **only** — no brief
+    re-paste, no spec (Session continuity spec). The resumed worker already
+    holds the full brief and contract preamble from its cold-spawn attempt; a
+    fixer with memory fixes the cause instead of patching the symptom, and
+    re-pasting the brief here would defeat that. Overwritten fresh each
+    resumed attempt, like ``_brief_for``'s brief."""
+    lines = ["## Rework — address these findings before resubmitting", ""]
+    lines.extend("- {}".format(f) for f in findings)
+    prompt = "\n".join(lines) + "\n"
+    path = os.path.join(
+        run_dir, "task-{}-attempt-{}-resume-prompt.md".format(task.number, attempt)
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    return path
+
+
 def _execution_failure_finding(detail):
     """An execution failure (worker crash/timeout, acceptance non-zero) as an
     implicit fix-retry finding: disposition ``fix`` so the attempt cannot converge
@@ -529,6 +612,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     findings_carry = []     # outstanding fix-finding summaries -> next brief
     prior_findings = []     # outstanding fix findings (dicts) -> next re-review packet
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    worker_role = "task-{}-worker".format(task.number)
+    reviewer_role = "task-{}-reviewer".format(task.number)
+    review_attempts = 0     # count of REVIEWS actually dispatched (may lag `attempt`
+                             # when an execution failure preempted a review) — this,
+                             # not `attempt`, decides discovery (0) vs verification (>0)
 
     attempt = 0
     while True:
@@ -537,10 +625,36 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             task, plan_path, spec_path, run_dir, attempt, findings_carry
         )
         update_run_progress(run_dir, task.number, "worker")
-        worker = dispatch_worker(
-            task, brief_path, codex_bin, run_dir, threads,
-            effort_override=effort_override, timeout=timeout,
-        )
+        # Rework laps (attempt > 1) resume the worker with the outstanding
+        # findings alone (Session continuity spec) — a fixer with memory fixes
+        # the cause instead of patching the symptom. A missing thread id (the
+        # cold spawn never captured one) or a resume that fails outright
+        # (non-zero exit, missing session, context overflow) falls back to
+        # exactly one cold spawn with the full brief; the fallback is recorded
+        # on this attempt's receipt, never fatal (Continuity scope and failure).
+        worker_resume_thread = threads.get(worker_role) if attempt > 1 else None
+        worker_resume_fallback = attempt > 1 and worker_resume_thread is None
+        if worker_resume_thread:
+            resume_prompt_path = _resume_findings_prompt(
+                findings_carry, run_dir, task, attempt
+            )
+            worker = dispatch_worker(
+                task, resume_prompt_path, codex_bin, run_dir, threads,
+                effort_override=effort_override, timeout=timeout,
+                resume_thread=worker_resume_thread,
+            )
+            if worker.timed_out or worker.exit_code != 0:
+                worker_resume_fallback = True
+                threads.pop(worker_role, None)  # stale session; don't retry it later
+                worker = dispatch_worker(
+                    task, brief_path, codex_bin, run_dir, threads,
+                    effort_override=effort_override, timeout=timeout,
+                )
+        else:
+            worker = dispatch_worker(
+                task, brief_path, codex_bin, run_dir, threads,
+                effort_override=effort_override, timeout=timeout,
+            )
         update_run_progress(run_dir, task.number, "acceptance")
         acceptance = run_acceptance(task, cwd, live_path)
 
@@ -552,6 +666,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         cause = None        # short human-readable cause for an execution failure
         coverage_skipped = None  # None: no review this attempt (unchanged)
         coverage_retry = False
+        reviewer_resume_fallback = False
 
         if worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
@@ -588,12 +703,44 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 task, plan_path, run_dir, review_base, cwd,
                 prior_findings=prior_findings or None, checklist=checklist,
             )
+            # Discovery (this task's first review) is always cold — an
+            # independent first read is the entire justification for a
+            # separate reviewer (DECISIONS 2026-07-16, 2026-07-17); resuming it
+            # would hand the review to an agent that already holds the
+            # worker's reasoning. Verification (every review after) resumes
+            # the reviewer thread, with the same missing-id/failed-resume
+            # cold fallback as the worker (Session continuity /
+            # Continuity scope and failure specs). Once a fallback happens
+            # within this attempt, the coverage-retry call (if any) also
+            # stays cold rather than re-attempting a session already known bad.
+            is_verification = review_attempts > 0
+            review_resume_state = {
+                "thread": threads.get(reviewer_role) if is_verification else None,
+            }
+            reviewer_resume_fallback = is_verification and review_resume_state["thread"] is None
+
+            def _reviewer_dispatch_call(p):
+                nonlocal reviewer_resume_fallback
+                resume_thread = review_resume_state["thread"]
+                if resume_thread:
+                    try:
+                        return dispatch_reviewer(
+                            task, p, codex_bin, run_dir, threads, timeout=timeout,
+                            resume_thread=resume_thread,
+                        )
+                    except RuntimeError:
+                        reviewer_resume_fallback = True
+                        threads.pop(reviewer_role, None)
+                        review_resume_state["thread"] = None
+                return dispatch_reviewer(
+                    task, p, codex_bin, run_dir, threads, timeout=timeout,
+                )
+
             verdict, coverage_retry = _review_with_coverage(
-                lambda p: dispatch_reviewer(
-                    task, p, codex_bin, run_dir, threads, timeout=timeout
-                ),
+                _reviewer_dispatch_call,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
             )
+            review_attempts += 1
             classify_findings(verdict, _git_diff(cwd, review_base))
             review_verdict = verdict_to_dict(verdict)
             findings = verdict.findings
@@ -628,6 +775,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             "repair_task": repair_task,
             "coverage_skipped": coverage_skipped,
             "coverage_retry": coverage_retry,
+            "resume_fallback": worker_resume_fallback or reviewer_resume_fallback,
         }
         write_receipt(run_dir, task, attempt, receipt)
 
