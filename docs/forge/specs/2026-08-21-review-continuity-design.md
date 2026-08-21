@@ -30,7 +30,11 @@ Checklist items are derived **mechanically** from existing plan/spec grammar —
 
 CLI: `forge_checklist.py <plan.md> --spec <spec.md> [--task N | --final] [--out <path>]` → JSON `[{"id", "source", "text"}]` and a rendered `## Contract checklist` markdown section. Fail-loud on an unresolvable `**Spec:**` name (reuses `find_spec_sections`' existing raise) — never a silently thin checklist, matching the packet contract.
 
-Empty checklist is a contract error naming the absent source, not a pass: a review with nothing to check is not a review. Trivial-tier tasks are unaffected — they skip reviewer dispatch entirely, so no checklist is generated for them.
+An empty checklist is a **library-level** contract error: `forge_checklist.py` invoked directly (CLI or import) raises naming the absent source, because an author who explicitly asks for a checklist and gets nothing has a defect to see.
+
+At the **runner/orchestrator** layer it is not an error. A task with no `**Spec:**` line, no `**Global Constraints:**`, and an `**Acceptance:**` of nothing but inline-code commands is a *legal* plan — the skill makes both fields optional — and such a task has no contract material for a reviewer to cover. Forcing an error there would make legal plans unexecutable. Instead the runner **skips the coverage step for that review** (no checklist section in the packet, no `coverage` validation, no retry) and records `coverage_skipped: true` on the receipt, surfaced in the end-of-plan summary. Skipped, visibly — never silently. This is the "checklist quality is plan quality" risk made observable rather than fatal: a plan that earns no coverage enforcement says so on its receipts.
+
+Trivial-tier tasks are unaffected — they skip reviewer dispatch entirely, so no checklist is generated for them.
 
 ## Reviewer verdict contract — `coverage`
 
@@ -141,3 +145,7 @@ This design claims: fewer laps, better repair continuity, less repeated discover
 ## Touch points
 
 `scripts/forge_checklist.py` (new), `scripts/forge_dispose.py` (coverage in the verdict schema + validation), `scripts/forge_common.py` (`REVIEW_VERDICT_INSTRUCTION`), `scripts/forge-run.py` (`--json` dispatch, thread capture/persistence, resume dispatch, event rendering, delta packets, de-pasted fixer brief), `scripts/review-packet.py` (checklist section, verification packet mode), `scripts/forge-monitor.py` (render-path verification only), `skills/planning/SKILL.md` (cross-harness canon: coverage, discovery-cold/verification-resumed, Claude adapter), `skills/planning/codex-execution.md` (runner specifics), changelog pointers in `2026-07-16-phase7-scope-autonomy-design.md` and `2026-07-17-phase12b-claude-dispatch-parity-design.md`.
+
+## Changelog
+
+2026-08-21: empty checklist is a library-level error but a runner-level skip with `coverage_skipped` on the receipt — the original rule made legal plans (no Spec/Global Constraints/prose acceptance) unexecutable. Found during Task 4 execution.
