@@ -71,7 +71,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Coverage in the verdict contract + validation
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`CoverageEntry`, `Verdict.coverage`, `REVIEW_VERDICT_INSTRUCTION`)

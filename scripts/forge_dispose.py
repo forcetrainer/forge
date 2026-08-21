@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from forge_common import (
     AUTOFIX_MODES,
     MAX_ATTEMPTS_BACKSTOP,
+    CoverageEntry,
     Finding,
     Verdict,
     finding_to_dict,
@@ -73,21 +74,55 @@ def _finding_from_obj(obj):
     )
 
 
+def _coverage_from_obj(obj):
+    """Build the coverage list from a verdict-shaped object. Absent/empty
+    ``coverage`` tolerates as an empty list at *parse* time — validation
+    (validate_coverage), not parsing, is what rejects a missing or incomplete
+    coverage array, keeping a reviewer verdict that fails validation still a
+    parseable Verdict object (Reviewer verdict contract)."""
+    raw = obj.get("coverage")
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            "reviewer verdict coverage is not a list; got: " + repr(raw)[:200]
+        )
+    entries = []
+    for e in raw:
+        if not isinstance(e, dict):
+            raise RuntimeError(
+                "reviewer coverage entry is not a JSON object; got: "
+                + repr(e)[:200]
+            )
+        entries.append(CoverageEntry(
+            id=e.get("id"),
+            status=e.get("status"),
+            evidence=e.get("evidence", ""),
+        ))
+    return entries
+
+
 def _verdict_from_obj(obj):
     """Build the Verdict from a recognized verdict-shaped object (``verdict`` is
     ``pass`` or ``findings``; the authoritative last one in the stream). ``pass``
     carries no findings; ``findings`` parses each finding object into a Finding via
     _finding_from_obj — which raises loudly on a malformed or unlocated
-    contract-breaking finding rather than dropping it."""
+    contract-breaking finding rather than dropping it. ``coverage`` is parsed on
+    either verdict kind (present or absent) via _coverage_from_obj."""
+    coverage = _coverage_from_obj(obj)
     if obj["verdict"] == "pass":
-        return Verdict(kind="pass")
+        return Verdict(kind="pass", coverage=coverage)
     raw = obj.get("findings")
     if not isinstance(raw, list):
         raise RuntimeError(
             "reviewer findings verdict has no findings list; got: "
             + repr(obj)[:300]
         )
-    return Verdict(kind="findings", findings=[_finding_from_obj(f) for f in raw])
+    return Verdict(
+        kind="findings",
+        findings=[_finding_from_obj(f) for f in raw],
+        coverage=coverage,
+    )
 
 
 def parse_verdict(last_message):
@@ -222,6 +257,90 @@ def classify_findings(verdict, diff_text):
         finding.provenance = verify_provenance(finding, ranges)
         finding.disposition = derive_disposition(finding)
     return verdict
+
+
+# --- coverage: the checklist-completeness validation -------------------------
+
+
+def _checklist_id(item):
+    """A checklist entry's id, accepting either a forge_checklist.ChecklistItem
+    (attribute access) or a plain dict (the CLI's --checklist JSON shape) —
+    mirrors forge_checklist.reduce_checklist's dual-access pattern."""
+    return item.id if hasattr(item, "id") else item["id"]
+
+
+def validate_coverage(verdict, checklist):
+    """Validate a reviewer verdict's coverage array against the supplied
+    checklist. Returns a list of human-readable defect strings — empty means
+    valid. This is validation, never parsing: a verdict with missing/invalid
+    coverage is still a well-formed Verdict object (parse_verdict already
+    tolerated absent coverage as an empty list); this function is what rejects
+    it. Coverage defects never touch ``action`` — the caller decides whether to
+    retry (Reviewer verdict contract).
+
+    Defects checked:
+    - missing ids: a checklist id with no coverage entry.
+    - unknown ids: a coverage entry whose id is not on the checklist.
+    - duplicate ids: a checklist id covered by more than one entry.
+    - empty evidence: any entry with blank/whitespace-only evidence.
+    - unbacked violated: a "violated" entry whose id is not named as the
+      contract_ref of at least one finding in this same verdict.
+    """
+    checklist_ids = [_checklist_id(it) for it in checklist]
+    checklist_id_set = set(checklist_ids)
+    coverage = verdict.coverage or []
+
+    seen = []
+    dup_ids = set()
+    for entry in coverage:
+        if entry.id in seen:
+            dup_ids.add(entry.id)
+        seen.append(entry.id)
+    coverage_id_set = set(seen)
+
+    defects = []
+
+    missing = [cid for cid in checklist_ids if cid not in coverage_id_set]
+    if missing:
+        defects.append(
+            "missing coverage for checklist id(s): " + ", ".join(missing)
+        )
+
+    unknown = sorted(
+        cid for cid in coverage_id_set if cid not in checklist_id_set
+    )
+    if unknown:
+        defects.append(
+            "coverage references unknown checklist id(s): " + ", ".join(unknown)
+        )
+
+    if dup_ids:
+        defects.append(
+            "duplicate coverage id(s): " + ", ".join(sorted(dup_ids))
+        )
+
+    empty_evidence = [
+        entry.id for entry in coverage if not (entry.evidence or "").strip()
+    ]
+    if empty_evidence:
+        defects.append(
+            "empty evidence for coverage id(s): " + ", ".join(empty_evidence)
+        )
+
+    backed_refs = {
+        f.contract_ref for f in (verdict.findings or []) if f.contract_ref
+    }
+    unbacked_violated = [
+        entry.id for entry in coverage
+        if entry.status == "violated" and entry.id not in backed_refs
+    ]
+    if unbacked_violated:
+        defects.append(
+            "'violated' coverage id(s) with no backing finding contract_ref: "
+            + ", ".join(unbacked_violated)
+        )
+
+    return defects
 
 
 # --- convergence: the pass/rework/halt decision + cross-attempt state -------
@@ -445,6 +564,13 @@ def main(argv=None):
         help="reattempt guidance surfaced as the execution-failure finding's "
              "summary",
     )
+    parser.add_argument(
+        "--checklist", default=None,
+        help="path to the checklist JSON (forge_checklist.py --format json "
+             "output); when given, decision.json gains coverage_valid/"
+             "coverage_defects. Omitted: decision.json is unchanged from "
+             "today's output.",
+    )
     args = parser.parse_args(argv)
 
     if args.execution_failure and args.verdict:
@@ -475,6 +601,7 @@ def main(argv=None):
 
     acceptance_ok = args.acceptance_ok == "true"
 
+    verdict = None
     try:
         if args.execution_failure:
             findings = [execution_failure_finding(args.execution_detail)]
@@ -504,7 +631,24 @@ def main(argv=None):
     )
     advance_state(state, findings, acceptance_ok)
 
-    print(json.dumps(_build_decision(action, halt_reason, findings, state)))
+    decision = _build_decision(action, halt_reason, findings, state)
+    if args.checklist and verdict is not None:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                checklist = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        defects = validate_coverage(verdict, checklist)
+        decision["coverage_valid"] = not defects
+        decision["coverage_defects"] = defects
+
+    print(json.dumps(decision))
     return 0
 
 

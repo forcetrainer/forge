@@ -87,9 +87,10 @@ ALLOWED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # reviewer's judgement rules live in the agents/*.md review paragraph (preamble).
 REVIEW_VERDICT_INSTRUCTION = (
     "End your message with your verdict as exactly one JSON object and nothing "
-    "after it: {\"verdict\": \"pass\"} when the diff satisfies the spec and the "
-    "task, or {\"verdict\": \"findings\", \"findings\": [ ... ]} listing every "
-    "issue as a finding object: {\"id\": \"f1\", \"summary\": \"one line\", "
+    "after it: {\"verdict\": \"pass\", \"coverage\": [ ... ]} when the diff "
+    "satisfies the spec and the task, or {\"verdict\": \"findings\", "
+    "\"coverage\": [ ... ], \"findings\": [ ... ]} listing every issue as a "
+    "finding object: {\"id\": \"f1\", \"summary\": \"one line\", "
     "\"location\": {\"file\": \"path\", \"lines\": \"12-20\"}, \"provenance\": "
     "\"in-diff\" | \"pre-existing\", \"impact\": \"contract-breaking\" | "
     "\"improvement\", \"contract_ref\": \"acceptance criterion or spec "
@@ -97,6 +98,12 @@ REVIEW_VERDICT_INSTRUCTION = (
     "| \"new\" | null, \"carried_from\": \"prior finding id\" | null, "
     "\"repair_task\": {\"title\": ..., \"files\": [...], \"spec\": ..., "
     "\"tests\": [...], \"acceptance\": [...], \"tier\": ...} | null}. "
+    "coverage is required on every verdict, pass included: one entry per "
+    "checklist id supplied in the packet, each {\"id\": \"<checklist id>\", "
+    "\"status\": \"satisfied\" | \"violated\" | \"n/a\", \"evidence\": "
+    "\"file:line, hunk, or reason\"} — evidence must be non-empty on every "
+    "entry, and \"n/a\" requires a reason in evidence (why the diff cannot "
+    "touch that item), never a rubber-stamped satisfied. "
     "Classification rules: label impact \"contract-breaking\" only when "
     "contract_ref names the acceptance criterion or spec section it violates — "
     "a contract-breaking finding with no contract_ref is treated as "
@@ -153,9 +160,17 @@ class Finding:
 
 
 @dataclass
+class CoverageEntry:
+    id: str
+    status: str  # "satisfied" | "violated" | "n/a"
+    evidence: str
+
+
+@dataclass
 class Verdict:
     kind: str  # "pass" | "findings"
     findings: list = field(default_factory=list)  # list[Finding]
+    coverage: list = field(default_factory=list)  # list[CoverageEntry]
 
 
 @dataclass
