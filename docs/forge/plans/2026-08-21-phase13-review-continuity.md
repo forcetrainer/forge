@@ -21,6 +21,30 @@
 - `tests/test_forge_checklist.py`, `tests/test_forge_coverage.py`, `tests/test_forge_threads.py`, `tests/test_forge_resume.py`, `tests/test_forge_verification_packet.py` (create).
 - `docs/forge/specs/2026-07-16-phase7-scope-autonomy-design.md`, `docs/forge/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md`, `docs/forge/ROADMAP.md`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` (modify) — changelog pointers, phase status, lockstep 0.9.0.
 
+### Task 0: Tier-field parsing tolerance
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_plan.py` (`parse_plan_tasks` tier-value normalization)
+- Modify: `skills/planning/SKILL.md` (the `**Tier:**` template line — make it agree with the `Tier:` examples below it)
+- Modify: `scripts/forge_checklist.py` (drop the local task-listing helper in favor of `forge_plan.parse_plan_tasks` once it parses)
+- Test: `tests/test_forge_plan.py`
+
+**Spec:** none — a pre-existing defect found during Phase 13 execution, approved as in-scope 2026-08-21.
+
+**Interface:**
+- `parse_plan_tasks` normalizes the `**Tier:**` field value before matching: strip surrounding backticks and one trailing `.` from the tier level, on both the bare form and the `<level> — <justification>` form. Justification text is unchanged. An unknown tier after normalization still raises naming the offending value, as today.
+- `SKILL.md`'s `**Tier:**` template line drops the backticks so it matches the `Tier: standard` / `Tier: complex — …` examples that follow it. Exactly one authored form, taught once.
+- `forge_checklist.py` uses `forge_plan.parse_plan_tasks` for task enumeration; its local `_list_tasks` helper is removed. `build_final_checklist` output is unchanged — the existing Task 1 tests are the regression proof and must pass without edits.
+
+**Tests:** backticked tier (`` `standard` ``) parses; backticked tier with justification (`` `complex` — reason ``) parses and keeps the justification intact; trailing period (`complex.`) parses; both together parse; bare form still parses unchanged; unknown tier after normalization still raises naming the value; justification-required rule still enforced for complex/trivial; `parse_plan_tasks` succeeds against this plan file and against `2026-07-17-phase12b-claude-dispatch-parity.md`.
+
+**Acceptance:** `python3 -m pytest -q tests/test_forge_plan.py tests/test_forge_checklist.py` all pass; `python3 -c "import sys; sys.path.insert(0,'scripts'); import forge_plan; print(len(forge_plan.parse_plan_tasks('docs/forge/plans/2026-08-21-phase13-review-continuity.md')))"` prints the plan's task count without raising; `grep -n '\*\*Tier:\*\*' skills/planning/SKILL.md` shows no backticked tier levels; `python3 -m pytest -q` shows no regression against the 303-passed post-Task-1 baseline.
+
+**Tier:** standard
+
+**Depends on:** nothing.
+
 ### Task 1: Contract checklist generator
 - [ ] Done
 
@@ -229,4 +253,4 @@
 
 **Tier:** `trivial` — version strings, two changelog lines, and one status word; no logic, no design content, one call site each.
 
-**Depends on:** Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8.
+**Depends on:** Task 0, Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8.
