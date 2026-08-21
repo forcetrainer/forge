@@ -30,8 +30,6 @@
 - Modify: `scripts/forge_checklist.py` (drop the local task-listing helper in favor of `forge_plan.parse_plan_tasks` once it parses)
 - Test: `tests/test_forge_plan.py`
 
-**Spec:** none — a pre-existing defect found during Phase 13 execution, approved as in-scope 2026-08-21.
-
 **Interface:**
 - `parse_plan_tasks` normalizes the `**Tier:**` field value before matching: strip surrounding backticks and one trailing `.` from the tier level, on both the bare form and the `<level> — <justification>` form. Justification text is unchanged. An unknown tier after normalization still raises naming the offending value, as today.
 - `SKILL.md`'s `**Tier:**` template line drops the backticks so it matches the `Tier: standard` / `Tier: complex — …` examples that follow it. Exactly one authored form, taught once.
@@ -46,7 +44,7 @@
 **Depends on:** nothing.
 
 ### Task 1: Contract checklist generator
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Create: `scripts/forge_checklist.py`
