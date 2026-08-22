@@ -117,7 +117,7 @@
 **Depends on:** Task 3.
 
 ### Task 5: Runner wiring — lint, seeded state, final-review seeding
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (lint at run start, `seeded_findings` state, final-review discovery seeding)
@@ -129,7 +129,7 @@
 
 **Interface:**
 - `run_plan` calls `forge_lint.lint_plan` after the clean-tree precondition and **before any dispatch**. Any `error` defect is a contract error (exit 1) printing every defect; warnings print and continue.
-- **Both** `classify_findings` call sites (`execute_task` and `run_final_review_loop`) pass `run_diff` so `in-run` is computed, **and pass `carried_ids=state.carried_ids`** (read before `advance_state` runs) so Task 2's resolved-label filter is actually live. Without this wiring Task 2's fix is dead code — correct, tested, and never invoked. `execute_task` appends `seed`-disposition findings to a `seeded_findings` list persisted in `run.json` — cleared at invocation start like `threads`, appended across tasks, surviving a resume.
+- **Both** `classify_findings` call sites (`execute_task` and `run_final_review_loop`) pass `run_diff` so `in-run` is computed, **and pass `carried_ids=state.carried_ids`** (read before `advance_state` runs) so Task 2's resolved-label filter is actually live. Without this wiring Task 2's fix is dead code — correct, tested, and never invoked. `execute_task` appends `seed`-disposition findings to a `seeded_findings` list persisted in `run.json` — appended across tasks and read back on resume, deliberately unlike `threads`, which is cleared each invocation.
 - `run_final_review_loop`'s **discovery** packet carries the seeded findings as pre-seeded prior findings; verification packets are unchanged.
 - Seeded findings appear in the end-of-plan summary whether or not the final review confirms them.
 

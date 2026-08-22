@@ -79,6 +79,20 @@ def _read_run_tasks(run_dir):
         return None
 
 
+def _read_seeded_findings(run_dir):
+    """The ``seeded_findings`` list from an existing ``run.json`` (used on
+    resume so a seed logged by an already-passed task's review is not lost
+    when this invocation's in-memory accumulator starts fresh), or ``None``
+    when absent — a brand-new run dir (fresh invocation) has no prior
+    run.json, so its caller's accumulator starts empty either way."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("seeded_findings")
+    except (OSError, ValueError):
+        return None
+
+
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,

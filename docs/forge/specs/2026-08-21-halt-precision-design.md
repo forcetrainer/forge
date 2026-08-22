@@ -85,7 +85,7 @@ Verification's scope is the prior findings plus the repair delta. A full contrac
 
 ## Receipts & state
 
-- `run.json` gains `seeded_findings` (a list of `finding_to_dict()` entries), cleared at invocation start like `threads`, then appended across tasks.
+- `run.json` gains `seeded_findings` (a list of `finding_to_dict()` entries), appended across tasks and **read back on resume** — deliberately UNLIKE `threads`, which is cleared each invocation. A thread id is a session handle that goes stale the moment a human hand-edits code; a seeded finding is a finding about code, and dropping it on resume would silently ship the defect it names.
 - Receipts gain `seeded` alongside the existing disposition groups.
 - Lint failures are a **contract error** (exit 1) before any receipt exists, consistent with a malformed plan today.
 

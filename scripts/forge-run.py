@@ -60,6 +60,7 @@ import forge_checklist
 import forge_common
 import forge_dispose
 import forge_git
+import forge_lint
 import forge_plan
 import forge_receipts
 import forge_status
@@ -123,6 +124,7 @@ from forge_receipts import (  # noqa: F401
     _read_base_commit,
     _read_latest_receipt,
     _read_run_tasks,
+    _read_seeded_findings,
     _read_started_at,
     annotate_ledger,
     ensure_forge_gitignore,
@@ -598,7 +600,8 @@ def _execution_failure_finding(detail):
 
 
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
-                  effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
+                  effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto",
+                  run_base=None, seeded_findings=None):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
     per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
@@ -613,7 +616,20 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     effort, never the reviewer's. ``threads`` is the run-wide per-role
     ``codex exec`` session-id map (Codex mechanics spec); this task's worker
     and reviewer dispatches write their captured thread ids into it in
-    place."""
+    place. ``run_base`` (the run-start HEAD, optional) lets each review's
+    classify_findings call compute the run's cumulative diff
+    (``git diff <run_base>``) alongside this review's own diff, so provenance
+    is three-way (in-diff/in-run/pre-existing; In-run provenance and the seed
+    disposition spec) — omitted (None), provenance stays exactly the two-way
+    classification from before that spec. ``carried_ids=state.carried_ids`` is
+    passed on every classify_findings call (the prior attempt's outstanding
+    fix-finding set, read before this attempt's ``advance_state`` runs) so a
+    reviewer-labeled ``convergence: "resolved"`` finding against a tracked id
+    is honored (Convergence label honored spec) instead of being silently
+    re-dispositioned. ``seeded_findings`` (optional; a list the caller
+    accumulates across every task in the run) receives one
+    ``finding_to_dict`` entry per ``seed``-dispositioned finding this task's
+    review produces — logged, never reworked, never halted on."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -793,9 +809,17 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
             )
             review_attempts += 1
-            classify_findings(verdict, _git_diff(cwd, review_base))
+            run_diff_text = _git_diff(cwd, run_base) if run_base else None
+            classify_findings(
+                verdict, _git_diff(cwd, review_base), run_diff=run_diff_text,
+                carried_ids=state.carried_ids,
+            )
             review_verdict = verdict_to_dict(verdict)
             findings = verdict.findings
+            if seeded_findings is not None:
+                seeded_findings.extend(
+                    finding_to_dict(f) for f in findings if f.disposition == "seed"
+                )
 
         action, halt_reason = convergence_decision(
             findings, state, acc_ok, attempt, autofix_mode
@@ -1050,7 +1074,7 @@ def _git_commit_final_review_fixes(cwd):
 
 def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
-                          plan_path=None):
+                          plan_path=None, seeded_findings=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1082,12 +1106,28 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     prompt. Either resume failing (missing thread, non-zero exit, timeout)
     falls back to exactly one cold spawn with the full packet/brief and is
     recorded as ``resume_fallback`` on the final-review receipt — degraded,
-    never fatal."""
+    never fatal. ``seeded_findings`` (optional; the run-wide accumulator
+    ``execute_task`` appended ``seed``-disposition findings into) pre-seeds
+    the discovery packet's prior-findings section — the final reviewer sees
+    every task's seeded findings as pre-seeded prior findings and labels each
+    current finding resolved/carried/new against them (In-run provenance and
+    the seed disposition spec). Only the discovery packet (attempt 1) is
+    seeded this way; every later verification packet carries only that lap's
+    own outstanding fix findings, exactly as before this parameter existed —
+    the seed values are naturally dropped from ``prior_findings`` once the
+    loop's own bottom-of-loop reassignment runs after attempt 1. In the final
+    review ``run_base`` **is** the diff base, so a caller never needs a
+    separate ``run_diff`` — ``in-run`` is unreachable here by construction
+    (In-run provenance and the seed disposition spec)."""
     if threads is None:
         threads = {}
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
-    prior_findings = []  # outstanding reviewer fix findings (dicts) -> next packet
+    # Discovery-only seed: pre-populate with every seed found across the run so
+    # far, so the first (and only the first) packet presents them as prior
+    # findings; every later round overwrites this with that round's own
+    # outstanding fix findings (see the bottom of the loop below).
+    prior_findings = list(seeded_findings) if seeded_findings else []
     applied_fix = False
     coverage_retry = False
     review_attempts = 0     # count of REVIEWS actually dispatched (may lag `attempt`
@@ -1226,7 +1266,11 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 packet_path, packet_checklist, run_dir, "final",
             )
             review_attempts += 1
-            classify_findings(verdict, diff)
+            # run_diff=diff: the final review's own diff base *is* the run
+            # base, so in-run is unreachable here (In-run provenance and the
+            # seed disposition spec) — passed anyway so both classify_findings
+            # call sites in the runner are wired identically.
+            classify_findings(verdict, diff, run_diff=diff, carried_ids=state.carried_ids)
             findings = verdict.findings
 
         # The final review has no acceptance command that can regress, so the
@@ -1486,7 +1530,10 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
 
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
              timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
-    """Sequential whole-plan loop. Tasks already ``passed`` in this run-dir (a
+    """Sequential whole-plan loop. Every invocation first lints the plan (+ spec)
+    against documented grammar (Plan lint spec): any error defect is a contract
+    error before the run dir exists or anything dispatches, naming every defect;
+    a warning-only plan proceeds. Tasks already ``passed`` in this run-dir (a
     resume) are skipped; the rest run through execute_task in dependency order.
     Halts on the first escalation. After every task passes, one plan-level final
     review runs against the whole-plan diff + spec (git repo required), and — once
@@ -1496,14 +1543,21 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     ``auto`` runs the disposition matrix, ``gate`` halts on any finding.
     Defer-disposition findings from every task and the final review aggregate into
     ``run.json`` under ``deferrals`` (the runner never writes DEFERRALS.md — the
-    orchestrator does, at completion). ``effort_overrides`` (``{task_number:
+    orchestrator does, at completion). ``seed``-disposition findings (in-run x
+    contract-breaking — a finding against an earlier task's already-committed
+    work) similarly aggregate into ``run.json`` under ``seeded_findings``: logged,
+    the task's own run is never halted or reworked over them, and they seed the
+    final review's discovery packet as pre-seeded prior findings (In-run
+    provenance and the seed disposition spec). ``effort_overrides`` (``{task_number:
     level}``, from repeatable ``--effort N=LEVEL``) must reference only task
     numbers present in the plan — an unknown number raises naming the cause.
     ``timeout`` bounds every worker and reviewer ``codex exec`` call.
     ``run.json``'s ``threads`` map (Codex mechanics / Receipts spec) is reset to
     empty at the start of every invocation — including a resume — since a
     persisted session may be stale once a halt lets a human hand-edit code; a
-    thread id is never carried across runner invocations, only within one."""
+    thread id is never carried across runner invocations, only within one.
+    ``seeded_findings``, unlike ``threads``, IS read back from a prior
+    invocation's run.json so a seed logged before a resume point is preserved."""
     # Clean-tree precondition (every invocation, first run and resume): commit
     # discipline only yields clean per-task/whole-plan boundaries if the tree
     # starts clean. Checked before creating the run dir or `.forge/` gitignore so
@@ -1514,6 +1568,23 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             "working tree not clean at run start — commit or discard before "
             "re-invoking:\n{}".format("\n".join(dirty))
         )
+    # Plan lint (Plan lint spec): every documented-grammar defect, before any
+    # dispatch — a document defect can never be classified in-diff (a task's
+    # diff is code, not the plan/spec specifying it), so surfacing it here as
+    # a two-second contract error replaces what would otherwise become a
+    # pre-existing x contract-breaking halt mid-run. Every defect (error and
+    # warning) is printed; an error defect fails the run before the run dir is
+    # created or anything dispatches, naming every defect in the raised
+    # message too. A warning-only plan (e.g. a legal empty checklist) prints
+    # and proceeds.
+    lint_defects = forge_lint.lint_plan(plan_path, spec_path)
+    lint_lines = [
+        "[{}] {}: {}".format(d.severity, d.where, d.message) for d in lint_defects
+    ]
+    for line in lint_lines:
+        print(line, flush=True)
+    if any(d.severity == "error" for d in lint_defects):
+        raise RuntimeError("plan lint failed:\n" + "\n".join(lint_lines))
     # Parse and validate the plan BEFORE creating the run dir: an unparseable
     # plan (or an --effort pointing at a missing task) is a contract error that
     # must leave no run.json — the spec surfaces it via stderr only.
@@ -1574,13 +1645,20 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # place by dispatch_worker/_dispatch_review_call/dispatch_final_review_fix as
     # the run proceeds, and rewritten into run.json alongside every other field.
     threads = {}
+    # seed-disposition findings (in-run x contract-breaking; In-run provenance
+    # and the seed disposition spec) — unlike threads, this DOES read back a
+    # prior invocation's run.json, so a seed logged by an already-passed task
+    # is never lost when this invocation's own accumulator starts fresh; every
+    # task still executed this invocation appends its own seeds in place.
+    seeded_findings = list(_read_seeded_findings(run_dir) or [])
 
     # Incremental run.json: write `running` before the first task so --status/the
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
     # each passed task so live per-task progress is visible. base_commit rides
     # along so a resume still reads it; started_at/pid feed the monitor.
     write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
-                   started_at=run_started, pid=run_pid, threads=threads)
+                   started_at=run_started, pid=run_pid, threads=threads,
+                   seeded_findings=seeded_findings or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -1612,11 +1690,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # it completes).
         summary.update({"status": "running", "started_at": task_started})
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid, threads=threads)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads,
+                       seeded_findings=seeded_findings or None)
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
-            autofix_mode=autofix_mode,
+            autofix_mode=autofix_mode, run_base=run_base,
+            seeded_findings=seeded_findings,
         )
         deferrals.extend(outcome.deferrals)
         print("task {}: {} ({} attempt(s))".format(
@@ -1636,6 +1716,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             write_run_json(
                 run_dir, plan_path, spec_path, "running", task_summaries, run_base,
                 started_at=run_started, pid=run_pid, threads=threads,
+                seeded_findings=seeded_findings or None,
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
@@ -1649,7 +1730,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # whole final-review phase. Flush the corrected summaries before entering it.
     if not escalated:
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid, threads=threads)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads,
+                       seeded_findings=seeded_findings or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -1665,6 +1747,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             final_outcome = run_final_review_loop(
                 spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
+                seeded_findings=seeded_findings,
             )
             deferrals.extend(final_outcome.deferrals)
             if final_outcome.status == "escalated":
@@ -1696,7 +1779,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base,
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
-                   doc_sync=doc_sync_record, threads=threads)
+                   doc_sync=doc_sync_record, threads=threads,
+                   seeded_findings=seeded_findings or None)
     return 0 if overall == "passed" else 2
 
 
