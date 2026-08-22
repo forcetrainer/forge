@@ -167,7 +167,7 @@
 **Depends on:** Task 3.
 
 ### Task 7: Cross-harness canon
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (lint step at run start; the `seed` cell in the dispatch finding-handling matrix; coverage-on-discovery-only; multi-range locations)
