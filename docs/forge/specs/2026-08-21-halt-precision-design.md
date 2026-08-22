@@ -53,7 +53,7 @@ This is a **bug fix, not a rule change**. `convergence_decision` is not modified
 - An absent or unparseable location on a finding claiming `impact: "contract-breaking"` is a **verdict validation defect** — re-dispatched once naming the defect, then a contract error, reusing Phase 13's coverage-retry mechanism rather than a new one. It no longer degrades silently into `pre-existing`.
 - An improvement finding may still carry no location; it defers regardless of provenance, unchanged.
 
-## `in-run` provenance and the `seed` disposition
+## in-run provenance and the seed disposition
 
 The runner computes three-way provenance, all verified against real diffs, never trusted from the reviewer:
 
