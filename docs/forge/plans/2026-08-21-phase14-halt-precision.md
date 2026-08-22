@@ -186,7 +186,7 @@
 **Depends on:** Task 1, Task 2, Task 3, Task 4, Task 5, Task 6.
 
 ### Task 8: Changelog pointers, roadmap, lockstep version bump
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `docs/forge/specs/2026-07-16-phase7-scope-autonomy-design.md`, `docs/forge/specs/2026-08-21-review-continuity-design.md` (changelog lines)

@@ -149,3 +149,4 @@ This design claims: fewer laps, better repair continuity, less repeated discover
 ## Changelog
 
 2026-08-21: empty checklist is a library-level error but a runner-level skip with `coverage_skipped` on the receipt — the original rule made legal plans (no Spec/Global Constraints/prose acceptance) unexecutable. Found during Task 4 execution.
+2026-08-21 (phase 14): Phase 14 narrowed the coverage requirement this spec introduced to discovery verdicts only, after three reviewers died mid-verdict on large reviews; verification verdicts omit coverage, and location validation still runs on both kinds.
