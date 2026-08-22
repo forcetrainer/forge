@@ -46,7 +46,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Honor the convergence resolved label
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (resolved-label filter ahead of disposition)
