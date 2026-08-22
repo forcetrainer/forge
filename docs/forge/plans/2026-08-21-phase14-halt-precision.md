@@ -142,7 +142,7 @@
 **Depends on:** Task 1, Task 4.
 
 ### Task 6: Coverage on discovery only
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`REVIEW_VERDICT_INSTRUCTION` coverage wording)

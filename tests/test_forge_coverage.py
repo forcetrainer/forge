@@ -299,6 +299,162 @@ class ValidateLocationsUnitTests(unittest.TestCase):
         self.assertIn("f1", str(ctx.exception))
 
 
+class ReviewKindGatingTests(unittest.TestCase):
+    """Coverage on discovery only (Task 6): _verdict_defects/_review_with_
+    coverage validate coverage only when review_kind="discovery"; a
+    verification verdict with no coverage is accepted (no defect, no
+    retry); a verification verdict that DOES carry coverage is still
+    accepted, not penalized for the extra; location validation runs on
+    both kinds regardless."""
+
+    def _checklist_verdict_missing_coverage(self):
+        checklist = _checklist(["spec:A"])
+        verdict = forge_common.Verdict(kind="pass", findings=[], coverage=[])
+        return checklist, verdict
+
+    def test_discovery_missing_coverage_is_a_defect(self):
+        checklist, verdict = self._checklist_verdict_missing_coverage()
+        defects = forge_run._verdict_defects(verdict, checklist, review_kind="discovery")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+        self.assertIn("missing", defects[0])
+
+    def test_discovery_is_the_default_review_kind(self):
+        checklist, verdict = self._checklist_verdict_missing_coverage()
+        defects = forge_run._verdict_defects(verdict, checklist)
+        self.assertEqual(len(defects), 1)
+
+    def test_verification_missing_coverage_is_accepted(self):
+        checklist, verdict = self._checklist_verdict_missing_coverage()
+        defects = forge_run._verdict_defects(
+            verdict, checklist, review_kind="verification"
+        )
+        self.assertEqual(defects, [])
+
+    def test_verification_with_coverage_is_accepted_not_rejected_for_extra(self):
+        checklist = _checklist(["spec:A"])
+        verdict = forge_common.Verdict(
+            kind="pass", findings=[], coverage=[
+                forge_common.CoverageEntry(
+                    id="spec:A", status="satisfied", evidence="foo.py:2"
+                ),
+            ],
+        )
+        defects = forge_run._verdict_defects(
+            verdict, checklist, review_kind="verification"
+        )
+        self.assertEqual(defects, [])
+
+    def test_verification_bad_coverage_still_accepted(self):
+        # Even coverage that WOULD be a defect on discovery (unknown id,
+        # duplicate, empty evidence...) is simply not looked at on
+        # verification — the coverage sweep itself is skipped, not merely
+        # forgiven for specific defect kinds.
+        checklist = _checklist(["spec:A"])
+        verdict = forge_common.Verdict(
+            kind="pass", findings=[], coverage=[
+                forge_common.CoverageEntry(
+                    id="spec:ZZZ", status="satisfied", evidence=""
+                ),
+            ],
+        )
+        defects = forge_run._verdict_defects(
+            verdict, checklist, review_kind="verification"
+        )
+        self.assertEqual(defects, [])
+
+    def test_location_defects_checked_on_both_kinds(self):
+        finding = forge_common.Finding(
+            id="f1", summary="x", file="a.py", lines=None,
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="AC1",
+        )
+        verdict = forge_common.Verdict(kind="findings", findings=[finding], coverage=[])
+        for kind in ("discovery", "verification"):
+            defects = forge_run._verdict_defects(verdict, None, review_kind=kind)
+            self.assertEqual(len(defects), 1, kind)
+            self.assertIn("f1", defects[0])
+
+    def test_discovery_after_verification_still_demands_coverage(self):
+        # A verification lap's leniency must not leak into the next
+        # discovery lap (e.g. a fresh task after a prior task's rework).
+        checklist, verdict = self._checklist_verdict_missing_coverage()
+        self.assertEqual(
+            forge_run._verdict_defects(verdict, checklist, review_kind="verification"),
+            [],
+        )
+        defects = forge_run._verdict_defects(verdict, checklist, review_kind="discovery")
+        self.assertEqual(len(defects), 1)
+
+    def test_review_with_coverage_verification_no_retry_no_defect(self):
+        checklist = _checklist(["spec:A"])
+        msg = json.dumps({"verdict": "pass"})  # no coverage key at all
+        calls = []
+
+        def dispatch_call(packet_path):
+            calls.append(packet_path)
+            return forge_run.parse_verdict(msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            verdict, retried = forge_run._review_with_coverage(
+                dispatch_call, packet_path, checklist, run_dir=d,
+                label="task-1", review_kind="verification",
+            )
+        self.assertFalse(retried)
+        self.assertEqual(verdict.kind, "pass")
+        self.assertEqual(len(calls), 1)
+
+    def test_review_with_coverage_discovery_missing_coverage_retries_then_errors(self):
+        checklist = _checklist(["spec:A"])
+        msg = json.dumps({"verdict": "pass"})  # no coverage key -> discovery defect
+
+        def dispatch_call(packet_path):
+            return forge_run.parse_verdict(msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            with self.assertRaises(RuntimeError) as ctx:
+                forge_run._review_with_coverage(
+                    dispatch_call, packet_path, checklist, run_dir=d,
+                    label="task-1", review_kind="discovery",
+                )
+        self.assertIn("still invalid after one retry", str(ctx.exception))
+        self.assertIn("spec:A", str(ctx.exception))
+
+
+class ReviewKindPacketMarkerTests(unittest.TestCase):
+    """Packets carry an explicit '## Review kind' marker naming discovery or
+    verification, so the reviewer knows which verdict contract applies
+    (Coverage on discovery only spec)."""
+
+    def test_discovery_packet_carries_discovery_marker(self):
+        packet = forge_common.rp.build_packet(
+            "### Task 1: X\nbody\n", "abc123", "diff --git a/f b/f\n+x\n",
+            review_kind="discovery",
+        )
+        self.assertIn("## Review kind\n\ndiscovery\n", packet)
+
+    def test_verification_packet_carries_verification_marker_by_default(self):
+        findings = [{"id": "f1", "summary": "x"}]
+        packet = forge_common.rp.build_verification_packet(
+            findings, "diff --git a/f b/f\n+x\n", None
+        )
+        self.assertIn("## Review kind\n\nverification\n", packet)
+
+    def test_build_packet_omits_marker_when_review_kind_none(self):
+        # The CLI (review-packet.py's main()) never passes review_kind, so
+        # its output stays byte-identical to pre-Task-6 behavior.
+        packet = forge_common.rp.build_packet(
+            "### Task 1: X\nbody\n", "abc123", "diff --git a/f b/f\n+x\n",
+        )
+        self.assertNotIn("Review kind", packet)
+
+
 class ForgeDisposeCLIChecklistTests(unittest.TestCase):
     """--checklist through the CLI boundary: decision.json fields, and byte-
     identical output to today's shape when the flag is absent."""

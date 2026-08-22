@@ -152,7 +152,8 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
         )
     diff = _git_diff(cwd, base)
     packet = rp.build_packet(
-        block, base, diff, prior_findings=prior_findings, checklist=checklist
+        block, base, diff, prior_findings=prior_findings, checklist=checklist,
+        review_kind="discovery",
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:
@@ -174,7 +175,8 @@ def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
     with open(spec_path, "r", encoding="utf-8") as f:
         spec_text = f.read()
     packet = rp.build_packet(
-        spec_text, base, diff, prior_findings=prior_findings, checklist=checklist
+        spec_text, base, diff, prior_findings=prior_findings, checklist=checklist,
+        review_kind="discovery",
     )
     path = os.path.join(run_dir, "final-review.md")
     with open(path, "w", encoding="utf-8") as f:

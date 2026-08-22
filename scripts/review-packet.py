@@ -122,6 +122,15 @@ def diagnose_missing_task(text, task_number, plan_path):
     return "Task {} not found in {}".format(task_number, plan_path)
 
 
+def build_review_kind_section(review_kind):
+    """Render the '## Review kind' marker that tells the reviewer which
+    verdict contract applies: 'discovery' (full contract sweep, coverage
+    required) or 'verification' (prior findings + repair delta, coverage
+    omitted). Placed first in the packet so it's the first thing the
+    reviewer reads (Coverage on discovery only spec)."""
+    return "## Review kind\n\n{}\n".format(review_kind)
+
+
 def build_checklist_section(checklist):
     """Render a '## Contract checklist' markdown section, one line per item
     as '- <id> — <text>' — mirrors forge_checklist.render_section's format.
@@ -152,7 +161,13 @@ def build_prior_findings_section(prior_findings):
     )
 
 
-def build_packet(task_block, base, diff_output, prior_findings=None, checklist=None):
+def build_packet(task_block, base, diff_output, prior_findings=None,
+                  checklist=None, review_kind=None):
+    """``review_kind`` (None by default) opts into the '## Review kind'
+    marker — the CLI (main(), below) never passes it, so its output stays
+    byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
+    (the runner's real discovery packets) pass ``review_kind="discovery"``
+    explicitly (Coverage on discovery only spec)."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -171,10 +186,12 @@ def build_packet(task_block, base, diff_output, prior_findings=None, checklist=N
         packet += "\n" + build_checklist_section(checklist)
     if prior_findings is not None:
         packet += "\n" + build_prior_findings_section(prior_findings)
+    if review_kind is not None:
+        packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
 
 
-def build_verification_packet(findings, delta_diff, checklist):
+def build_verification_packet(findings, delta_diff, checklist, review_kind="verification"):
     """Delta-scoped verification packet for a resumed reviewer (Delta-scoped
     verification packets spec): the outstanding findings + the repair delta +
     the reduced checklist — never the task block, the full spec, or the
@@ -190,7 +207,9 @@ def build_verification_packet(findings, delta_diff, checklist):
     ``build_packet``'s own None-skips-section handling. Reuses
     ``build_packet``'s fence-safety: a dynamic-length fence sized past the
     longest backtick run in the delta, so a delta line containing ``` can't
-    close the block early."""
+    close the block early. ``review_kind`` defaults to "verification" (this
+    builder's only real use) and prepends the '## Review kind' marker;
+    pass None to omit it."""
     body = json.dumps(findings, indent=2)
     if not body.endswith("\n"):
         body += "\n"
@@ -213,6 +232,8 @@ def build_verification_packet(findings, delta_diff, checklist):
     packet = findings_section + "\n" + delta_section
     if checklist is not None:
         packet += "\n" + build_checklist_section(checklist)
+    if review_kind is not None:
+        packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
 
 

@@ -506,38 +506,47 @@ def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
     return path
 
 
-def _verdict_defects(verdict, checklist):
+def _verdict_defects(verdict, checklist, review_kind="discovery"):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
-    empty-checklist skip case, Contract checklist spec) plus location defects
-    (``validate_locations`` — always checked, checklist or not; a
-    contract-breaking finding with an absent or unparseable location is a
-    defect regardless of whether this task has a checklist). Both defect
-    kinds are plain human-readable strings in the same shape, so they share
-    one retry-once-then-contract-error mechanism (Location parsing spec,
-    2026-08-21 — reuses Phase 13's coverage retry rather than adding a second
-    one)."""
-    defects = list(forge_dispose.validate_coverage(verdict, checklist)) if checklist else []
+    empty-checklist skip case, Contract checklist spec — OR when
+    ``review_kind`` is "verification": coverage is required on discovery
+    verdicts only, omitted on verification verdicts, and a verification
+    verdict that carries coverage anyway is not penalized for it — Coverage
+    on discovery only spec) plus location defects (``validate_locations`` —
+    always checked on BOTH kinds, checklist or not; a contract-breaking
+    finding with an absent or unparseable location is a defect regardless of
+    whether this task has a checklist or which review kind this is). Both
+    defect kinds are plain human-readable strings in the same shape, so they
+    share one retry-once-then-contract-error mechanism (Location parsing
+    spec, 2026-08-21 — reuses Phase 13's coverage retry rather than adding a
+    second one)."""
+    defects = (
+        list(forge_dispose.validate_coverage(verdict, checklist))
+        if checklist and review_kind == "discovery" else []
+    )
     defects += forge_dispose.validate_locations(verdict)
     return defects
 
 
-def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label):
+def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
+                           review_kind="discovery"):
     """Dispatch a review and validate its verdict against ``checklist``
-    (coverage) and its findings' locations (``_verdict_defects``). Validate
-    the first verdict; on any defects, re-dispatch **exactly once** with the
-    defects named in the retry packet's prompt; a second invalid verdict is a
-    contract error (raised, uncaught — same class as an unparseable verdict,
-    never a halt). This is not a rework attempt: the caller must not advance
-    the convergence attempt counter or touch ConvergenceState for the retry.
-    Returns ``(verdict, retried)``."""
+    (coverage, discovery only) and its findings' locations (both kinds) via
+    ``_verdict_defects``. Validate the first verdict; on any defects,
+    re-dispatch **exactly once** with the defects named in the retry
+    packet's prompt; a second invalid verdict is a contract error (raised,
+    uncaught — same class as an unparseable verdict, never a halt). This is
+    not a rework attempt: the caller must not advance the convergence
+    attempt counter or touch ConvergenceState for the retry. Returns
+    ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
-    defects = _verdict_defects(verdict, checklist)
+    defects = _verdict_defects(verdict, checklist, review_kind)
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
     verdict = dispatch_call(retry_path)
-    defects = _verdict_defects(verdict, checklist)
+    defects = _verdict_defects(verdict, checklist, review_kind)
     if defects:
         raise RuntimeError(
             "reviewer verdict still invalid after one retry: {}".format(
@@ -748,6 +757,15 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             # within this attempt, the coverage-retry call (if any) also
             # stays cold rather than re-attempting a session already known bad.
             is_verification = review_attempts > 0
+            # The packet actually built (not just is_verification) decides
+            # which verdict contract applies: a stateful edge case
+            # (review_attempts > 0 but no repair_snapshot) still falls
+            # through to the discovery-shaped packet below, so coverage
+            # validation must track the packet, not the flag.
+            packet_review_kind = (
+                "verification" if is_verification and repair_snapshot is not None
+                else "discovery"
+            )
             if is_verification and repair_snapshot is not None:
                 # Delta-scoped verification packet (Delta-scoped verification
                 # packets spec): the resumed reviewer already holds the task
@@ -807,6 +825,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             verdict, coverage_retry = _review_with_coverage(
                 _reviewer_dispatch_call,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
+                review_kind=packet_review_kind,
             )
             review_attempts += 1
             run_diff_text = _git_diff(cwd, run_base) if run_base else None
@@ -1218,6 +1237,12 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             # diff in session, so re-sending them is exactly the waste this
             # phase removes.
             is_verification = review_attempts > 0
+            # Track the packet actually built, not just the flag (same edge
+            # case as the per-task reviewer above).
+            packet_review_kind = (
+                "verification" if is_verification and repair_snapshot is not None
+                else "discovery"
+            )
             if is_verification and repair_snapshot is not None:
                 delta_diff = _git_diff(cwd, repair_snapshot)
                 packet_checklist = (
@@ -1264,6 +1289,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             verdict, coverage_retry = _review_with_coverage(
                 _final_reviewer_dispatch_call,
                 packet_path, packet_checklist, run_dir, "final",
+                review_kind=packet_review_kind,
             )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run
