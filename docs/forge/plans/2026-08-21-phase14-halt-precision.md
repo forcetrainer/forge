@@ -21,7 +21,7 @@
 - `docs/forge/specs/2026-07-16-phase7-scope-autonomy-design.md`, `docs/forge/specs/2026-08-21-review-continuity-design.md`, `docs/forge/ROADMAP.md`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` (modify) — changelog pointers, phase status, lockstep 0.10.0.
 
 ### Task 1: Plan/spec lint
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Create: `scripts/forge_lint.py`
