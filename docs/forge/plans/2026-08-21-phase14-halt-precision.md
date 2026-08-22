@@ -68,7 +68,7 @@
 **Depends on:** nothing.
 
 ### Task 3: Location parsing and validation
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`_parse_lines`, location validation)

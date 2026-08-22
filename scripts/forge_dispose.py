@@ -40,11 +40,15 @@ def _finding_from_obj(obj):
     """Build one Finding from a reviewer finding object (the per-finding schema —
     nested ``location`` mirrored by finding_to_dict). The reviewer-proposed
     provenance/impact ride through unchanged; the runner verifies/derives them
-    later (classify_findings). Raises RuntimeError when the finding is not an
-    object, or when a ``contract-breaking`` finding omits its location — without a
-    file/line to point at, provenance cannot be verified against the diff, so an
-    unlocated contract-breaking claim is a contract error, never a silent guess
-    (Reviewer verdict contract; DECISIONS 2026-07-11)."""
+    later (classify_findings). Raises RuntimeError only when the finding is not
+    a JSON object — a ``contract-breaking`` finding with an absent or
+    unparseable location is *not* raised here. Without a file/line to point
+    at, provenance cannot be verified against the diff, but that is now a
+    verdict validation defect (``validate_locations``), reported and
+    re-dispatched through the same retry as a coverage defect, rather than an
+    immediate contract error — a reviewer who names one range gets the same
+    treatment as one who names two (Location parsing spec, 2026-08-21;
+    supersedes the immediate raise from DECISIONS 2026-07-11)."""
     if not isinstance(obj, dict):
         raise RuntimeError(
             "reviewer finding is not a JSON object (per-finding schema required); "
@@ -54,12 +58,6 @@ def _finding_from_obj(obj):
     file = location.get("file")
     lines = location.get("lines")
     impact = obj.get("impact")
-    if impact == "contract-breaking" and (file is None or lines is None):
-        raise RuntimeError(
-            "reviewer finding {!r} is contract-breaking but omits its location "
-            "(location.file/location.lines) — provenance cannot be verified "
-            "against the diff".format(obj.get("id"))
-        )
     return Finding(
         id=obj.get("id"),
         summary=obj.get("summary", ""),
@@ -106,9 +104,10 @@ def _verdict_from_obj(obj):
     """Build the Verdict from a recognized verdict-shaped object (``verdict`` is
     ``pass`` or ``findings``; the authoritative last one in the stream). ``pass``
     carries no findings; ``findings`` parses each finding object into a Finding via
-    _finding_from_obj — which raises loudly on a malformed or unlocated
-    contract-breaking finding rather than dropping it. ``coverage`` is parsed on
-    either verdict kind (present or absent) via _coverage_from_obj."""
+    _finding_from_obj — which raises loudly only on a malformed finding object,
+    never on an unlocated contract-breaking one (that is validate_locations'
+    job). ``coverage`` is parsed on either verdict kind (present or absent) via
+    _coverage_from_obj."""
     coverage = _coverage_from_obj(obj)
     if obj["verdict"] == "pass":
         return Verdict(kind="pass", coverage=coverage)
@@ -129,9 +128,11 @@ def parse_verdict(last_message):
     """Extract the reviewer verdict: the last parseable JSON object in the
     message (fenced or bare) whose ``verdict`` is ``pass`` or ``findings``. No
     such object raises RuntimeError naming the cause; a recognized findings
-    verdict with a malformed / unlocated contract-breaking finding raises from
-    _verdict_from_obj — never guessed, never retried silently (DECISIONS
-    2026-07-11). The recognizer (last-object-wins) is deliberately separate from
+    verdict with a malformed finding object raises from _verdict_from_obj —
+    never guessed. An unlocated or unparseable-location contract-breaking
+    finding parses fine here; it surfaces as a validate_locations defect,
+    retried the same way as a coverage defect (Location parsing spec,
+    2026-08-21). The recognizer (last-object-wins) is deliberately separate from
     the strict build so only the authoritative verdict is parsed."""
     decoder = json.JSONDecoder()
     found = None  # last verdict-shaped raw dict in the stream
@@ -196,36 +197,107 @@ def diff_line_ranges(diff_text):
     return ranges
 
 
-def _parse_lines(lines):
-    """Parse a finding's ``lines`` field (``"12-20"`` or ``"12"``) into an
-    inclusive ``(lo, hi)`` pair, or None when absent/unparseable (an improvement
-    finding may carry no location — it defers regardless of provenance)."""
-    if not lines:
+def _parse_one_range(text):
+    """Parse a single range token (``"12-20"`` or ``"12"``, whitespace
+    tolerated) into an inclusive ``(lo, hi)`` pair, or None when it is not one
+    of those two forms (e.g. ``"abc"`` or ``"12--20"``)."""
+    text = text.strip()
+    if not text:
         return None
+    if "-" in text:
+        parts = text.split("-")
+        if len(parts) != 2:
+            return None
+        lo_text, hi_text = parts[0].strip(), parts[1].strip()
+        if not lo_text or not hi_text:
+            return None
+        try:
+            return int(lo_text), int(hi_text)
+        except ValueError:
+            return None
     try:
-        text = str(lines).strip()
-        if "-" in text:
-            lo, hi = text.split("-", 1)
-            return int(lo), int(hi)
         n = int(text)
         return n, n
-    except (ValueError, TypeError):
+    except ValueError:
         return None
+
+
+def _parse_lines(lines):
+    """Parse a finding's ``lines`` field into a **list** of inclusive
+    ``(lo, hi)`` pairs, or None when absent or genuinely unparseable. Accepts
+    a single number (``"12"``), a single range (``"12-20"``), or a
+    comma-separated combination of both (``"12-20,45,60-62"``), whitespace
+    tolerated around commas and dashes. A reviewer who names two ranges gets
+    the same treatment as one who names a single range spanning both — the
+    prior single-range-only parser silently returned None for a
+    comma-separated location, misclassifying it as having no evidence at all
+    (Location parsing spec, 2026-08-21). Any one malformed token invalidates
+    the whole field — a mix of one good range and one bad one is not silently
+    downgraded to just the good half; it is reported as unparseable via
+    validate_locations, never guessed at."""
+    if not lines:
+        return None
+    text = str(lines).strip()
+    if not text:
+        return None
+    ranges = []
+    for token in text.split(","):
+        span = _parse_one_range(token)
+        if span is None:
+            return None
+        ranges.append(span)
+    return ranges or None
 
 
 def verify_provenance(finding, ranges):
-    """Runner-verified provenance: ``in-diff`` when the finding's lines intersect
-    one of the changed ranges for its file, else ``pre-existing`` — overriding any
-    optimistic reviewer claim (a finding outside the diff is pre-existing no
-    matter how it was labeled; Disposition matrix)."""
-    span = _parse_lines(finding.lines)
-    if span is None:
+    """Runner-verified provenance: ``in-diff`` when **any** of the finding's
+    parsed line ranges intersects one of the changed ranges for its file, else
+    ``pre-existing`` — overriding any optimistic reviewer claim (a finding
+    outside the diff is pre-existing no matter how it was labeled; Disposition
+    matrix). A finding with no location, or one whose location is
+    unparseable, also falls through to ``pre-existing`` here as a defensive
+    default — by the time a contract-breaking finding reaches this function
+    its location has already been validated (validate_locations, retried via
+    the reviewer verdict contract), so this fallback exists for callers that
+    invoke verify_provenance directly and for non-contract-breaking findings."""
+    spans = _parse_lines(finding.lines)
+    if spans is None:
         return "pre-existing"
-    lo, hi = span
-    for start, end in ranges.get(finding.file, []):
-        if lo <= end and start <= hi:  # inclusive-range overlap
-            return "in-diff"
+    file_ranges = ranges.get(finding.file, [])
+    for lo, hi in spans:
+        for start, end in file_ranges:
+            if lo <= end and start <= hi:  # inclusive-range overlap
+                return "in-diff"
     return "pre-existing"
+
+
+def validate_locations(verdict):
+    """Validate a reviewer verdict's finding locations. Returns a list of
+    human-readable defect strings — empty means valid — in the same shape as
+    validate_coverage's, so both feed the same retry-once-then-contract-error
+    mechanism (Phase 13's ``_review_with_coverage``; Location parsing spec,
+    2026-08-21). A finding claiming ``impact: "contract-breaking"`` must carry
+    a parseable ``location.lines``: absent or unparseable is a defect. An
+    improvement finding may still carry no location — it defers regardless of
+    provenance, so it is never checked here."""
+    if verdict.kind != "findings":
+        return []
+    defects = []
+    for finding in verdict.findings:
+        if finding.impact != "contract-breaking":
+            continue
+        if finding.lines is None:
+            defects.append(
+                "contract-breaking finding {!r} has no location.lines".format(
+                    finding.id
+                )
+            )
+        elif _parse_lines(finding.lines) is None:
+            defects.append(
+                "contract-breaking finding {!r} has unparseable "
+                "location.lines: {!r}".format(finding.id, finding.lines)
+            )
+    return defects
 
 
 def derive_disposition(finding):
@@ -642,6 +714,19 @@ def main(argv=None):
                 return 1
             verdict = _verdict_from_obj(raw)
             if verdict.kind == "findings":
+                # The CLI has no retry loop of its own (that lives in
+                # forge-run.py's _review_with_coverage, for the harness that
+                # has one) — so here, unlike there, an invalid location is a
+                # loud contract error rather than a retried defect. Checked
+                # before classify_findings so an unlocated/unparseable
+                # contract-breaking claim never silently falls through to
+                # pre-existing (Location parsing spec, 2026-08-21).
+                location_defects = validate_locations(verdict)
+                if location_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid finding location(s): "
+                        + "; ".join(location_defects)
+                    )
                 diff_text = _run_git_diff(args.base)
                 verdict = classify_findings(verdict, diff_text)
             findings = verdict.findings

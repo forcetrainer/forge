@@ -118,6 +118,49 @@ class DiffLineRangesTests(unittest.TestCase):
         self.assertEqual(forge_run.diff_line_ranges(""), {})
 
 
+class ParseLinesTests(unittest.TestCase):
+    """_parse_lines: single number, single range, comma-separated combinations,
+    whitespace tolerance, and genuinely malformed strings."""
+
+    def test_single_number(self):
+        self.assertEqual(forge_run._parse_lines("12"), [(12, 12)])
+
+    def test_single_range(self):
+        self.assertEqual(forge_run._parse_lines("12-20"), [(12, 20)])
+
+    def test_comma_separated_ranges(self):
+        self.assertEqual(
+            forge_run._parse_lines("120-152,182-199"), [(120, 152), (182, 199)]
+        )
+
+    def test_mixed_numbers_and_ranges(self):
+        self.assertEqual(
+            forge_run._parse_lines("12-20,45,60-62"),
+            [(12, 20), (45, 45), (60, 62)],
+        )
+
+    def test_whitespace_tolerated(self):
+        self.assertEqual(
+            forge_run._parse_lines(" 12-20 , 45 , 60-62 "),
+            [(12, 20), (45, 45), (60, 62)],
+        )
+
+    def test_absent_is_none(self):
+        self.assertIsNone(forge_run._parse_lines(None))
+        self.assertIsNone(forge_run._parse_lines(""))
+
+    def test_malformed_string_is_none(self):
+        self.assertIsNone(forge_run._parse_lines("abc"))
+
+    def test_double_dash_is_none(self):
+        self.assertIsNone(forge_run._parse_lines("12--20"))
+
+    def test_one_bad_token_invalidates_whole_field(self):
+        # A mix of one good range and one bad one is not silently downgraded
+        # to just the good half — the whole field is unparseable.
+        self.assertIsNone(forge_run._parse_lines("12-20,abc"))
+
+
 class VerifyProvenanceTests(unittest.TestCase):
     """verify_provenance: intersect the finding's lines with the diff's changed
     ranges for that file — in-diff on overlap, pre-existing otherwise, regardless
@@ -146,6 +189,17 @@ class VerifyProvenanceTests(unittest.TestCase):
         # Reviewer optimistically labels it in-diff, but the lines fall outside
         # every changed range — the runner overrides to pre-existing.
         f = _finding(file="foo.py", lines="40", provenance="in-diff")
+        self.assertEqual(forge_run.verify_provenance(f, self.ranges), "pre-existing")
+
+    def test_any_range_intersecting_is_in_diff(self):
+        # The real-world motivating case: a comma-separated location where
+        # only the second range falls inside the diff must still resolve to
+        # in-diff — not silently fall through to pre-existing.
+        f = _finding(file="foo.py", lines="1-5,13-14")
+        self.assertEqual(forge_run.verify_provenance(f, self.ranges), "in-diff")
+
+    def test_no_range_intersecting_is_pre_existing(self):
+        f = _finding(file="foo.py", lines="1-5,40-42")
         self.assertEqual(forge_run.verify_provenance(f, self.ranges), "pre-existing")
 
 
@@ -256,27 +310,97 @@ class ParseVerdictTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             forge_run.parse_verdict('{"verdict": ')
 
-    def test_contract_breaking_missing_location_raises(self):
+    def test_contract_breaking_missing_location_parses_but_flags_as_defect(self):
+        # Absent location no longer raises at parse time (Location parsing
+        # spec, 2026-08-21) — it parses fine, with lines=None, and surfaces
+        # as a validate_locations defect instead, retried the same way as a
+        # coverage defect rather than crashing the whole review.
         msg = (
             '{"verdict": "findings", "findings": ['
             '{"id": "f1", "summary": "broken", '
             '"impact": "contract-breaking", "contract_ref": "AC1"}]}'
         )
-        with self.assertRaises(RuntimeError) as ctx:
-            forge_run.parse_verdict(msg)
-        self.assertIn("location", str(ctx.exception).lower())
+        v = forge_run.parse_verdict(msg)
+        self.assertEqual(v.kind, "findings")
+        self.assertIsNone(v.findings[0].lines)
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+        self.assertIn("no location", defects[0])
 
-    def test_contract_breaking_missing_lines_raises(self):
+    def test_contract_breaking_missing_lines_parses_but_flags_as_defect(self):
         # location present but lines omitted is still incomplete for a
-        # contract-breaking finding.
+        # contract-breaking finding — same defect treatment as fully absent.
         msg = (
             '{"verdict": "findings", "findings": ['
             '{"id": "f1", "summary": "broken", '
             '"location": {"file": "a.py"}, '
             '"impact": "contract-breaking", "contract_ref": "AC1"}]}'
         )
-        with self.assertRaises(RuntimeError):
-            forge_run.parse_verdict(msg)
+        v = forge_run.parse_verdict(msg)
+        self.assertEqual(v.findings[0].file, "a.py")
+        self.assertIsNone(v.findings[0].lines)
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+
+
+class ValidateLocationsTests(unittest.TestCase):
+    """validate_locations: a verdict validation defect for a contract-breaking
+    finding with an absent or unparseable location.lines; an improvement
+    finding is never checked (it may carry no location and defers
+    regardless of provenance)."""
+
+    def test_pass_verdict_is_valid(self):
+        v = forge_common.Verdict(kind="pass")
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_contract_breaking_with_parseable_location_is_valid(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1",
+                     lines="120-152,182-199"),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_contract_breaking_absent_location_is_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1", lines=None),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("no location", defects[0])
+
+    def test_contract_breaking_unparseable_location_is_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1", lines="abc"),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("unparseable", defects[0])
+
+    def test_improvement_with_no_location_is_not_a_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="improvement", contract_ref=None, lines=None),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_improvement_with_unparseable_location_is_not_a_defect(self):
+        # Only a contract-breaking claim requires a parseable location; an
+        # improvement finding's location, if present at all, is never
+        # validated.
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="improvement", contract_ref=None, lines="abc"),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_multiple_defects_named_individually(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(id="f1", impact="contract-breaking", contract_ref="AC1",
+                     lines=None),
+            _finding(id="f2", impact="contract-breaking", contract_ref="AC2",
+                     lines="abc"),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 2)
 
 
 class ClassifyFindingsTests(unittest.TestCase):

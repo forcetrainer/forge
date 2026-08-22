@@ -93,6 +93,7 @@ from forge_dispose import (  # noqa: F401
     _canon,
     _finding_from_obj,
     _is_execution_failure,
+    _parse_lines,
     _real_fix_canons,
     _verdict_from_obj,
     advance_state,
@@ -101,6 +102,7 @@ from forge_dispose import (  # noqa: F401
     derive_disposition,
     diff_line_ranges,
     parse_verdict,
+    validate_locations,
     verify_provenance,
 )
 from forge_git import (  # noqa: F401
@@ -502,29 +504,41 @@ def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
     return path
 
 
+def _verdict_defects(verdict, checklist):
+    """Every verdict validation defect for one dispatched verdict: coverage
+    defects against ``checklist`` (skipped when ``checklist`` is falsy — the
+    empty-checklist skip case, Contract checklist spec) plus location defects
+    (``validate_locations`` — always checked, checklist or not; a
+    contract-breaking finding with an absent or unparseable location is a
+    defect regardless of whether this task has a checklist). Both defect
+    kinds are plain human-readable strings in the same shape, so they share
+    one retry-once-then-contract-error mechanism (Location parsing spec,
+    2026-08-21 — reuses Phase 13's coverage retry rather than adding a second
+    one)."""
+    defects = list(forge_dispose.validate_coverage(verdict, checklist)) if checklist else []
+    defects += forge_dispose.validate_locations(verdict)
+    return defects
+
+
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label):
-    """Dispatch a review and validate its verdict's coverage against
-    ``checklist``. ``checklist`` falsy (None or empty — the empty-checklist
-    skip case) skips validation entirely: no retry, coverage untouched
-    (Contract checklist spec). Otherwise: validate the first verdict; on
-    defects, re-dispatch **exactly once** with the defects named in the
-    retry packet's prompt; a second invalid verdict is a contract error
-    (raised, uncaught — same class as an unparseable verdict, never a halt).
-    This is not a rework attempt: the caller must not advance the
-    convergence attempt counter or touch ConvergenceState for the retry.
-    Returns ``(verdict, coverage_retried)``."""
+    """Dispatch a review and validate its verdict against ``checklist``
+    (coverage) and its findings' locations (``_verdict_defects``). Validate
+    the first verdict; on any defects, re-dispatch **exactly once** with the
+    defects named in the retry packet's prompt; a second invalid verdict is a
+    contract error (raised, uncaught — same class as an unparseable verdict,
+    never a halt). This is not a rework attempt: the caller must not advance
+    the convergence attempt counter or touch ConvergenceState for the retry.
+    Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
-    if not checklist:
-        return verdict, False
-    defects = forge_dispose.validate_coverage(verdict, checklist)
+    defects = _verdict_defects(verdict, checklist)
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
     verdict = dispatch_call(retry_path)
-    defects = forge_dispose.validate_coverage(verdict, checklist)
+    defects = _verdict_defects(verdict, checklist)
     if defects:
         raise RuntimeError(
-            "reviewer verdict coverage still invalid after one retry: {}".format(
+            "reviewer verdict still invalid after one retry: {}".format(
                 "; ".join(defects)
             )
         )

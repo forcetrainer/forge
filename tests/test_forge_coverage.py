@@ -187,6 +187,118 @@ class ValidateCoverageTests(unittest.TestCase):
         self.assertIn("missing", defects[0])
 
 
+class ValidateLocationsUnitTests(unittest.TestCase):
+    """validate_locations's defect catalogue (mirrors ValidateCoverageTests'
+    shape) plus proof that forge-run.py's _review_with_coverage reuses it
+    through the existing coverage-retry mechanism — no second retry path."""
+
+    def _finding(self, **kw):
+        base = dict(
+            id="f1", summary="x", file="a.py", lines="12-20",
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="AC1",
+        )
+        base.update(kw)
+        return forge_common.Finding(**base)
+
+    def test_contract_breaking_absent_location_is_defect(self):
+        v = forge_common.Verdict(
+            kind="findings", findings=[self._finding(lines=None)]
+        )
+        defects = forge_dispose.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+
+    def test_contract_breaking_unparseable_location_is_defect(self):
+        v = forge_common.Verdict(
+            kind="findings", findings=[self._finding(lines="12--20")]
+        )
+        defects = forge_dispose.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+
+    def test_contract_breaking_comma_separated_location_is_valid(self):
+        v = forge_common.Verdict(
+            kind="findings",
+            findings=[self._finding(lines="120-152,182-199")],
+        )
+        self.assertEqual(forge_dispose.validate_locations(v), [])
+
+    def test_improvement_no_location_defers_not_a_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(impact="improvement", contract_ref=None, lines=None),
+        ])
+        self.assertEqual(forge_dispose.validate_locations(v), [])
+
+    def test_review_with_coverage_reuses_existing_retry_no_second_mechanism(self):
+        # forge-run.py's _review_with_coverage (Phase 13's coverage retry)
+        # must be the sole mechanism location defects flow through — no
+        # parallel "_review_with_location"-style function was added.
+        self.assertTrue(hasattr(forge_run, "_review_with_coverage"))
+        location_retry_fns = [
+            name for name in dir(forge_run)
+            if "location" in name.lower() and "retry" in name.lower()
+        ]
+        self.assertEqual(
+            location_retry_fns, [],
+            "a second retry mechanism was added: {}".format(location_retry_fns),
+        )
+
+        bad_msg = json.dumps({
+            "verdict": "findings",
+            "coverage": [],
+            "findings": [{
+                "id": "f1", "summary": "broken",
+                "impact": "contract-breaking", "contract_ref": "AC1",
+                "location": {"file": "a.py"},
+            }],
+        })
+        good_msg = json.dumps({"verdict": "pass", "coverage": []})
+        calls = []
+
+        def dispatch_call(packet_path):
+            calls.append(packet_path)
+            msg = bad_msg if len(calls) == 1 else good_msg
+            return forge_run.parse_verdict(msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            verdict, retried = forge_run._review_with_coverage(
+                dispatch_call, packet_path, checklist=None, run_dir=d,
+                label="task-1",
+            )
+        self.assertTrue(retried)
+        self.assertEqual(verdict.kind, "pass")
+        self.assertEqual(len(calls), 2)
+
+    def test_review_with_coverage_second_invalid_location_is_contract_error(self):
+        bad_msg = json.dumps({
+            "verdict": "findings",
+            "coverage": [],
+            "findings": [{
+                "id": "f1", "summary": "broken",
+                "impact": "contract-breaking", "contract_ref": "AC1",
+                "location": {"file": "a.py"},
+            }],
+        })
+
+        def dispatch_call(packet_path):
+            return forge_run.parse_verdict(bad_msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            with self.assertRaises(RuntimeError) as ctx:
+                forge_run._review_with_coverage(
+                    dispatch_call, packet_path, checklist=None, run_dir=d,
+                    label="task-1",
+                )
+        self.assertIn("still invalid after one retry", str(ctx.exception))
+        self.assertIn("f1", str(ctx.exception))
+
+
 class ForgeDisposeCLIChecklistTests(unittest.TestCase):
     """--checklist through the CLI boundary: decision.json fields, and byte-
     identical output to today's shape when the flag is absent."""
