@@ -1,7 +1,7 @@
 {
-  "name": "forge",
+  "name": "forge-beta",
   "interface": {
-    "displayName": "forge"
+    "displayName": "forge-beta"
   },
   "plugins": [
     {
