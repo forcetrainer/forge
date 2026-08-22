@@ -82,17 +82,24 @@ def _read_run_tasks(run_dir):
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
-                   deferrals=None, autofix_mode=None, doc_sync=None, threads=None):
+                   deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
+                   seeded_findings=None):
     """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
     ``started_at``/``updated_at``/``pid``) and the scope-autonomy fields
-    (``deferrals``/``autofix_mode``/``doc_sync``) are additive and optional —
-    omitted when None, so an old run.json shape and a caller that passes none
-    both stay valid. Per-task ``started_at``/``ended_at`` ride inside the
-    caller's task summaries. ``deferrals`` is the aggregated defer-disposition
-    finding list (Deferral handling spec); ``autofix_mode`` is ``"auto"`` |
-    ``"gate"``; ``doc_sync`` is the terminal reconcile-stage record. ``threads``
-    is the per-role ``codex exec`` session-id map (``task-N-worker`` |
-    ``task-N-reviewer`` | ``final-reviewer`` | ``final-fixer`` -> thread id),
+    (``deferrals``/``autofix_mode``/``doc_sync``/``seeded_findings``) are
+    additive and optional — omitted when None, so an old run.json shape and a
+    caller that passes none both stay valid. Per-task ``started_at``/``ended_at``
+    ride inside the caller's task summaries. ``deferrals`` is the aggregated
+    defer-disposition finding list (Deferral handling spec); ``autofix_mode``
+    is ``"auto"`` | ``"gate"``; ``doc_sync`` is the terminal reconcile-stage
+    record. ``seeded_findings`` is the aggregated seed-disposition finding list
+    (in-run x contract-breaking; Task 4's ``seed`` disposition) — it persists
+    across a resume and is what the end-of-plan summary surfaces, and what the
+    final review's discovery packet is pre-seeded from, whether or not that
+    review later confirms each one (wiring a runner-computed value into this
+    parameter is Task 5's job; this function only carries it through).
+    ``threads`` is the per-role ``codex exec`` session-id map (``task-N-worker``
+    | ``task-N-reviewer`` | ``final-reviewer`` | ``final-fixer`` -> thread id),
     reset by the caller at the start of every invocation — never carried across
     a resume — so it is written whenever the caller passes even an empty dict
     (unlike the other optional fields, which omit on None: an empty ``threads``
@@ -118,6 +125,7 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
         ("deferrals", deferrals),
         ("autofix_mode", autofix_mode),
         ("doc_sync", doc_sync),
+        ("seeded_findings", seeded_findings),
     ):
         if value is not None:
             data[key] = value

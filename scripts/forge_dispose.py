@@ -249,25 +249,45 @@ def _parse_lines(lines):
     return ranges or None
 
 
-def verify_provenance(finding, ranges):
+def _spans_intersect_ranges(spans, file_ranges):
+    """True when any of ``spans`` overlaps any of ``file_ranges`` (both lists
+    of inclusive ``(lo, hi)`` pairs) — the shared overlap test both provenance
+    tiers use."""
+    for lo, hi in spans:
+        for start, end in file_ranges:
+            if lo <= end and start <= hi:  # inclusive-range overlap
+                return True
+    return False
+
+
+def verify_provenance(finding, ranges, run_ranges=None):
     """Runner-verified provenance: ``in-diff`` when **any** of the finding's
-    parsed line ranges intersects one of the changed ranges for its file, else
-    ``pre-existing`` — overriding any optimistic reviewer claim (a finding
-    outside the diff is pre-existing no matter how it was labeled; Disposition
-    matrix). A finding with no location, or one whose location is
-    unparseable, also falls through to ``pre-existing`` here as a defensive
-    default — by the time a contract-breaking finding reaches this function
-    its location has already been validated (validate_locations, retried via
-    the reviewer verdict contract), so this fallback exists for callers that
-    invoke verify_provenance directly and for non-contract-breaking findings."""
+    parsed line ranges intersects one of the changed ranges for its file in
+    ``ranges`` (this review's diff), overriding any optimistic reviewer claim
+    (a finding outside the diff is pre-existing no matter how it was labeled;
+    Disposition matrix). When ``run_ranges`` is also supplied (the run's
+    cumulative diff from run-start HEAD) and the finding is not in-diff, it is
+    ``in-run`` when it intersects ``run_ranges`` instead — code this run wrote
+    but outside this task's own diff (In-run provenance and the seed
+    disposition). Otherwise ``pre-existing``. ``run_ranges=None`` (the
+    default) makes this exactly the two-way function it was before Task 4 —
+    the back-compat proof. A finding with no location, or one whose location
+    is unparseable, also falls through to ``pre-existing`` here as a
+    defensive default — by the time a contract-breaking finding reaches this
+    function its location has already been validated (validate_locations,
+    retried via the reviewer verdict contract), so this fallback exists for
+    callers that invoke verify_provenance directly and for non-contract-
+    breaking findings."""
     spans = _parse_lines(finding.lines)
     if spans is None:
         return "pre-existing"
     file_ranges = ranges.get(finding.file, [])
-    for lo, hi in spans:
-        for start, end in file_ranges:
-            if lo <= end and start <= hi:  # inclusive-range overlap
-                return "in-diff"
+    if _spans_intersect_ranges(spans, file_ranges):
+        return "in-diff"
+    if run_ranges is not None:
+        run_file_ranges = run_ranges.get(finding.file, [])
+        if _spans_intersect_ranges(spans, run_file_ranges):
+            return "in-run"
     return "pre-existing"
 
 
@@ -306,22 +326,37 @@ def derive_disposition(finding):
     acceptance criterion / spec section in ``contract_ref`` — a null contract_ref
     downgrades it to ``improvement`` (named-evidence rule, mirroring the
     tier-policy floor). Quadrants: in-diff×contract-breaking → ``fix`` (the only
-    auto-fix cell); pre-existing×contract-breaking → ``halt`` (a real scope
-    decision); every improvement → ``defer``."""
+    auto-fix cell); in-run×contract-breaking → ``seed`` (Task 4: a finding
+    against code this run wrote but outside this task's own diff — logged, the
+    run continues, and it is carried into the final review's discovery packet
+    rather than halting this task over another task's work);
+    pre-existing×contract-breaking → ``halt`` (a real scope decision); every
+    improvement → ``defer``."""
     contract_breaking = (
         finding.impact == "contract-breaking" and finding.contract_ref is not None
     )
     if not contract_breaking:
         return "defer"
-    return "fix" if finding.provenance == "in-diff" else "halt"
+    if finding.provenance == "in-diff":
+        return "fix"
+    if finding.provenance == "in-run":
+        return "seed"
+    return "halt"
 
 
-def classify_findings(verdict, diff_text, carried_ids=None):
+def classify_findings(verdict, diff_text, run_diff=None, carried_ids=None):
     """Set each finding's runner-verified provenance and derived disposition
     against ``diff_text`` (the review's actual diff), then return the verdict.
     A pass verdict is returned unchanged. The reviewer proposes classification;
     the runner decides — provenance is recomputed from the diff and disposition
     is derived from the matrix, never trusted from the reviewer.
+
+    ``run_diff`` (the run's cumulative diff from run-start HEAD) is optional —
+    when supplied, provenance becomes three-way (in-diff/in-run/pre-existing,
+    verify_provenance); when absent (the default) provenance is exactly the
+    two-way classification this function had before Task 4, byte-identical.
+    In a final review the run base *is* the review base, so a caller never
+    needs to pass ``run_diff`` there — in-run is unreachable.
 
     Before disposition, a finding carrying ``convergence == "resolved"`` is
     dropped when its canonical id (``_canon``: ``carried_from`` or ``id``) is a
@@ -339,6 +374,7 @@ def classify_findings(verdict, diff_text, carried_ids=None):
     if verdict.kind != "findings":
         return verdict
     ranges = diff_line_ranges(diff_text)
+    run_ranges = diff_line_ranges(run_diff) if run_diff is not None else None
     kept = []
     for finding in verdict.findings:
         if (
@@ -347,7 +383,7 @@ def classify_findings(verdict, diff_text, carried_ids=None):
             and _canon(finding) in carried_ids
         ):
             continue
-        finding.provenance = verify_provenance(finding, ranges)
+        finding.provenance = verify_provenance(finding, ranges, run_ranges)
         finding.disposition = derive_disposition(finding)
         kept.append(finding)
     verdict.findings = kept
@@ -613,10 +649,16 @@ def _run_git_diff(base):
 def _findings_by_disposition(findings):
     """Group classified findings by disposition for decision.json, each
     serialized via forge_common.finding_to_dict — the same wire shape the
-    reviewer emits and the runner already persists to receipts/run.json."""
+    reviewer emits and the runner already persists to receipts/run.json.
+    ``seed``-dispositioned findings group under the key ``seeded`` (the
+    receipts/decision.json group name; Task 4) rather than the disposition
+    value itself. The base three keys are seeded eagerly so an all-empty
+    result (e.g. a clean pass verdict) is unchanged from before Task 4;
+    ``seeded`` only appears when a seed finding is actually present."""
     grouped = {"fix": [], "defer": [], "halt": []}
     for f in findings:
-        grouped.setdefault(f.disposition, []).append(finding_to_dict(f))
+        key = "seeded" if f.disposition == "seed" else f.disposition
+        grouped.setdefault(key, []).append(finding_to_dict(f))
     return grouped
 
 

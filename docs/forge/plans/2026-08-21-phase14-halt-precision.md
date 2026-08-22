@@ -92,7 +92,7 @@
 **Depends on:** Task 2.
 
 ### Task 4: Three-way provenance and the seed disposition
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`verify_provenance`, `derive_disposition`, `classify_findings`)

@@ -5,6 +5,7 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 import forge_common
+import forge_dispose  # decision.json's disposition grouping (_findings_by_disposition)
 
 
 # --- unified-diff fixtures (git-style, a/ b/ prefixes) ----------------------
@@ -70,6 +71,27 @@ index 1111111..2222222 100644
 @@ -5 +7 @@
 -old
 +new
+"""
+
+# The run's cumulative diff (run-start HEAD): wider than DIFF_SINGLE (which is
+# this one task's diff, prior-commit based) — covers DIFF_SINGLE's own range
+# (12-16) plus an extra range (40-45) touched earlier in the same run by a
+# different task.
+DIFF_RUN_WIDER = """diff --git a/foo.py b/foo.py
+index 1111111..3333333 100644
+--- a/foo.py
++++ b/foo.py
+@@ -10,3 +12,5 @@ def f():
+ context
++added_a
++added_b
+ context
+@@ -38,3 +40,6 @@ def g():
+ context
++other_task_a
++other_task_b
++other_task_c
+ context
 """
 
 
@@ -203,9 +225,57 @@ class VerifyProvenanceTests(unittest.TestCase):
         self.assertEqual(forge_run.verify_provenance(f, self.ranges), "pre-existing")
 
 
+class VerifyProvenanceRunRangesTests(unittest.TestCase):
+    """verify_provenance: three-way provenance when run_ranges is supplied —
+    in-diff still wins first, then in-run (intersects the run diff but not
+    this review's diff), else pre-existing. run_ranges=None reproduces
+    today's two-way behavior exactly (the back-compat proof)."""
+
+    def setUp(self):
+        self.ranges = {"foo.py": [(12, 16)]}
+        self.run_ranges = {"foo.py": [(12, 16), (40, 45)]}
+
+    def test_in_diff_wins_over_run_ranges(self):
+        f = _finding(file="foo.py", lines="13")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges), "in-diff"
+        )
+
+    def test_intersects_run_but_not_diff_is_in_run(self):
+        f = _finding(file="foo.py", lines="41")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges), "in-run"
+        )
+
+    def test_intersects_neither_is_pre_existing(self):
+        f = _finding(file="foo.py", lines="100")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges),
+            "pre-existing",
+        )
+
+    def test_file_not_in_run_ranges_is_pre_existing(self):
+        f = _finding(file="other.py", lines="13")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges),
+            "pre-existing",
+        )
+
+    def test_run_ranges_none_reproduces_two_way_behavior(self):
+        # Back-compat proof: omitting run_ranges (the default) is byte-identical
+        # to the pre-Task-4 two-way function — a finding outside `ranges` is
+        # pre-existing even though it would have matched run_ranges, because
+        # run_ranges was never supplied.
+        f = _finding(file="foo.py", lines="41")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges), "pre-existing"
+        )
+
+
 class DeriveDispositionTests(unittest.TestCase):
-    """derive_disposition: the four-quadrant matrix over verified provenance and
-    the contract_ref-gated impact."""
+    """derive_disposition: the matrix over verified provenance and the
+    contract_ref-gated impact — including the Task 4 in-run x
+    contract-breaking -> seed cell."""
 
     def test_in_diff_contract_breaking_is_fix(self):
         f = _finding(provenance="in-diff", impact="contract-breaking",
@@ -223,6 +293,19 @@ class DeriveDispositionTests(unittest.TestCase):
 
     def test_pre_existing_improvement_is_defer(self):
         f = _finding(provenance="pre-existing", impact="improvement", contract_ref=None)
+        self.assertEqual(forge_run.derive_disposition(f), "defer")
+
+    def test_in_run_contract_breaking_is_seed(self):
+        f = _finding(provenance="in-run", impact="contract-breaking",
+                     contract_ref="AC1: acceptance passes")
+        self.assertEqual(forge_run.derive_disposition(f), "seed")
+
+    def test_in_run_improvement_is_defer(self):
+        f = _finding(provenance="in-run", impact="improvement", contract_ref=None)
+        self.assertEqual(forge_run.derive_disposition(f), "defer")
+
+    def test_null_contract_ref_downgrades_in_run_seed_to_defer(self):
+        f = _finding(provenance="in-run", impact="contract-breaking", contract_ref=None)
         self.assertEqual(forge_run.derive_disposition(f), "defer")
 
     def test_null_contract_ref_downgrades_contract_breaking_to_defer(self):
@@ -437,6 +520,59 @@ class ClassifyFindingsTests(unittest.TestCase):
         self.assertEqual(f.disposition, "defer")
 
 
+class ClassifyFindingsRunDiffTests(unittest.TestCase):
+    """classify_findings(verdict, diff, run_diff=None, carried_ids=None):
+    three-way provenance end-to-end when run_diff is supplied, and the
+    run_diff=None back-compat proof (today's two-way behavior, byte-identical)."""
+
+    def test_in_run_finding_seeds(self):
+        # foo.py:41 falls outside DIFF_SINGLE's range (12-16) but inside the
+        # wider run diff's range (12-16, 40-45) -> in-run x contract-breaking
+        # -> seed.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-run")
+        self.assertEqual(f.disposition, "seed")
+
+    def test_in_diff_finding_still_fixes_with_run_diff_present(self):
+        f = _finding(id="f1", file="foo.py", lines="13", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-diff")
+        self.assertEqual(f.disposition, "fix")
+
+    def test_pre_existing_finding_still_halts_with_run_diff_present(self):
+        f = _finding(id="f1", file="foo.py", lines="100", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "pre-existing")
+        self.assertEqual(f.disposition, "halt")
+
+    def test_in_run_improvement_defers(self):
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="improvement", contract_ref=None)
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-run")
+        self.assertEqual(f.disposition, "defer")
+
+    def test_run_diff_none_reproduces_two_way_classification(self):
+        # The back-compat proof: with run_diff omitted, a finding that would
+        # have been in-run under a wider run diff instead falls to
+        # pre-existing -> halt, exactly as classify_findings behaved before
+        # Task 4.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE)
+        self.assertEqual(f.provenance, "pre-existing")
+        self.assertEqual(f.disposition, "halt")
+
+
 class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
     """classify_findings' resolved-label filter: a finding labeled
     convergence=="resolved" is dropped before disposition when its canonical
@@ -524,6 +660,51 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         )
         self.assertEqual(action, "halt")
         self.assertEqual(halt_reason, "regression")
+
+
+class SeededDispositionGroupTests(unittest.TestCase):
+    """decision.json's seeded group (forge_dispose._findings_by_disposition):
+    a seed-dispositioned finding groups under the key "seeded" alongside
+    fix/defer/halt, and never enters the fix set — so it cannot drive rework
+    or count as a carried fix finding for the stuck rule."""
+
+    def test_seed_finding_groups_under_seeded_key(self):
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        grouped = forge_dispose._findings_by_disposition([f])
+        self.assertEqual([d["id"] for d in grouped["seeded"]], ["f1"])
+        self.assertEqual(grouped["fix"], [])
+
+    def test_no_seed_findings_leaves_base_groups_unchanged(self):
+        # Back-compat proof: with no seed-dispositioned findings the grouped
+        # dict is exactly the pre-Task-4 three keys — no "seeded" key
+        # appears at all.
+        grouped = forge_dispose._findings_by_disposition([])
+        self.assertEqual(grouped, {"fix": [], "defer": [], "halt": []})
+
+    def test_seed_finding_excluded_from_real_fix_canons(self):
+        # A seed finding must not enter the fix set, so it cannot drive
+        # rework and is never counted as a carried fix finding for the
+        # stuck rule (_real_fix_canons keys strictly on disposition=="fix").
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        self.assertEqual(forge_run._real_fix_canons([f]), set())
+
+    def test_seed_finding_never_scope_halts_or_blocks_pass(self):
+        # convergence_decision only halts on disposition=="halt"; a seed
+        # finding is logged and the run continues — with acceptance green and
+        # no fix-disposition findings, the attempt still passes.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        state = forge_run.ConvergenceState()
+        action, halt_reason = forge_run.convergence_decision(
+            [f], state, True, 1, "auto"
+        )
+        self.assertEqual(action, "pass")
+        self.assertIsNone(halt_reason)
 
 
 if __name__ == "__main__":
