@@ -129,11 +129,11 @@
 
 **Interface:**
 - `run_plan` calls `forge_lint.lint_plan` after the clean-tree precondition and **before any dispatch**. Any `error` defect is a contract error (exit 1) printing every defect; warnings print and continue.
-- `execute_task` passes the run diff to `classify_findings` so `in-run` is computed, and appends `seed`-disposition findings to a `seeded_findings` list persisted in `run.json` — cleared at invocation start like `threads`, appended across tasks, surviving a resume.
+- **Both** `classify_findings` call sites (`execute_task` and `run_final_review_loop`) pass `run_diff` so `in-run` is computed, **and pass `carried_ids=state.carried_ids`** (read before `advance_state` runs) so Task 2's resolved-label filter is actually live. Without this wiring Task 2's fix is dead code — correct, tested, and never invoked. `execute_task` appends `seed`-disposition findings to a `seeded_findings` list persisted in `run.json` — cleared at invocation start like `threads`, appended across tasks, surviving a resume.
 - `run_final_review_loop`'s **discovery** packet carries the seeded findings as pre-seeded prior findings; verification packets are unchanged.
 - Seeded findings appear in the end-of-plan summary whether or not the final review confirms them.
 
-**Tests:** a plan with a grammar error fails at run start naming every defect, with no dispatch occurring (assert the fake codex was never invoked); a warning-only plan proceeds; a finding against an earlier task's committed work classifies `in-run`, is seeded, does not halt the run, and the run continues to the next task; `seeded_findings` written to `run.json` and cleared on a fresh invocation; seeded findings appear in the final review's discovery packet and not in verification packets; the end-of-plan summary lists them.
+**Tests:** a plan with a grammar error fails at run start naming every defect, with no dispatch occurring (assert the fake codex was never invoked); a warning-only plan proceeds; an end-to-end rework lap where the reviewer LISTS a prior finding as `convergence: "resolved"` converges to pass instead of reworking — the proof Task 2's filter is wired, not merely present; a finding against an earlier task's committed work classifies `in-run`, is seeded, does not halt the run, and the run continues to the next task; `seeded_findings` written to `run.json` and cleared on a fresh invocation; seeded findings appear in the final review's discovery packet and not in verification packets; the end-of-plan summary lists them.
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_seed.py` all pass; `python3 -m pytest -q` shows no regression against the 404 passed / 2 skipped baseline.
 

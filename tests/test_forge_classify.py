@@ -313,5 +313,94 @@ class ClassifyFindingsTests(unittest.TestCase):
         self.assertEqual(f.disposition, "defer")
 
 
+class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
+    """classify_findings' resolved-label filter: a finding labeled
+    convergence=="resolved" is dropped before disposition when its canonical
+    id (carried_from or id) is a member of carried_ids — behaving identically
+    to an omitted finding (Convergence label honored)."""
+
+    def test_resolved_finding_dropped_when_canonical_id_carried(self):
+        f = _finding(id="f1", convergence="resolved",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"f1"})
+        self.assertEqual(out.findings, [])
+        self.assertIsNone(f.disposition)  # never dispositioned — dropped first
+
+    def test_resolved_label_ignored_when_id_not_in_carried_set(self):
+        # The runner never tracked f1 as outstanding — a resolved label on it
+        # is meaningless, so it's dispositioned normally rather than dropped.
+        f = _finding(id="f1", convergence="resolved", file="foo.py", lines="13",
+                     provenance="pre-existing", impact="contract-breaking",
+                     contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"other"})
+        self.assertEqual(out.findings, [f])
+        self.assertEqual(f.provenance, "in-diff")
+        self.assertEqual(f.disposition, "fix")
+
+    def test_resolved_matched_via_carried_from_not_raw_id(self):
+        # The reviewer re-issued the original finding under a new id; the
+        # resolved label must match against carried_from, the canonical id
+        # the runner actually tracked.
+        f = _finding(id="f1-new", carried_from="orig1", convergence="resolved",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"orig1"})
+        self.assertEqual(out.findings, [])
+
+    def test_carried_ids_none_preserves_todays_behavior(self):
+        # No carried_ids supplied (the default) -> the resolved label is
+        # never honored, exactly like before this filter existed.
+        f = _finding(id="f1", convergence="resolved", file="foo.py", lines="13",
+                     provenance="pre-existing", impact="contract-breaking",
+                     contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE)
+        self.assertEqual(out.findings, [f])
+        self.assertEqual(f.disposition, "fix")
+
+    def test_falsely_resolved_finding_reappearing_trips_regression(self):
+        # Attempt 1: a real fix finding f1 is outstanding after review.
+        state = forge_run.ConvergenceState()
+        f1_attempt1 = _finding(id="f1", file="foo.py", lines="13",
+                                provenance="in-diff", impact="contract-breaking",
+                                contract_ref="AC1")
+        v1 = forge_common.Verdict(kind="findings", findings=[f1_attempt1])
+        forge_run.classify_findings(v1, DIFF_SINGLE, carried_ids=state.carried_ids)
+        forge_run.advance_state(state, v1.findings, True)
+        self.assertIn("f1", state.carried_ids)
+
+        # Attempt 2: the reviewer (falsely) labels f1 resolved; f1's canon is
+        # a member of the carried set from attempt 1, so the guard honors the
+        # label and drops it — this attempt converges with nothing carried.
+        f1_attempt2 = _finding(id="f1", convergence="resolved", file="foo.py",
+                                lines="13", impact="contract-breaking",
+                                contract_ref="AC1")
+        v2 = forge_common.Verdict(kind="findings", findings=[f1_attempt2])
+        forge_run.classify_findings(v2, DIFF_SINGLE, carried_ids=state.carried_ids)
+        self.assertEqual(v2.findings, [])
+        action, halt_reason = forge_run.convergence_decision(
+            v2.findings, state, True, 2, "auto"
+        )
+        self.assertEqual(action, "pass")
+        forge_run.advance_state(state, v2.findings, True)
+        self.assertIn("f1", state.resolved_ids)
+
+        # Attempt 3: f1 reappears for real (the resolved claim was false) —
+        # the existing regression rule catches it via the runner's own
+        # resolved-id set, no second mechanism required.
+        f1_attempt3 = _finding(id="f1", file="foo.py", lines="13",
+                                provenance="in-diff", impact="contract-breaking",
+                                contract_ref="AC1")
+        v3 = forge_common.Verdict(kind="findings", findings=[f1_attempt3])
+        forge_run.classify_findings(v3, DIFF_SINGLE, carried_ids=state.carried_ids)
+        action, halt_reason = forge_run.convergence_decision(
+            v3.findings, state, True, 3, "auto"
+        )
+        self.assertEqual(action, "halt")
+        self.assertEqual(halt_reason, "regression")
+
+
 if __name__ == "__main__":
     unittest.main()

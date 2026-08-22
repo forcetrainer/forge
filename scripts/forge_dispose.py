@@ -244,18 +244,41 @@ def derive_disposition(finding):
     return "fix" if finding.provenance == "in-diff" else "halt"
 
 
-def classify_findings(verdict, diff_text):
+def classify_findings(verdict, diff_text, carried_ids=None):
     """Set each finding's runner-verified provenance and derived disposition
     against ``diff_text`` (the review's actual diff), then return the verdict.
     A pass verdict is returned unchanged. The reviewer proposes classification;
     the runner decides — provenance is recomputed from the diff and disposition
-    is derived from the matrix, never trusted from the reviewer."""
+    is derived from the matrix, never trusted from the reviewer.
+
+    Before disposition, a finding carrying ``convergence == "resolved"`` is
+    dropped when its canonical id (``_canon``: ``carried_from`` or ``id``) is a
+    member of ``carried_ids`` — the prior attempt's outstanding fix-finding
+    set — so a listed resolved finding behaves identically to an omitted one
+    (Convergence label honored). The guard is load-bearing: a ``resolved``
+    label on an id the runner never tracked as outstanding is meaningless and
+    is ignored, dispositioning the finding normally — otherwise a reviewer
+    could dismiss any finding by self-labeling it resolved.
+    ``carried_ids=None`` (the default) never honors the label, reproducing
+    today's behavior exactly; ``convergence_decision`` is never touched here —
+    a dropped finding never reaches it, and a falsely-resolved finding that
+    reappears on a later attempt is still caught by the existing regression
+    rule against the runner's authoritative resolved-id set."""
     if verdict.kind != "findings":
         return verdict
     ranges = diff_line_ranges(diff_text)
+    kept = []
     for finding in verdict.findings:
+        if (
+            carried_ids is not None
+            and finding.convergence == "resolved"
+            and _canon(finding) in carried_ids
+        ):
+            continue
         finding.provenance = verify_provenance(finding, ranges)
         finding.disposition = derive_disposition(finding)
+        kept.append(finding)
+    verdict.findings = kept
     return verdict
 
 
