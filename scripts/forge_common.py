@@ -281,6 +281,16 @@ def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line):
             proc.kill()
         proc.wait()
     reader.join(timeout=5)
+    # Close the pipe once the reader is done with it. Popen only closes it on
+    # GC, so without this every dispatch leaks a file object and CPython emits
+    # a ResourceWarning under `-W error` / unittest's warning capture. Guarded:
+    # a killed child can leave the reader blocked past its join, and closing
+    # under it would raise inside the pump thread.
+    if not reader.is_alive():
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError):
+            pass
 
     return (None if timed_out else proc.returncode), timed_out
 

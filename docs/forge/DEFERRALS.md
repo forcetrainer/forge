@@ -1,5 +1,25 @@
 # Deferrals
 
+## 2026-08-26 — Review packet passed as an argv element, bounded by ARG_MAX
+**Why:** `dispatch_worker` and `_dispatch_review_call` (`scripts/forge-run.py`) read the brief/packet from its file and then pass it as the **final argv element** of `codex exec`. That caps a packet at the OS `ARG_MAX` (1,048,576 bytes on darwin, shared with the environment block) — far below the model's usable context, and it fails as an opaque `E2BIG` spawn error rather than a legible one. Most exposed: the final review, whose discovery packet carries the spec plus the whole-plan diff. Not fixed in 0.10.1 because the intended fix (feed the prompt on stdin) depends on a `codex exec` stdin form that is **not yet verified against the installed CLI**; building the wrong mechanism would churn `tests/_forge_support.py`'s fake codex and every `argv[-1]` assertion for nothing.
+**From:** External Codex review of the 0.10.0 beta (2026-08-26).
+**Follow-up:** confirm `codex exec --help` exposes a stdin/prompt-file input; if so, switch both dispatch sites to it and update the fake codex harness to read the prompt from stdin. If no such form exists, bound packet size explicitly and fail with a clear message instead of `E2BIG`.
+
+## 2026-08-26 — No per-task token, cache, or cost telemetry
+**Why:** Phase 13 scoped this out by name ("Token/call/monetary budgets and monitor cost telemetry", review-continuity design, Scope > Out), and that was right for the phase — but it leaves the continuity work unmeasurable. The phase's claim is that resumed workers and verification reviewers reduce laps and re-done context; nothing in the run record can confirm or refute it. Note that the raw material is likely already on disk: every dispatch runs `--json` and tees to `task-N-worker-events.jsonl`, so usage events are being captured and simply never parsed or aggregated.
+**From:** External Codex review of the 0.10.0 beta (2026-08-26).
+**Follow-up:** parse usage out of the existing event JSONL into a per-task accounting on the receipt (input/output/reasoning/cached tokens), then compare cold-per-task against the resumed loop on a representative plan. Do this before any further continuity work — it is the instrument that would justify it.
+
+## 2026-08-26 — "Implementation lane": resuming one worker across a serial task chain
+**Why:** The external review proposed an opt-in lane that resumes a single worker across a chain of dependent tasks, resetting on human intervention or scope change. It is a real idea and it targets a real cost — every initial task worker is cold by design. Deferred, not adopted, because it collides head-on with an invariant this phase is built on: the **linear per-task review base** (`git diff <prior commit>`). That invariant is what produced three-way provenance and the `in-run` → `seed` disposition; a worker carrying state across a commit boundary would blur which task's vertical slice a change belongs to. Cold **discovery review** stays cold regardless (DECISIONS 2026-07-16, 2026-07-17) — reviewer independence is not on the table.
+**From:** External Codex review of the 0.10.0 beta (2026-08-26).
+**Follow-up:** brainstorm-gate this if and only if the telemetry above shows cold worker spawns are a material share of run cost. Any design must say what happens to provenance classification when one session spans two commits.
+
+## 2026-08-26 — Complex tier runs at the same reasoning effort as standard
+**Why:** `TIER_MAP` (`scripts/forge_common.py`) pins standard to `gpt-5.6-terra`/`medium` and complex to `gpt-5.6-sol`/`medium` — the complex tier buys a larger model but no additional thinking. This is inherited from the original runner design table (2026-07-13), not a Phase 13 regression. The external review flagged it as a cross-harness inconsistency against the Claude agent profiles (`forge-deep` = opus/high); that framing is wrong — those are different model families on a different harness and are not obliged to match — but the underlying question stands on its own.
+**From:** External Codex review of the 0.10.0 beta (2026-08-26).
+**Follow-up:** benchmark complex-tier tasks at `medium` vs `high` before changing the pin. Decide it on measured rework laps, not symmetry with the Claude table.
+
 ## 2026-08-21 — Phase 13 run: deferred improvement findings (batch)
 **Why:** Improvement-disposition findings collected across the Phase 13 run, logged rather than fixed per the anti-gold-plating rule (in-diff improvements are deferred strict; no polishing our own new code mid-phase). Both come from Task 0's review.
 - **Unpaired backtick stripping in `parse_plan_tasks`** — tier-level normalization strips a leading and a trailing backtick independently rather than as a matched pair, so a lone stray backtick (`` standard` ``) normalizes to a valid tier instead of erroring on malformed markup. Only edge characters are touched, so a misspelled level can never become a valid TIER_MAP key; the looseness is real but low-risk, and unpaired stripping is *required* by real plans that wrap the whole `level — justification` clause in a single backtick span (2026-07-17-phase12b, task 5).
