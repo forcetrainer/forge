@@ -55,7 +55,8 @@ class DispatchResumeArgvTests(unittest.TestCase):
         os.makedirs(self.run_dir, exist_ok=True)
         self.log = os.path.join(self.d, "fakelog")
         self._old_env = {
-            k: os.environ.get(k) for k in ("FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES")
+            k: os.environ.get(k) for k in (
+                "FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES", "FORGE_FAKE_PROMPT_LOG")
         }
         self.addCleanup(self._restore_env)
 
@@ -72,6 +73,8 @@ class DispatchResumeArgvTests(unittest.TestCase):
             json.dump(responses, f)
         os.environ["FORGE_FAKE_RESPONSES"] = path
         os.environ["FORGE_FAKE_LOG"] = self.log
+        self.plog = self.log + ".prompts"
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = self.plog
 
     def test_worker_resume_argv_shape_and_ordering(self):
         self._set_responses([{"exit": 0, "msg": ""}])
@@ -90,9 +93,10 @@ class DispatchResumeArgvTests(unittest.TestCase):
                 "-m", "gpt-5.6-terra",
                 "-c", 'model_reasoning_effort="medium"',
                 "th-worker-1",
-                "# findings only\n- fix the thing\n",
+                # no trailing PROMPT: it rides stdin, unbounded by ARG_MAX
             ],
         )
+        self.assertEqual(res.prompt, "# findings only\n- fix the thing\n")
 
     def test_worker_resume_prompt_has_no_contract_preamble(self):
         # Cold spawn prepends the tier's contract preamble; resume does not —
@@ -105,9 +109,9 @@ class DispatchResumeArgvTests(unittest.TestCase):
         resumed = forge_run.dispatch_worker(
             task, self.brief, self.fake, self.run_dir, {}, resume_thread="th-x",
         )
-        self.assertNotEqual(cold.argv[-1], resumed.argv[-1])
-        self.assertEqual(resumed.argv[-1], "# findings only\n- fix the thing\n")
-        self.assertGreater(len(cold.argv[-1]), len(resumed.argv[-1]))
+        self.assertNotEqual(cold.prompt, resumed.prompt)
+        self.assertEqual(resumed.prompt, "# findings only\n- fix the thing\n")
+        self.assertGreater(len(cold.prompt), len(resumed.prompt))
 
     def test_reviewer_resume_argv_shape_and_ordering(self):
         self._set_responses([{"exit": 0, "msg": _pass_msg()}])
@@ -158,7 +162,8 @@ class ExecuteTaskResumeTests(unittest.TestCase):
         os.makedirs(self.run_dir, exist_ok=True)
         self.log = os.path.join(self.d, "fakelog")
         self._old_env = {
-            k: os.environ.get(k) for k in ("FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES")
+            k: os.environ.get(k) for k in (
+                "FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES", "FORGE_FAKE_PROMPT_LOG")
         }
         self.addCleanup(self._restore_env)
 
@@ -176,7 +181,7 @@ class ExecuteTaskResumeTests(unittest.TestCase):
 
     def _init_repo(self):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
@@ -195,6 +200,8 @@ class ExecuteTaskResumeTests(unittest.TestCase):
             json.dump(responses, f)
         os.environ["FORGE_FAKE_RESPONSES"] = path
         os.environ["FORGE_FAKE_LOG"] = self.log
+        self.plog = self.log + ".prompts"
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = self.plog
 
     def _task1(self, plan_path):
         tasks = forge_run.parse_plan_tasks(plan_path)
@@ -223,16 +230,16 @@ class ExecuteTaskResumeTests(unittest.TestCase):
         self.assertEqual(outcome.status, "passed")
         self.assertEqual(threads.get("task-1-worker"), "th-w1")
         argvs = _log_argvs(self.log)
+        prompts = _log_prompts(self.plog)
         worker_calls = [
-            a for a in argvs
+            (a, pr) for a, pr in zip(argvs, prompts)
             if "--output-last-message" in a
             and "task-1-worker-last" in a[a.index("--output-last-message") + 1]
         ]
         self.assertEqual(len(worker_calls), 2)
-        worker_a2 = worker_calls[-1]
+        worker_a2, prompt = worker_calls[-1]
         self.assertIn("resume", worker_a2)
         self.assertIn("th-w1", worker_a2)
-        prompt = worker_a2[-1]
         self.assertIn("GUARDXYZ", prompt)
         self.assertNotIn(self.spec_marker, prompt)
         self.assertNotIn("Do the thing", prompt)  # the plan's Goal text (brief re-paste)

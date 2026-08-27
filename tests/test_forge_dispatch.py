@@ -49,7 +49,7 @@ class DispatchWorkerTests(unittest.TestCase):
         os.makedirs(run_dir, exist_ok=True)
         task = forge_run.Task(number=1, title="t", tier="trivial")
         res = forge_run.dispatch_worker(task, self.brief, self.fake, run_dir)
-        prompt = res.argv[-1]
+        prompt = res.prompt
         self.assertIn("# Task brief", prompt)
         self.assertIn("forge execution worker", prompt)
 
@@ -108,7 +108,7 @@ class TimeoutTests(unittest.TestCase):
         # Ignore harness artifacts so the working tree is clean at run start
         # (the commit-discipline precondition halts on a dirty tree).
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
@@ -195,7 +195,7 @@ class AutofixAndDeferralTests(unittest.TestCase):
 
     def _init_repo(self, tracked=()):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         for name in tracked:
             with open(os.path.join(self.d, name), "w") as f:
                 f.write("base\n")
@@ -317,6 +317,72 @@ class AutofixAndDeferralTests(unittest.TestCase):
         self.assertEqual(data["deferrals"][0]["summary"], "harmless nit")
         self.assertEqual(data["deferrals"][0]["impact"], "improvement")
 
+
+class OversizedPromptTests(unittest.TestCase):
+    """A brief/packet larger than ARG_MAX must still dispatch. Passing the
+    prompt as the final argv element capped it at the OS limit (1 MiB on
+    darwin, shared with the environment block) and failed as an opaque
+    OSError/E2BIG far below the model's usable context."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-run-bigprompt-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir, exist_ok=True)
+        # Comfortably past ARG_MAX on darwin/linux so the argv path cannot
+        # accidentally succeed on a machine with a roomier limit.
+        self.big = "x" * (4 * 1024 * 1024)
+        self.brief = os.path.join(self.d, "brief.md")
+        with open(self.brief, "w") as f:
+            f.write("# Task brief\n" + self.big)
+
+    def test_worker_dispatches_a_brief_larger_than_arg_max(self):
+        task = forge_run.Task(number=1, title="t", tier="trivial")
+        res = forge_run.dispatch_worker(task, self.brief, self.fake, self.run_dir)
+        self.assertEqual(res.exit_code, 0)
+        self.assertFalse(res.timed_out)
+
+    def test_reviewer_dispatches_a_packet_larger_than_arg_max(self):
+        last_msg = os.path.join(self.run_dir, "last.txt")
+        verdict = json.dumps({"verdict": "pass", "findings": []})
+        responses = os.path.join(self.d, "responses.json")
+        with open(responses, "w") as f:
+            json.dump([{"exit": 0, "msg": verdict}], f)
+        os.environ["FORGE_FAKE_RESPONSES"] = responses
+        self.addCleanup(os.environ.pop, "FORGE_FAKE_RESPONSES", None)
+        v = forge_run._dispatch_review_call(
+            "gpt-5.6-luna", "low", "review preamble", self.brief, self.fake,
+            last_msg, os.path.join(self.run_dir, "live.log"),
+            os.path.join(self.run_dir, "events.jsonl"), "-- header --",
+            "task-1-reviewer", {},
+        )
+        self.assertEqual(v.kind, "pass")
+
+    def test_child_receives_the_whole_oversized_prompt(self):
+        """Not just 'it did not crash' — the full text must actually arrive."""
+        prompt_log = os.path.join(self.d, "received-prompt.txt")
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = prompt_log
+        self.addCleanup(os.environ.pop, "FORGE_FAKE_PROMPT_LOG", None)
+        task = forge_run.Task(number=1, title="t", tier="trivial")
+        res = forge_run.dispatch_worker(task, self.brief, self.fake, self.run_dir)
+        self.assertEqual(res.exit_code, 0)
+        with open(prompt_log) as f:
+            received = f.read()
+        self.assertIn("forge execution worker", received)   # contract preamble
+        self.assertIn("# Task brief", received)             # brief
+        self.assertIn(self.big, received)                   # nothing truncated
+
+    def test_prompt_is_not_passed_as_an_argv_element(self):
+        """The prompt must be absent from argv entirely: `codex exec` appends
+        piped stdin as a separate `<stdin>` block when a prompt argument is
+        also present, which would duplicate the whole packet."""
+        task = forge_run.Task(number=1, title="t", tier="trivial")
+        res = forge_run.dispatch_worker(task, self.brief, self.fake, self.run_dir)
+        self.assertNotIn(self.big, "".join(res.argv))
+        self.assertNotIn("# Task brief", "".join(res.argv))
+        # argv ends at the flag pair, with no trailing positional PROMPT
+        self.assertEqual(res.argv[-2], "--output-last-message")
 
 if __name__ == "__main__":
     unittest.main()

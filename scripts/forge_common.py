@@ -155,6 +155,10 @@ class WorkerResult:
     argv: list
     timed_out: bool = False
     thread_id: "str | None" = None
+    # The dispatched prompt. It is deliberately NOT in ``argv`` — it travels on
+    # the child's stdin so it is not bounded by ARG_MAX — but callers and tests
+    # still need to see exactly what was sent.
+    prompt: str = ""
 
 
 @dataclass
@@ -244,24 +248,53 @@ class JsonTeeResult:
     thread_id: "str | None"  # from the first `thread.started` event, or None
 
 
-def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line):
+def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line, stdin_text=None):
     """Spawn ``argv``, calling ``pump_line(line)`` for each merged stdout+stderr
     line as it arrives, and return ``(exit_code_or_None, timed_out)``. Shared
     plumbing between ``run_teed`` and ``run_json_teed`` — the process
     spawn/kill/timeout handling is identical; only what happens per line differs.
     A child that outlives ``timeout`` is killed (whole process group) and
     reported as ``timed_out`` — never hangs the run. ``start_new_session`` puts
-    the child in its own group so ``shell=True`` command trees die with it."""
+    the child in its own group so ``shell=True`` command trees die with it.
+
+    ``stdin_text``, when set, is written to the child's stdin and the pipe is
+    then closed (signalling EOF). This is how prompts reach ``codex exec``:
+    argv is capped by ``ARG_MAX`` (1 MiB on darwin, shared with the environment
+    block), which is far below the model's usable context, so a large review
+    packet passed as an argument fails the *spawn* with ``E2BIG``. The write
+    runs on its own daemon thread — a child that never drains stdin would
+    otherwise block the caller once the ~64 KiB pipe buffer filled, before
+    ``proc.wait(timeout)`` could bound it."""
     proc = subprocess.Popen(
         argv,
         cwd=cwd,
         shell=shell,
+        # DEVNULL, never inherited: a dispatched child that reads stdin must
+        # get immediate EOF rather than block on the runner's terminal.
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
         start_new_session=True,
     )
+
+    writer = None
+    if stdin_text is not None:
+        def _feed():
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # child exited or closed stdin early; its exit code decides
+            finally:
+                try:
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError, ValueError):
+                    pass
+
+        writer = threading.Thread(target=_feed, daemon=True)
+        writer.start()
 
     def _pump():
         for line in proc.stdout:
@@ -281,6 +314,8 @@ def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line):
             proc.kill()
         proc.wait()
     reader.join(timeout=5)
+    if writer is not None:
+        writer.join(timeout=5)
     # Close the pipe once the reader is done with it. Popen only closes it on
     # GC, so without this every dispatch leaks a file object and CPython emits
     # a ResourceWarning under `-W error` / unittest's warning capture. Guarded:
@@ -295,7 +330,8 @@ def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line):
     return (None if timed_out else proc.returncode), timed_out
 
 
-def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
+def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header,
+             stdin_text=None):
     """Run a subprocess, streaming its merged stdout+stderr line-by-line into
     ``live_path`` (append) under a ``header`` line, while returning the exit code,
     a timed-out flag, and the output tail the runner loop needs.
@@ -315,7 +351,8 @@ def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
             buf.append(line)
 
         exit_code, timed_out = _spawn_and_pump(
-            argv, cwd=cwd, shell=shell, timeout=timeout, pump_line=_pump_line
+            argv, cwd=cwd, shell=shell, timeout=timeout, pump_line=_pump_line,
+            stdin_text=stdin_text,
         )
 
     merged = "".join(buf)
@@ -325,7 +362,7 @@ def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
 
 
 def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
-                   render_line):
+                   render_line, stdin_text=None):
     """Run a ``codex exec --json`` child: each stdout line is one JSONL event.
     Raw JSONL is appended to ``events_path`` (thread capture + debugging); each
     event is translated via ``render_line(event) -> str | None`` into a plain-
@@ -370,7 +407,8 @@ def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
                 live.flush()
 
         exit_code, timed_out = _spawn_and_pump(
-            argv, cwd=cwd, shell=False, timeout=timeout, pump_line=_pump_line
+            argv, cwd=cwd, shell=False, timeout=timeout, pump_line=_pump_line,
+            stdin_text=stdin_text,
         )
 
     merged = "".join(buf)

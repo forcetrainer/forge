@@ -104,6 +104,8 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         with open(self.resp, "w") as f:
             json.dump([{"exit": 0, "msg": '{"verdict": "pass"}'}], f)
         self._set_env("FORGE_FAKE_LOG", self.log)
+        self.plog = self.log + ".prompts"
+        self._set_env("FORGE_FAKE_PROMPT_LOG", self.plog)
         self._set_env("FORGE_FAKE_RESPONSES", self.resp)
 
     def _set_env(self, key, value):
@@ -189,7 +191,7 @@ class ReviewLoopTests(unittest.TestCase):
         # Ignore harness artifacts so the working tree is clean at run start
         # (the commit-discipline precondition halts on a dirty tree).
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
@@ -205,8 +207,12 @@ class ReviewLoopTests(unittest.TestCase):
     def _run(self, plan_path, responses=None):
         if os.path.exists(self.log):
             os.remove(self.log)
+        self.plog = self.log + ".prompts"
+        if os.path.exists(self.plog):
+            os.remove(self.plog)
         env = os.environ.copy()
         env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.plog
         if responses is not None:
             resp_path = os.path.join(self.d, "responses.json")
             with open(resp_path, "w") as f:
@@ -255,10 +261,11 @@ class ReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                         # final review
         ])
         self.assertEqual(res.returncode, 0, res.stderr)
-        # The rework worker's brief carries the finding text; the fake logs the
-        # full argv (prompt is the last arg), so the marker must appear there.
-        with open(self.log) as f:
-            self.assertIn("GUARDXYZ", f.read())
+        # The rework worker's brief carries the finding text. The prompt travels
+        # on stdin now, not in argv, so assert against the fake's prompt log.
+        self.assertTrue(
+            any("GUARDXYZ" in pr for pr in _log_prompts(self.plog))
+        )
 
     def test_persistent_fix_finding_stuck_escalated_and_stops_next_task(self):
         # The same in-diff fix finding coming back across two consecutive attempts
@@ -497,6 +504,8 @@ class FinalReviewLoopTests(unittest.TestCase):
         os.makedirs(self.run_dir)
         self.log = os.path.join(self.d, "fakelog")
         self._set_env("FORGE_FAKE_LOG", self.log)
+        self.plog = self.log + ".prompts"
+        self._set_env("FORGE_FAKE_PROMPT_LOG", self.plog)
 
     def _set_env(self, key, value):
         old = os.environ.get(key)
@@ -683,8 +692,12 @@ class ReviewNonGitTests(unittest.TestCase):
     def _run(self, plan_path, responses=None):
         if os.path.exists(self.log):
             os.remove(self.log)
+        self.plog = self.log + ".prompts"
+        if os.path.exists(self.plog):
+            os.remove(self.plog)
         env = os.environ.copy()
         env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.plog
         if responses is not None:
             resp_path = os.path.join(self.d, "responses.json")
             with open(resp_path, "w") as f:

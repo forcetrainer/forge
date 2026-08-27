@@ -245,7 +245,6 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
             "-c",
             'model_reasoning_effort="{}"'.format(effort),
             resume_thread,
-            prompt,
         ]
     else:
         preamble = contract_preamble(task.tier)
@@ -260,7 +259,6 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
             "model_reasoning_effort={}".format(effort),
             "--output-last-message",
             last_msg_path,
-            prompt,
         ]
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
     events_path = os.path.join(run_dir, "task-{}-worker-events.jsonl".format(task.number))
@@ -269,7 +267,7 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
     )
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
-        header=header, render_line=_render_event_line,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
     )
     role = "task-{}-worker".format(task.number)
     if result.thread_id:
@@ -277,7 +275,7 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
     if result.timed_out:
         return WorkerResult(
             exit_code=None, last_message="", argv=argv, timed_out=True,
-            thread_id=result.thread_id,
+            thread_id=result.thread_id, prompt=prompt,
         )
     last_message = ""
     if os.path.exists(last_msg_path):
@@ -285,7 +283,7 @@ def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
             last_message = f.read()
     return WorkerResult(
         exit_code=result.exit_code, last_message=last_message, argv=argv,
-        thread_id=result.thread_id,
+        thread_id=result.thread_id, prompt=prompt,
     )
 
 
@@ -351,7 +349,6 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
             "-c",
             'model_reasoning_effort="{}"'.format(effort),
             resume_thread,
-            prompt,
         ]
     else:
         argv = [
@@ -364,13 +361,12 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
             "model_reasoning_effort={}".format(effort),
             "--output-last-message",
             last_msg_path,
-            prompt,
         ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
-        header=header, render_line=_render_event_line,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
     )
     if result.thread_id:
         threads[role] = result.thread_id
@@ -1012,8 +1008,8 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, thr
             "-c",
             'model_reasoning_effort="{}"'.format(effort),
             resume_thread,
-            brief,
         ]
+        prompt = brief
     else:
         preamble = contract_preamble(tier)
         prompt = preamble + "\n\n" + brief
@@ -1027,7 +1023,6 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, thr
             "model_reasoning_effort={}".format(effort),
             "--output-last-message",
             last_msg_path,
-            prompt,
         ]
     live_path = os.path.join(run_dir, "final-review-live.log")
     events_path = os.path.join(run_dir, "final-fixer-events.jsonl")
@@ -1036,14 +1031,14 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, thr
     )
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
-        header=header, render_line=_render_event_line,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
     )
     if result.thread_id:
         threads["final-fixer"] = result.thread_id
     if result.timed_out:
         return WorkerResult(
             exit_code=None, last_message="", argv=argv, timed_out=True,
-            thread_id=result.thread_id,
+            thread_id=result.thread_id, prompt=prompt,
         )
     last_message = ""
     if os.path.exists(last_msg_path):
@@ -1051,7 +1046,7 @@ def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, thr
             last_message = f.read()
     return WorkerResult(
         exit_code=result.exit_code, last_message=last_message, argv=argv,
-        thread_id=result.thread_id,
+        thread_id=result.thread_id, prompt=prompt,
     )
 
 
@@ -1513,7 +1508,6 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
         "model_reasoning_effort={}".format(effort),
         "--output-last-message",
         last_msg_path,
-        prompt,
     ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior stage's message
@@ -1523,7 +1517,7 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     update_run_progress(run_dir, None, "doc-sync")
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
-        header=header, render_line=_render_event_line,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
     )
     if result.timed_out:
         return DocSyncResult(

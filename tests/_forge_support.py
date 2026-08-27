@@ -59,6 +59,17 @@ if log:
             idx = sum(1 for _ in f)
     with open(log, "a") as f:
         f.write(json.dumps(argv) + "\\n")
+# The real `codex exec` reads the prompt from stdin when no PROMPT argument is
+# given (`codex exec --help`: "If not provided as an argument (or if `-` is
+# used), instructions are read from stdin"). The runner relies on that to get
+# past ARG_MAX, so the fake must read it the same way. FORGE_FAKE_PROMPT_LOG,
+# when set, records what actually arrived so a test can assert the child got
+# the whole thing rather than merely that the spawn succeeded.
+prompt = "" if sys.stdin.isatty() else sys.stdin.read()
+plog = os.environ.get("FORGE_FAKE_PROMPT_LOG")
+if plog:
+    with open(plog, "a") as f:
+        f.write(json.dumps(prompt) + "\\n")
 exit_code = 0
 msg = ""
 sleep_s = 0
@@ -80,7 +91,6 @@ if resp and os.path.exists(resp):
         append_file = r.get("append_file")
         append_text = r.get("append_text", "")
 if msg:
-    prompt = argv[-1] if argv else ""
     if "## Contract checklist" in prompt:
         try:
             obj = json.loads(msg)
@@ -499,6 +509,16 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 """
 
 
+def _log_prompts(log_path):
+    """Prompts received by the fake codex, one per dispatch, in call order.
+    Set FORGE_FAKE_PROMPT_LOG to that path first. The prompt no longer rides in
+    argv (ARG_MAX), so this is how a test inspects what a child was sent."""
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path) as f:
+        return [json.loads(ln) for ln in f if ln.strip()]
+
+
 def _log_argvs(log_path):
     if not os.path.exists(log_path):
         return []
@@ -544,5 +564,6 @@ __all__ = [
     "_findings_msg",
     "_fix_findings_msg",
     "_log_argvs",
+    "_log_prompts",
     "_find_dispatch",
 ]

@@ -39,7 +39,7 @@ class CommitDisciplineTests(unittest.TestCase):
         # Harness artifacts are committed as ignored so the working tree is clean
         # at run start; the runner's own `.forge/` is also ignored.
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         for name in tracked:
             with open(os.path.join(self.d, name), "w") as f:
                 f.write("base\n")

@@ -191,7 +191,8 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
         os.makedirs(self.run_dir, exist_ok=True)
         self.log = os.path.join(self.d, "fakelog")
         self._old_env = {
-            k: os.environ.get(k) for k in ("FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES")
+            k: os.environ.get(k) for k in (
+                "FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES", "FORGE_FAKE_PROMPT_LOG")
         }
         self.addCleanup(self._restore_env)
 
@@ -208,6 +209,8 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
             json.dump(responses, f)
         os.environ["FORGE_FAKE_RESPONSES"] = path
         os.environ["FORGE_FAKE_LOG"] = self.log
+        self.plog = self.log + ".prompts"
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = self.plog
 
     def test_resume_argv_shape_and_ordering(self):
         self._set_responses([{"exit": 0, "msg": ""}])
@@ -227,7 +230,7 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
                 "-m", "gpt-5.6-terra",
                 "-c", 'model_reasoning_effort="medium"',
                 "th-fixer-1",
-                "## Final-review fix — resolve these findings\n\n- fix it\n",
+                # no trailing PROMPT: it rides stdin, unbounded by ARG_MAX
             ],
         )
 
@@ -240,12 +243,12 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
             self.brief, self.fake, self.run_dir, "standard", 2, {},
             resume_thread="th-x",
         )
-        self.assertNotEqual(cold.argv[-1], resumed.argv[-1])
+        self.assertNotEqual(cold.prompt, resumed.prompt)
         self.assertEqual(
-            resumed.argv[-1],
+            resumed.prompt,
             "## Final-review fix — resolve these findings\n\n- fix it\n",
         )
-        self.assertGreater(len(cold.argv[-1]), len(resumed.argv[-1]))
+        self.assertGreater(len(cold.prompt), len(resumed.prompt))
 
 
 # --- run_final_review_loop: continuity integration --------------------------
@@ -263,6 +266,8 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         os.makedirs(self.run_dir)
         self.log = os.path.join(self.d, "fakelog")
         self._set_env("FORGE_FAKE_LOG", self.log)
+        self.plog = self.log + ".prompts"
+        self._set_env("FORGE_FAKE_PROMPT_LOG", self.plog)
 
     def _set_env(self, key, value):
         old = os.environ.get(key)
@@ -399,16 +404,17 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self.assertEqual(outcome.status, "passed")
         self.assertEqual(outcome.attempts, 3)
         argvs = _log_argvs(self.log)
+        prompts = _log_prompts(self.plog)
         fixer_calls = [
-            a for a in argvs
+            (a, pr) for a, pr in zip(argvs, prompts)
             if "--output-last-message" in a
             and "final-review-fix-attempt" in a[a.index("--output-last-message") + 1]
         ]
         self.assertEqual(len(fixer_calls), 2)
-        self.assertNotIn("resume", fixer_calls[0])
-        self.assertIn("resume", fixer_calls[1])
-        self.assertIn("th-fix1", fixer_calls[1])
-        resume_prompt = fixer_calls[1][-1]
+        self.assertNotIn("resume", fixer_calls[0][0])
+        self.assertIn("resume", fixer_calls[1][0])
+        self.assertIn("th-fix1", fixer_calls[1][0])
+        resume_prompt = fixer_calls[1][1]
         self.assertIn("second issue", resume_prompt)
         self.assertNotIn("## Affected files", resume_prompt)
         self.assertNotIn("## Referenced spec sections", resume_prompt)

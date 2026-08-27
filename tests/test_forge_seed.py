@@ -127,7 +127,7 @@ class _GitFixtureCase(unittest.TestCase):
 
     def _init_repo(self):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")

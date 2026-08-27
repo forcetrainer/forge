@@ -648,7 +648,7 @@ class RunnerCoverageWiringTests(unittest.TestCase):
 
     def _init_repo(self):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
@@ -794,7 +794,8 @@ class FakeCodexCoverageStubTests(unittest.TestCase):
         env.pop("FORGE_FAKE_LOG", None)
         subprocess.run(
             [sys.executable, self.fake, "exec", "--json",
-             "--output-last-message", last_msg_path, prompt],
+             "--output-last-message", last_msg_path],
+            input=prompt,  # prompt rides stdin now, as the runner sends it
             check=True, capture_output=True, text=True, env=env,
         )
         with open(last_msg_path) as f:
