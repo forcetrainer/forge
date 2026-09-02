@@ -8,6 +8,7 @@ forge_common``) so ``sys.modules`` caches a single object — dataclass identity
 preserved across forge_plan/forge_git/forge_receipts and the test suite.
 """
 import importlib.util
+import json
 import os
 import signal
 import subprocess
@@ -87,9 +88,10 @@ ALLOWED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # reviewer's judgement rules live in the agents/*.md review paragraph (preamble).
 REVIEW_VERDICT_INSTRUCTION = (
     "End your message with your verdict as exactly one JSON object and nothing "
-    "after it: {\"verdict\": \"pass\"} when the diff satisfies the spec and the "
-    "task, or {\"verdict\": \"findings\", \"findings\": [ ... ]} listing every "
-    "issue as a finding object: {\"id\": \"f1\", \"summary\": \"one line\", "
+    "after it: {\"verdict\": \"pass\", \"coverage\": [ ... ]} when the diff "
+    "satisfies the spec and the task, or {\"verdict\": \"findings\", "
+    "\"coverage\": [ ... ], \"findings\": [ ... ]} listing every issue as a "
+    "finding object: {\"id\": \"f1\", \"summary\": \"one line\", "
     "\"location\": {\"file\": \"path\", \"lines\": \"12-20\"}, \"provenance\": "
     "\"in-diff\" | \"pre-existing\", \"impact\": \"contract-breaking\" | "
     "\"improvement\", \"contract_ref\": \"acceptance criterion or spec "
@@ -97,11 +99,28 @@ REVIEW_VERDICT_INSTRUCTION = (
     "| \"new\" | null, \"carried_from\": \"prior finding id\" | null, "
     "\"repair_task\": {\"title\": ..., \"files\": [...], \"spec\": ..., "
     "\"tests\": [...], \"acceptance\": [...], \"tier\": ...} | null}. "
+    "coverage is required on every DISCOVERY verdict, pass included, and "
+    "OMITTED on VERIFICATION verdicts — the packet's '## Review kind' marker "
+    "names which one this review is; a verification verdict that includes "
+    "coverage anyway is also accepted. On a discovery verdict: one entry per "
+    "checklist id supplied in the packet, each {\"id\": \"<checklist id>\", "
+    "\"status\": \"satisfied\" | \"violated\" | \"n/a\", \"evidence\": "
+    "\"file:line, hunk, or reason\"} — evidence must be non-empty on every "
+    "entry, and \"n/a\" requires a reason in evidence (why the diff cannot "
+    "touch that item), never a rubber-stamped satisfied. "
+    "location.lines accepts a single line (\"12\"), a single range "
+    "(\"12-20\"), or a comma-separated list of either (\"12-20,45,60-62\") — "
+    "a finding is in-diff when any one of those ranges falls inside the "
+    "diff. "
     "Classification rules: label impact \"contract-breaking\" only when "
     "contract_ref names the acceptance criterion or spec section it violates — "
     "a contract-breaking finding with no contract_ref is treated as "
-    "improvement; a finding whose location falls outside this review's diff is "
-    "pre-existing, never in-diff, regardless of how it reads; repair_task is "
+    "improvement; a contract-breaking finding must carry a parseable "
+    "location.lines — an absent or unparseable location on a contract-"
+    "breaking finding is rejected and re-dispatched, never silently treated "
+    "as pre-existing; a finding whose location falls outside this review's "
+    "diff is pre-existing, never in-diff, regardless of how it reads; "
+    "repair_task is "
     "required only when the finding is pre-existing and contract-breaking, "
     "optional otherwise. Set convergence and carried_from only on a re-review, "
     "labeling each current finding resolved, carried, or new against the prior "
@@ -135,6 +154,11 @@ class WorkerResult:
     last_message: str
     argv: list
     timed_out: bool = False
+    thread_id: "str | None" = None
+    # The dispatched prompt. It is deliberately NOT in ``argv`` — it travels on
+    # the child's stdin so it is not bounded by ARG_MAX — but callers and tests
+    # still need to see exactly what was sent.
+    prompt: str = ""
 
 
 @dataclass
@@ -153,9 +177,17 @@ class Finding:
 
 
 @dataclass
+class CoverageEntry:
+    id: str
+    status: str  # "satisfied" | "violated" | "n/a"
+    evidence: str
+
+
+@dataclass
 class Verdict:
     kind: str  # "pass" | "findings"
     findings: list = field(default_factory=list)  # list[Finding]
+    coverage: list = field(default_factory=list)  # list[CoverageEntry]
 
 
 @dataclass
@@ -208,56 +240,181 @@ class TeeResult:
     tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr
 
 
-def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header):
+@dataclass
+class JsonTeeResult:
+    exit_code: "int | None"  # None when timed out
+    timed_out: bool
+    tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr (raw, pre-render)
+    thread_id: "str | None"  # from the first `thread.started` event, or None
+
+
+def _spawn_and_pump(argv, *, cwd, shell, timeout, pump_line, stdin_text=None):
+    """Spawn ``argv``, calling ``pump_line(line)`` for each merged stdout+stderr
+    line as it arrives, and return ``(exit_code_or_None, timed_out)``. Shared
+    plumbing between ``run_teed`` and ``run_json_teed`` — the process
+    spawn/kill/timeout handling is identical; only what happens per line differs.
+    A child that outlives ``timeout`` is killed (whole process group) and
+    reported as ``timed_out`` — never hangs the run. ``start_new_session`` puts
+    the child in its own group so ``shell=True`` command trees die with it.
+
+    ``stdin_text``, when set, is written to the child's stdin and the pipe is
+    then closed (signalling EOF). This is how prompts reach ``codex exec``:
+    argv is capped by ``ARG_MAX`` (1 MiB on darwin, shared with the environment
+    block), which is far below the model's usable context, so a large review
+    packet passed as an argument fails the *spawn* with ``E2BIG``. The write
+    runs on its own daemon thread — a child that never drains stdin would
+    otherwise block the caller once the ~64 KiB pipe buffer filled, before
+    ``proc.wait(timeout)`` could bound it."""
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        shell=shell,
+        # DEVNULL, never inherited: a dispatched child that reads stdin must
+        # get immediate EOF rather than block on the runner's terminal.
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+
+    writer = None
+    if stdin_text is not None:
+        def _feed():
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # child exited or closed stdin early; its exit code decides
+            finally:
+                try:
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError, ValueError):
+                    pass
+
+        writer = threading.Thread(target=_feed, daemon=True)
+        writer.start()
+
+    def _pump():
+        for line in proc.stdout:
+            pump_line(line)
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait()
+    reader.join(timeout=5)
+    if writer is not None:
+        writer.join(timeout=5)
+    # Close the pipe once the reader is done with it. Popen only closes it on
+    # GC, so without this every dispatch leaks a file object and CPython emits
+    # a ResourceWarning under `-W error` / unittest's warning capture. Guarded:
+    # a killed child can leave the reader blocked past its join, and closing
+    # under it would raise inside the pump thread.
+    if not reader.is_alive():
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError):
+            pass
+
+    return (None if timed_out else proc.returncode), timed_out
+
+
+def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header,
+             stdin_text=None):
     """Run a subprocess, streaming its merged stdout+stderr line-by-line into
     ``live_path`` (append) under a ``header`` line, while returning the exit code,
     a timed-out flag, and the output tail the runner loop needs.
 
     A behavior-preserving replacement for ``subprocess.run(capture_output=True)``:
-    the returned ``tail`` matches the old ``combined[-_ACC_TAIL_CHARS:]``, and a
-    child that outlives ``timeout`` is killed (whole process group) and reported
-    as ``timed_out`` — never hangs the run. ``start_new_session`` puts the child
-    in its own group so ``shell=True`` command trees die with it. The live file is
-    flushed per line so a tailing monitor sees output as it happens."""
+    the returned ``tail`` matches the old ``combined[-_ACC_TAIL_CHARS:]``. The
+    live file is flushed per line so a tailing monitor sees output as it
+    happens."""
     with open(live_path, "a", encoding="utf-8") as live:
         live.write(header + "\n")
         live.flush()
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            shell=shell,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
         buf = []
 
-        def _pump():
-            for line in proc.stdout:
-                live.write(line)
-                live.flush()
-                buf.append(line)
+        def _pump_line(line):
+            live.write(line)
+            live.flush()
+            buf.append(line)
 
-        reader = threading.Thread(target=_pump, daemon=True)
-        reader.start()
-
-        timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-            proc.wait()
-        reader.join(timeout=5)
+        exit_code, timed_out = _spawn_and_pump(
+            argv, cwd=cwd, shell=shell, timeout=timeout, pump_line=_pump_line,
+            stdin_text=stdin_text,
+        )
 
     merged = "".join(buf)
     return TeeResult(
-        exit_code=None if timed_out else proc.returncode,
+        exit_code=exit_code, timed_out=timed_out, tail=merged[-_ACC_TAIL_CHARS:]
+    )
+
+
+def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
+                   render_line, stdin_text=None):
+    """Run a ``codex exec --json`` child: each stdout line is one JSONL event.
+    Raw JSONL is appended to ``events_path`` (thread capture + debugging); each
+    event is translated via ``render_line(event) -> str | None`` into a plain-
+    text line appended to ``live_path`` under ``header`` — ``None`` emits nothing,
+    so control/progress events produce no live-log noise (parity with the old
+    human-readable stream, never raw JSON). A merged-stream line that fails to
+    parse as JSON (stray stderr text, not an event) is teed to ``live_path``
+    verbatim instead — fail-open, matching ``run_teed``'s behavior for that line
+    — and is not written to ``events_path``. The child's ``thread_id`` is
+    captured from the first ``{"type": "thread.started", "thread_id": ...}``
+    event seen; absent from the stream, it stays ``None`` without raising."""
+    with open(live_path, "a", encoding="utf-8") as live, \
+         open(events_path, "a", encoding="utf-8") as events:
+        live.write(header + "\n")
+        live.flush()
+        buf = []
+        thread_id = None
+
+        def _pump_line(line):
+            nonlocal thread_id
+            buf.append(line)
+            stripped = line.rstrip("\n")
+            if not stripped:
+                return
+            try:
+                event = json.loads(stripped)
+            except ValueError:
+                live.write(line)
+                live.flush()
+                return
+            events.write(stripped + "\n")
+            events.flush()
+            if (
+                thread_id is None
+                and isinstance(event, dict)
+                and event.get("type") == "thread.started"
+            ):
+                thread_id = event.get("thread_id")
+            rendered = render_line(event) if isinstance(event, dict) else None
+            if rendered is not None:
+                live.write(rendered if rendered.endswith("\n") else rendered + "\n")
+                live.flush()
+
+        exit_code, timed_out = _spawn_and_pump(
+            argv, cwd=cwd, shell=False, timeout=timeout, pump_line=_pump_line,
+            stdin_text=stdin_text,
+        )
+
+    merged = "".join(buf)
+    return JsonTeeResult(
+        exit_code=exit_code,
         timed_out=timed_out,
         tail=merged[-_ACC_TAIL_CHARS:],
+        thread_id=thread_id,
     )

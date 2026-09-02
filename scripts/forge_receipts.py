@@ -79,18 +79,45 @@ def _read_run_tasks(run_dir):
         return None
 
 
+def _read_seeded_findings(run_dir):
+    """The ``seeded_findings`` list from an existing ``run.json`` (used on
+    resume so a seed logged by an already-passed task's review is not lost
+    when this invocation's in-memory accumulator starts fresh), or ``None``
+    when absent — a brand-new run dir (fresh invocation) has no prior
+    run.json, so its caller's accumulator starts empty either way."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("seeded_findings")
+    except (OSError, ValueError):
+        return None
+
+
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
-                   deferrals=None, autofix_mode=None, doc_sync=None):
+                   deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
+                   seeded_findings=None):
     """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
     ``started_at``/``updated_at``/``pid``) and the scope-autonomy fields
-    (``deferrals``/``autofix_mode``/``doc_sync``) are additive and optional —
-    omitted when None, so an old run.json shape and a caller that passes none
-    both stay valid. Per-task ``started_at``/``ended_at`` ride inside the
-    caller's task summaries. ``deferrals`` is the aggregated defer-disposition
-    finding list (Deferral handling spec); ``autofix_mode`` is ``"auto"`` |
-    ``"gate"``; ``doc_sync`` is the terminal reconcile-stage record."""
+    (``deferrals``/``autofix_mode``/``doc_sync``/``seeded_findings``) are
+    additive and optional — omitted when None, so an old run.json shape and a
+    caller that passes none both stay valid. Per-task ``started_at``/``ended_at``
+    ride inside the caller's task summaries. ``deferrals`` is the aggregated
+    defer-disposition finding list (Deferral handling spec); ``autofix_mode``
+    is ``"auto"`` | ``"gate"``; ``doc_sync`` is the terminal reconcile-stage
+    record. ``seeded_findings`` is the aggregated seed-disposition finding list
+    (in-run x contract-breaking; Task 4's ``seed`` disposition) — it persists
+    across a resume and is what the end-of-plan summary surfaces, and what the
+    final review's discovery packet is pre-seeded from, whether or not that
+    review later confirms each one (wiring a runner-computed value into this
+    parameter is Task 5's job; this function only carries it through).
+    ``threads`` is the per-role ``codex exec`` session-id map (``task-N-worker``
+    | ``task-N-reviewer`` | ``final-reviewer`` | ``final-fixer`` -> thread id),
+    reset by the caller at the start of every invocation — never carried across
+    a resume — so it is written whenever the caller passes even an empty dict
+    (unlike the other optional fields, which omit on None: an empty ``threads``
+    on resume must overwrite a prior invocation's stale map, not be skipped)."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -101,6 +128,8 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     }
     if contract_error is not None:
         data["contract_error"] = contract_error
+    if threads is not None:
+        data["threads"] = threads
     for key, value in (
         ("current_task", current_task),
         ("current_phase", current_phase),
@@ -110,6 +139,7 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
         ("deferrals", deferrals),
         ("autofix_mode", autofix_mode),
         ("doc_sync", doc_sync),
+        ("seeded_findings", seeded_findings),
     ):
         if value is not None:
             data[key] = value
@@ -119,19 +149,34 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     return path
 
 
-def write_final_review_receipt(run_dir, verdict, halt_reason=None):
+def write_final_review_receipt(run_dir, verdict, halt_reason=None,
+                                coverage_skipped=None, coverage_retry=None,
+                                resume_fallback=None):
     """Persist the plan-level final-review verdict alongside the task receipts.
     ``halt_reason`` (the convergence loop's disposition-matrix class —
     scope-decision | regression | stuck | backstop | gate) is additive and
     optional, like the per-task receipt's field of the same name — omitted
     when None so an in-progress or passed final review's receipt is unchanged,
     and read back by `forge_status.read_run_state` for an
-    ``escalated-final-review`` run's halt class."""
+    ``escalated-final-review`` run's halt class. ``coverage_skipped``/
+    ``coverage_retry`` mirror the per-task receipt's contract-checklist
+    fields (Contract checklist spec) — both additive and optional, omitted
+    when None so a caller that doesn't pass them leaves the receipt
+    unchanged. ``resume_fallback`` mirrors the per-task receipt's field of
+    the same name (Session continuity / Continuity scope and failure specs)
+    — True when a final-reviewer or final-review-fixer resume fell back to a
+    cold spawn this attempt; additive and optional, omitted when None."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "final-review.json")
     data = verdict_to_dict(verdict)
     if halt_reason is not None:
         data["halt_reason"] = halt_reason
+    if coverage_skipped is not None:
+        data["coverage_skipped"] = coverage_skipped
+    if coverage_retry is not None:
+        data["coverage_retry"] = coverage_retry
+    if resume_fallback is not None:
+        data["resume_fallback"] = resume_fallback
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return path

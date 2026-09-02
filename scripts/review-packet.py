@@ -4,7 +4,7 @@ self-contained review packet for a reviewer.
 
 Usage:
     review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
-        [--prior-findings <path>]
+        [--prior-findings <path>] [--checklist <path>]
 
 Never emits a silently thin packet: any failure to locate the task block or
 to run git exits nonzero with a message on stderr.
@@ -14,9 +14,16 @@ to run git exits nonzero with a message on stderr.
 the packet gains a section instructing the reviewer to label each current
 finding resolved/carried/new against them. Omitted, the packet is unchanged.
 
-The diff is ``git diff <base>``: committed, staged, and unstaged *tracked*
-changes — untracked files are invisible to it. Commit (or at least ``git
-add``) the task's work before generating a packet.
+``--checklist`` points at a JSON file of checklist items (forge_checklist.py's
+``--format json`` output: a list of ``{"id", "source", "text"}``); when given,
+the packet gains a ``## Contract checklist`` section, appended after the diff
+and before any prior-findings section. Omitted, the packet is unchanged.
+
+The diff is ``git_diff(cwd, base)``: ``git diff <base>`` (committed, staged,
+and unstaged tracked changes) followed by one new-file hunk per untracked,
+non-ignored file — so a task whose whole implementation is new files never
+reviews as an empty diff. Read-only: nothing is staged, the index is never
+touched.
 """
 import argparse
 import json
@@ -28,6 +35,52 @@ import tempfile
 
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def git_diff(cwd, base):
+    """The review diff in ``cwd`` against ``base``: ``git diff <base>`` plus a
+    ``git diff --no-index /dev/null <path>`` new-file hunk for every untracked,
+    non-ignored file (``git ls-files --others --exclude-standard``, so a
+    gitignored ``.forge/`` never leaks in). Plain ``git diff`` never looks at
+    untracked files, and the runner only stages a task's work in the commit
+    *after* review — without this, a task creating only new files reviewed as
+    "no changes" (fixed 2026-09-02). Read-only: no ``git add``, no index
+    mutation, so the single-commit discipline and ``git stash create``
+    snapshots are undisturbed. Raises RuntimeError naming the cause on a git
+    failure (a packet-generation error — halt per the Halt spec)."""
+    def run(args):
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=cwd, capture_output=True, text=True
+            )
+        except OSError as e:
+            raise RuntimeError("failed to invoke git: {}".format(e))
+
+    tracked = run(["diff", base])
+    if tracked.returncode != 0:
+        raise RuntimeError(
+            "git diff {} failed in {}: {}".format(base, cwd, tracked.stderr.strip())
+        )
+    others = run(["ls-files", "--others", "--exclude-standard", "-z"])
+    if others.returncode != 0:
+        raise RuntimeError(
+            "git ls-files --others failed in {}: {}".format(cwd, others.stderr.strip())
+        )
+    parts = [tracked.stdout]
+    for path in others.stdout.split("\0"):
+        if not path:
+            continue
+        # --no-index exits 1 when the files differ (always, vs /dev/null) —
+        # only >1 is an error.
+        hunk = run(["diff", "--no-index", "--", os.devnull, path])
+        if hunk.returncode > 1:
+            raise RuntimeError(
+                "git diff --no-index for untracked {} failed in {}: {}".format(
+                    path, cwd, hunk.stderr.strip()
+                )
+            )
+        parts.append(hunk.stdout)
+    return "".join(parts)
 
 
 def fence_mask(lines):
@@ -117,6 +170,29 @@ def diagnose_missing_task(text, task_number, plan_path):
     return "Task {} not found in {}".format(task_number, plan_path)
 
 
+def build_review_kind_section(review_kind):
+    """Render the '## Review kind' marker that tells the reviewer which
+    verdict contract applies: 'discovery' (full contract sweep, coverage
+    required) or 'verification' (prior findings + repair delta, coverage
+    omitted). Placed first in the packet so it's the first thing the
+    reviewer reads (Coverage on discovery only spec)."""
+    return "## Review kind\n\n{}\n".format(review_kind)
+
+
+def build_checklist_section(checklist):
+    """Render a '## Contract checklist' markdown section, one line per item
+    as '- <id> — <text>' — mirrors forge_checklist.render_section's format.
+    ``checklist`` items only need attribute access to ``id``/``text``; the
+    CLI (main(), below) constructs actual forge_checklist.ChecklistItem
+    instances from ``--checklist``'s JSON via a deferred import, and an
+    in-process caller (forge-run.py) passes forge_checklist.ChecklistItem
+    instances directly — one implementation, imported by both callers
+    (Contract checklist spec: "Codex's review-packet.py imports it")."""
+    lines = ["## Contract checklist", ""]
+    lines.extend("- {} — {}".format(it.id, it.text) for it in checklist)
+    return "\n".join(lines) + "\n"
+
+
 def build_prior_findings_section(prior_findings):
     """Render the prior attempt's findings (as loaded from --prior-findings)
     into a packet section instructing the reviewer to label each current
@@ -133,7 +209,13 @@ def build_prior_findings_section(prior_findings):
     )
 
 
-def build_packet(task_block, base, diff_output, prior_findings=None):
+def build_packet(task_block, base, diff_output, prior_findings=None,
+                  checklist=None, review_kind=None):
+    """``review_kind`` (None by default) opts into the '## Review kind'
+    marker — the CLI (main(), below) never passes it, so its output stays
+    byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
+    (the runner's real discovery packets) pass ``review_kind="discovery"``
+    explicitly (Coverage on discovery only spec)."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -148,8 +230,58 @@ def build_packet(task_block, base, diff_output, prior_findings=None):
     fence = "`" * max(3, longest_run + 1)
     diff_section = fence + "diff\n" + diff_body + fence + "\n"
     packet = task_block.rstrip("\n") + "\n\n" + diff_section
+    if checklist is not None:
+        packet += "\n" + build_checklist_section(checklist)
     if prior_findings is not None:
         packet += "\n" + build_prior_findings_section(prior_findings)
+    if review_kind is not None:
+        packet = build_review_kind_section(review_kind) + "\n" + packet
+    return packet
+
+
+def build_verification_packet(findings, delta_diff, checklist, review_kind="verification"):
+    """Delta-scoped verification packet for a resumed reviewer (Delta-scoped
+    verification packets spec): the outstanding findings + the repair delta +
+    the reduced checklist — never the task block, the full spec, or the
+    whole-plan diff, all of which the resumed reviewer already holds in
+    session. ``findings`` is a list of finding dicts (a persisted
+    finding_to_dict() list, same shape as ``build_prior_findings_section``'s
+    input) embedded verbatim as JSON. ``delta_diff`` is ``git diff
+    <pre-repair snapshot>`` — just this repair's changes. ``checklist`` is
+    the reduced item list (forge_checklist.reduce_checklist output, or an
+    object exposing ``id``/``text`` like ``build_checklist_section``
+    expects); ``None`` (the empty-checklist skip case, or a reduction with no
+    matching items to render) omits the section entirely, mirroring
+    ``build_packet``'s own None-skips-section handling. Reuses
+    ``build_packet``'s fence-safety: a dynamic-length fence sized past the
+    longest backtick run in the delta, so a delta line containing ``` can't
+    close the block early. ``review_kind`` defaults to "verification" (this
+    builder's only real use) and prepends the '## Review kind' marker;
+    pass None to omit it."""
+    body = json.dumps(findings, indent=2)
+    if not body.endswith("\n"):
+        body += "\n"
+    findings_section = (
+        "## Outstanding findings\n\n```json\n" + body + "```\n"
+    )
+
+    if delta_diff.strip() == "":
+        delta_body = "no changes\n"
+    else:
+        delta_body = delta_diff
+        if not delta_body.endswith("\n"):
+            delta_body += "\n"
+    longest_run = max(
+        (len(m.group(0)) for m in re.finditer(r"`+", delta_body)), default=0
+    )
+    fence = "`" * max(3, longest_run + 1)
+    delta_section = "## Repair delta\n\n" + fence + "diff\n" + delta_body + fence + "\n"
+
+    packet = findings_section + "\n" + delta_section
+    if checklist is not None:
+        packet += "\n" + build_checklist_section(checklist)
+    if review_kind is not None:
+        packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
 
 
@@ -165,6 +297,13 @@ def main(argv=None):
         metavar="PATH",
         help="JSON file of the prior attempt's findings; appends a "
         "resolved/carried/new labeling section to the packet",
+    )
+    parser.add_argument(
+        "--checklist",
+        default=None,
+        metavar="PATH",
+        help="JSON file of checklist items (forge_checklist.py --format json "
+        "output); appends a '## Contract checklist' section to the packet",
     )
     args = parser.parse_args(argv)
 
@@ -190,6 +329,44 @@ def main(argv=None):
             )
             return 1
 
+    checklist = None
+    if args.checklist is not None:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                raw_checklist = json.load(f)
+        except OSError as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        except json.JSONDecodeError as e:
+            print(
+                "error: checklist file {} is not valid JSON: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        # Deferred import: main() runs only at CLI-invocation time, long
+        # after forge_common has finished its sibling-load sequence (which
+        # loads this module as `rp` *before* forge_common finishes defining
+        # the names forge_checklist needs at import time, via forge_plan —
+        # TIER_MAP/ALLOWED_EFFORTS/Task). A module-level import here would
+        # hit that circular-import hazard; a deferred one never does.
+        SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+        if SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, SCRIPTS_DIR)
+        import forge_checklist
+        checklist = [
+            forge_checklist.ChecklistItem(
+                id=it["id"], source=it["source"], text=it["text"]
+            )
+            for it in raw_checklist
+        ]
+
     try:
         with open(args.plan, "r", encoding="utf-8") as f:
             plan_text = f.read()
@@ -213,25 +390,14 @@ def main(argv=None):
     plan_dir = os.path.dirname(os.path.abspath(args.plan)) or "."
 
     try:
-        result = subprocess.run(
-            ["git", "diff", args.base],
-            cwd=plan_dir,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as e:
-        print("error: failed to invoke git: {}".format(e), file=sys.stderr)
+        diff_output = git_diff(plan_dir, args.base)
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
         return 1
 
-    if result.returncode != 0:
-        print(
-            "error: git diff {} failed in {}:".format(args.base, plan_dir),
-            file=sys.stderr,
-        )
-        print(result.stderr, end="", file=sys.stderr)
-        return 1
-
-    packet = build_packet(task_block, args.base, result.stdout, prior_findings)
+    packet = build_packet(
+        task_block, args.base, diff_output, prior_findings, checklist
+    )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()
     try:

@@ -130,5 +130,7 @@ Behavior-preserving. `forge-run.py` deletes the moved function bodies, imports t
 - **Reviewer/helper diff skew** — the reviewer's self-served diff and the helper's recomputed diff could differ if the tree mutates between. Mitigation: the loop mutates nothing between reviewer dispatch and `forge_dispose`; the helper's diff is authoritative regardless (provenance is always its recomputation).
 - **Orchestrator drift** — the Claude loop is prose the session must follow. Mitigation: the decision is a tested CLI (no longer prose), so the drift surface is only the glue; SKILL.md states the loop steps explicitly.
 - **Wall-clock** on large all-independent plans (the serial cost). Accepted by design; hybrid parallelism is a logged future optimization, not 12b.
-</content>
-</invoke>
+
+## Changelog
+
+2026-08-21 (phase 13): Phase 13 extended the shared decision helper with coverage validation and added session continuity to both harnesses' dispatch paths, preserving the cross-harness parity 12b established.

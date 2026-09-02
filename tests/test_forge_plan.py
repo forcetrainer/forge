@@ -138,6 +138,97 @@ class TierJustificationTests(unittest.TestCase):
         self.assertIn("bogus", msg)
         self.assertIn("1", msg)
 
+    def test_backticked_bare_tier_parses(self):
+        p = self._write(self._plan("`standard`"))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "standard")
+        self.assertIsNone(tasks[0].tier_justification)
+
+    def test_backticked_tier_with_justification_parses_and_keeps_justification(
+        self,
+    ):
+        p = self._write(
+            self._plan("`complex` — reconciles two retry semantics")
+        )
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "complex")
+        self.assertEqual(
+            tasks[0].tier_justification, "reconciles two retry semantics"
+        )
+
+    def test_trailing_period_on_bare_tier_parses(self):
+        p = self._write(self._plan("complex — mechanical rationale."))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "complex")
+        self.assertEqual(tasks[0].tier_justification, "mechanical rationale.")
+
+    def test_trailing_period_on_bare_level_parses(self):
+        p = self._write(self._plan("standard."))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "standard")
+        self.assertIsNone(tasks[0].tier_justification)
+
+    def test_backticked_level_with_trailing_period_parses(self):
+        p = self._write(self._plan("`standard`."))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "standard")
+        self.assertIsNone(tasks[0].tier_justification)
+
+    def test_backticked_level_with_trailing_period_and_justification_parses(
+        self,
+    ):
+        p = self._write(
+            self._plan("`trivial`. — single enum value, one call site")
+        )
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "trivial")
+        self.assertEqual(
+            tasks[0].tier_justification, "single enum value, one call site"
+        )
+
+    def test_unknown_tier_after_normalization_still_raises_naming_value(self):
+        p = self._write(self._plan("`bogus`. — with justification"))
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(p)
+        msg = str(ctx.exception)
+        self.assertIn("bogus", msg)
+        self.assertIn("1", msg)
+
+    def test_backticked_complex_without_justification_still_raises(self):
+        p = self._write(self._plan("`complex`"))
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(p)
+        msg = str(ctx.exception)
+        self.assertIn("1", msg)
+        self.assertIn("justification", msg.lower())
+
+
+class ParsePlanTasksRealPlansTests(unittest.TestCase):
+    """Regression proof against the actual shipped plans that motivated the
+    tier-normalization fix -- both use the backticked **Tier:** template form
+    that the un-normalized parser rejected."""
+
+    def _plan_path(self, name):
+        return str(
+            pathlib.Path(__file__).resolve().parent.parent
+            / "docs"
+            / "forge"
+            / "plans"
+            / name
+        )
+
+    def test_phase13_review_continuity_plan_parses(self):
+        tasks = forge_run.parse_plan_tasks(
+            self._plan_path("2026-08-21-phase13-review-continuity.md")
+        )
+        self.assertGreater(len(tasks), 0)
+
+    def test_phase12b_claude_dispatch_parity_plan_parses(self):
+        tasks = forge_run.parse_plan_tasks(
+            self._plan_path("2026-07-17-phase12b-claude-dispatch-parity.md")
+        )
+        self.assertGreater(len(tasks), 0)
+
 
 class ParseEffortOverridesTests(unittest.TestCase):
     """parse_effort_overrides: repeatable --effort N=LEVEL entries -> {int: str}.

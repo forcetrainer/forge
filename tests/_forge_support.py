@@ -31,6 +31,23 @@ _spec.loader.exec_module(forge_run)
 # ``append_file``/``append_text`` (an absolute path; a real `codex exec` worker
 # edits repo files directly, which this fake cannot do — used to exercise commit
 # discipline around a fix dispatch), and exits with the scripted code.
+#
+# Coverage stubbing (Phase 13 Task 4): REVIEW_VERDICT_INSTRUCTION now requires
+# a `coverage` array on every reviewer verdict. A canned `_pass_msg()`/
+# `_findings_msg()`-style fixture response predates that and carries none —
+# obeying it verbatim would make every fixture fail the runner's own coverage
+# validation, asserting runner behavior against a reviewer that couldn't
+# exist. So: when the dispatched prompt (the final argv element) contains a
+# '## Contract checklist' section AND the canned message parses as a JSON
+# verdict object with no `coverage` key already, the fake parses the
+# checklist ids out of the prompt (the same '- <id> — <text>' lines
+# build_checklist_section renders) and injects one `coverage` entry per id —
+# "status": "satisfied", non-empty "evidence" — before writing the message.
+# A canned message that already sets its own `coverage` (a test deliberately
+# exercising the coverage/retry path) is never touched. No checklist section
+# in the prompt (a worker dispatch, or a reviewer packet with no checklist —
+# the empty-checklist skip case), or a message that isn't a JSON verdict
+# object: passed through untouched.
 FAKE_CODEX_SRC = '''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
@@ -42,6 +59,17 @@ if log:
             idx = sum(1 for _ in f)
     with open(log, "a") as f:
         f.write(json.dumps(argv) + "\\n")
+# The real `codex exec` reads the prompt from stdin when no PROMPT argument is
+# given (`codex exec --help`: "If not provided as an argument (or if `-` is
+# used), instructions are read from stdin"). The runner relies on that to get
+# past ARG_MAX, so the fake must read it the same way. FORGE_FAKE_PROMPT_LOG,
+# when set, records what actually arrived so a test can assert the child got
+# the whole thing rather than merely that the spawn succeeded.
+prompt = "" if sys.stdin.isatty() else sys.stdin.read()
+plog = os.environ.get("FORGE_FAKE_PROMPT_LOG")
+if plog:
+    with open(plog, "a") as f:
+        f.write(json.dumps(prompt) + "\\n")
 exit_code = 0
 msg = ""
 sleep_s = 0
@@ -62,6 +90,33 @@ if resp and os.path.exists(resp):
         err = r.get("stderr", "")
         append_file = r.get("append_file")
         append_text = r.get("append_text", "")
+if msg:
+    if "## Contract checklist" in prompt:
+        try:
+            obj = json.loads(msg)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and "verdict" in obj and "coverage" not in obj:
+            ids = []
+            in_section = False
+            for line in prompt.splitlines():
+                if line.strip() == "## Contract checklist":
+                    in_section = True
+                    continue
+                if in_section:
+                    if line.startswith("## "):
+                        break
+                    if line.startswith("- "):
+                        cid = line[2:].split(" \\u2014 ", 1)[0].strip()
+                        if cid:
+                            ids.append(cid)
+            if ids:
+                obj["coverage"] = [
+                    {"id": cid, "status": "satisfied",
+                     "evidence": "stub: " + cid}
+                    for cid in ids
+                ]
+                msg = json.dumps(obj)
 if sleep_s:
     time.sleep(sleep_s)
 if out:
@@ -454,6 +509,16 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 """
 
 
+def _log_prompts(log_path):
+    """Prompts received by the fake codex, one per dispatch, in call order.
+    Set FORGE_FAKE_PROMPT_LOG to that path first. The prompt no longer rides in
+    argv (ARG_MAX), so this is how a test inspects what a child was sent."""
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path) as f:
+        return [json.loads(ln) for ln in f if ln.strip()]
+
+
 def _log_argvs(log_path):
     if not os.path.exists(log_path):
         return []
@@ -499,5 +564,6 @@ __all__ = [
     "_findings_msg",
     "_fix_findings_msg",
     "_log_argvs",
+    "_log_prompts",
     "_find_dispatch",
 ]

@@ -5,6 +5,7 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 import forge_common
+import forge_dispose  # decision.json's disposition grouping (_findings_by_disposition)
 
 
 # --- unified-diff fixtures (git-style, a/ b/ prefixes) ----------------------
@@ -72,6 +73,27 @@ index 1111111..2222222 100644
 +new
 """
 
+# The run's cumulative diff (run-start HEAD): wider than DIFF_SINGLE (which is
+# this one task's diff, prior-commit based) — covers DIFF_SINGLE's own range
+# (12-16) plus an extra range (40-45) touched earlier in the same run by a
+# different task.
+DIFF_RUN_WIDER = """diff --git a/foo.py b/foo.py
+index 1111111..3333333 100644
+--- a/foo.py
++++ b/foo.py
+@@ -10,3 +12,5 @@ def f():
+ context
++added_a
++added_b
+ context
+@@ -38,3 +40,6 @@ def g():
+ context
++other_task_a
++other_task_b
++other_task_c
+ context
+"""
+
 
 def _finding(**kw):
     """Build a Finding with sane defaults so each test names only the axes it
@@ -118,6 +140,49 @@ class DiffLineRangesTests(unittest.TestCase):
         self.assertEqual(forge_run.diff_line_ranges(""), {})
 
 
+class ParseLinesTests(unittest.TestCase):
+    """_parse_lines: single number, single range, comma-separated combinations,
+    whitespace tolerance, and genuinely malformed strings."""
+
+    def test_single_number(self):
+        self.assertEqual(forge_run._parse_lines("12"), [(12, 12)])
+
+    def test_single_range(self):
+        self.assertEqual(forge_run._parse_lines("12-20"), [(12, 20)])
+
+    def test_comma_separated_ranges(self):
+        self.assertEqual(
+            forge_run._parse_lines("120-152,182-199"), [(120, 152), (182, 199)]
+        )
+
+    def test_mixed_numbers_and_ranges(self):
+        self.assertEqual(
+            forge_run._parse_lines("12-20,45,60-62"),
+            [(12, 20), (45, 45), (60, 62)],
+        )
+
+    def test_whitespace_tolerated(self):
+        self.assertEqual(
+            forge_run._parse_lines(" 12-20 , 45 , 60-62 "),
+            [(12, 20), (45, 45), (60, 62)],
+        )
+
+    def test_absent_is_none(self):
+        self.assertIsNone(forge_run._parse_lines(None))
+        self.assertIsNone(forge_run._parse_lines(""))
+
+    def test_malformed_string_is_none(self):
+        self.assertIsNone(forge_run._parse_lines("abc"))
+
+    def test_double_dash_is_none(self):
+        self.assertIsNone(forge_run._parse_lines("12--20"))
+
+    def test_one_bad_token_invalidates_whole_field(self):
+        # A mix of one good range and one bad one is not silently downgraded
+        # to just the good half — the whole field is unparseable.
+        self.assertIsNone(forge_run._parse_lines("12-20,abc"))
+
+
 class VerifyProvenanceTests(unittest.TestCase):
     """verify_provenance: intersect the finding's lines with the diff's changed
     ranges for that file — in-diff on overlap, pre-existing otherwise, regardless
@@ -148,10 +213,69 @@ class VerifyProvenanceTests(unittest.TestCase):
         f = _finding(file="foo.py", lines="40", provenance="in-diff")
         self.assertEqual(forge_run.verify_provenance(f, self.ranges), "pre-existing")
 
+    def test_any_range_intersecting_is_in_diff(self):
+        # The real-world motivating case: a comma-separated location where
+        # only the second range falls inside the diff must still resolve to
+        # in-diff — not silently fall through to pre-existing.
+        f = _finding(file="foo.py", lines="1-5,13-14")
+        self.assertEqual(forge_run.verify_provenance(f, self.ranges), "in-diff")
+
+    def test_no_range_intersecting_is_pre_existing(self):
+        f = _finding(file="foo.py", lines="1-5,40-42")
+        self.assertEqual(forge_run.verify_provenance(f, self.ranges), "pre-existing")
+
+
+class VerifyProvenanceRunRangesTests(unittest.TestCase):
+    """verify_provenance: three-way provenance when run_ranges is supplied —
+    in-diff still wins first, then in-run (intersects the run diff but not
+    this review's diff), else pre-existing. run_ranges=None reproduces
+    today's two-way behavior exactly (the back-compat proof)."""
+
+    def setUp(self):
+        self.ranges = {"foo.py": [(12, 16)]}
+        self.run_ranges = {"foo.py": [(12, 16), (40, 45)]}
+
+    def test_in_diff_wins_over_run_ranges(self):
+        f = _finding(file="foo.py", lines="13")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges), "in-diff"
+        )
+
+    def test_intersects_run_but_not_diff_is_in_run(self):
+        f = _finding(file="foo.py", lines="41")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges), "in-run"
+        )
+
+    def test_intersects_neither_is_pre_existing(self):
+        f = _finding(file="foo.py", lines="100")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges),
+            "pre-existing",
+        )
+
+    def test_file_not_in_run_ranges_is_pre_existing(self):
+        f = _finding(file="other.py", lines="13")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges, self.run_ranges),
+            "pre-existing",
+        )
+
+    def test_run_ranges_none_reproduces_two_way_behavior(self):
+        # Back-compat proof: omitting run_ranges (the default) is byte-identical
+        # to the pre-Task-4 two-way function — a finding outside `ranges` is
+        # pre-existing even though it would have matched run_ranges, because
+        # run_ranges was never supplied.
+        f = _finding(file="foo.py", lines="41")
+        self.assertEqual(
+            forge_run.verify_provenance(f, self.ranges), "pre-existing"
+        )
+
 
 class DeriveDispositionTests(unittest.TestCase):
-    """derive_disposition: the four-quadrant matrix over verified provenance and
-    the contract_ref-gated impact."""
+    """derive_disposition: the matrix over verified provenance and the
+    contract_ref-gated impact — including the Task 4 in-run x
+    contract-breaking -> seed cell."""
 
     def test_in_diff_contract_breaking_is_fix(self):
         f = _finding(provenance="in-diff", impact="contract-breaking",
@@ -169,6 +293,19 @@ class DeriveDispositionTests(unittest.TestCase):
 
     def test_pre_existing_improvement_is_defer(self):
         f = _finding(provenance="pre-existing", impact="improvement", contract_ref=None)
+        self.assertEqual(forge_run.derive_disposition(f), "defer")
+
+    def test_in_run_contract_breaking_is_seed(self):
+        f = _finding(provenance="in-run", impact="contract-breaking",
+                     contract_ref="AC1: acceptance passes")
+        self.assertEqual(forge_run.derive_disposition(f), "seed")
+
+    def test_in_run_improvement_is_defer(self):
+        f = _finding(provenance="in-run", impact="improvement", contract_ref=None)
+        self.assertEqual(forge_run.derive_disposition(f), "defer")
+
+    def test_null_contract_ref_downgrades_in_run_seed_to_defer(self):
+        f = _finding(provenance="in-run", impact="contract-breaking", contract_ref=None)
         self.assertEqual(forge_run.derive_disposition(f), "defer")
 
     def test_null_contract_ref_downgrades_contract_breaking_to_defer(self):
@@ -256,27 +393,97 @@ class ParseVerdictTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             forge_run.parse_verdict('{"verdict": ')
 
-    def test_contract_breaking_missing_location_raises(self):
+    def test_contract_breaking_missing_location_parses_but_flags_as_defect(self):
+        # Absent location no longer raises at parse time (Location parsing
+        # spec, 2026-08-21) — it parses fine, with lines=None, and surfaces
+        # as a validate_locations defect instead, retried the same way as a
+        # coverage defect rather than crashing the whole review.
         msg = (
             '{"verdict": "findings", "findings": ['
             '{"id": "f1", "summary": "broken", '
             '"impact": "contract-breaking", "contract_ref": "AC1"}]}'
         )
-        with self.assertRaises(RuntimeError) as ctx:
-            forge_run.parse_verdict(msg)
-        self.assertIn("location", str(ctx.exception).lower())
+        v = forge_run.parse_verdict(msg)
+        self.assertEqual(v.kind, "findings")
+        self.assertIsNone(v.findings[0].lines)
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+        self.assertIn("no location", defects[0])
 
-    def test_contract_breaking_missing_lines_raises(self):
+    def test_contract_breaking_missing_lines_parses_but_flags_as_defect(self):
         # location present but lines omitted is still incomplete for a
-        # contract-breaking finding.
+        # contract-breaking finding — same defect treatment as fully absent.
         msg = (
             '{"verdict": "findings", "findings": ['
             '{"id": "f1", "summary": "broken", '
             '"location": {"file": "a.py"}, '
             '"impact": "contract-breaking", "contract_ref": "AC1"}]}'
         )
-        with self.assertRaises(RuntimeError):
-            forge_run.parse_verdict(msg)
+        v = forge_run.parse_verdict(msg)
+        self.assertEqual(v.findings[0].file, "a.py")
+        self.assertIsNone(v.findings[0].lines)
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+
+
+class ValidateLocationsTests(unittest.TestCase):
+    """validate_locations: a verdict validation defect for a contract-breaking
+    finding with an absent or unparseable location.lines; an improvement
+    finding is never checked (it may carry no location and defers
+    regardless of provenance)."""
+
+    def test_pass_verdict_is_valid(self):
+        v = forge_common.Verdict(kind="pass")
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_contract_breaking_with_parseable_location_is_valid(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1",
+                     lines="120-152,182-199"),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_contract_breaking_absent_location_is_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1", lines=None),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("no location", defects[0])
+
+    def test_contract_breaking_unparseable_location_is_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="contract-breaking", contract_ref="AC1", lines="abc"),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("unparseable", defects[0])
+
+    def test_improvement_with_no_location_is_not_a_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="improvement", contract_ref=None, lines=None),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_improvement_with_unparseable_location_is_not_a_defect(self):
+        # Only a contract-breaking claim requires a parseable location; an
+        # improvement finding's location, if present at all, is never
+        # validated.
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(impact="improvement", contract_ref=None, lines="abc"),
+        ])
+        self.assertEqual(forge_run.validate_locations(v), [])
+
+    def test_multiple_defects_named_individually(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            _finding(id="f1", impact="contract-breaking", contract_ref="AC1",
+                     lines=None),
+            _finding(id="f2", impact="contract-breaking", contract_ref="AC2",
+                     lines="abc"),
+        ])
+        defects = forge_run.validate_locations(v)
+        self.assertEqual(len(defects), 2)
 
 
 class ClassifyFindingsTests(unittest.TestCase):
@@ -311,6 +518,193 @@ class ClassifyFindingsTests(unittest.TestCase):
         forge_run.classify_findings(v, DIFF_SINGLE)
         self.assertEqual(f.provenance, "in-diff")
         self.assertEqual(f.disposition, "defer")
+
+
+class ClassifyFindingsRunDiffTests(unittest.TestCase):
+    """classify_findings(verdict, diff, run_diff=None, carried_ids=None):
+    three-way provenance end-to-end when run_diff is supplied, and the
+    run_diff=None back-compat proof (today's two-way behavior, byte-identical)."""
+
+    def test_in_run_finding_seeds(self):
+        # foo.py:41 falls outside DIFF_SINGLE's range (12-16) but inside the
+        # wider run diff's range (12-16, 40-45) -> in-run x contract-breaking
+        # -> seed.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-run")
+        self.assertEqual(f.disposition, "seed")
+
+    def test_in_diff_finding_still_fixes_with_run_diff_present(self):
+        f = _finding(id="f1", file="foo.py", lines="13", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-diff")
+        self.assertEqual(f.disposition, "fix")
+
+    def test_pre_existing_finding_still_halts_with_run_diff_present(self):
+        f = _finding(id="f1", file="foo.py", lines="100", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "pre-existing")
+        self.assertEqual(f.disposition, "halt")
+
+    def test_in_run_improvement_defers(self):
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="improvement", contract_ref=None)
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        self.assertEqual(f.provenance, "in-run")
+        self.assertEqual(f.disposition, "defer")
+
+    def test_run_diff_none_reproduces_two_way_classification(self):
+        # The back-compat proof: with run_diff omitted, a finding that would
+        # have been in-run under a wider run diff instead falls to
+        # pre-existing -> halt, exactly as classify_findings behaved before
+        # Task 4.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_run.classify_findings(v, DIFF_SINGLE)
+        self.assertEqual(f.provenance, "pre-existing")
+        self.assertEqual(f.disposition, "halt")
+
+
+class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
+    """classify_findings' resolved-label filter: a finding labeled
+    convergence=="resolved" is dropped before disposition when its canonical
+    id (carried_from or id) is a member of carried_ids — behaving identically
+    to an omitted finding (Convergence label honored)."""
+
+    def test_resolved_finding_dropped_when_canonical_id_carried(self):
+        f = _finding(id="f1", convergence="resolved",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"f1"})
+        self.assertEqual(out.findings, [])
+        self.assertIsNone(f.disposition)  # never dispositioned — dropped first
+
+    def test_resolved_label_ignored_when_id_not_in_carried_set(self):
+        # The runner never tracked f1 as outstanding — a resolved label on it
+        # is meaningless, so it's dispositioned normally rather than dropped.
+        f = _finding(id="f1", convergence="resolved", file="foo.py", lines="13",
+                     provenance="pre-existing", impact="contract-breaking",
+                     contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"other"})
+        self.assertEqual(out.findings, [f])
+        self.assertEqual(f.provenance, "in-diff")
+        self.assertEqual(f.disposition, "fix")
+
+    def test_resolved_matched_via_carried_from_not_raw_id(self):
+        # The reviewer re-issued the original finding under a new id; the
+        # resolved label must match against carried_from, the canonical id
+        # the runner actually tracked.
+        f = _finding(id="f1-new", carried_from="orig1", convergence="resolved",
+                     impact="contract-breaking", contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"orig1"})
+        self.assertEqual(out.findings, [])
+
+    def test_carried_ids_none_preserves_todays_behavior(self):
+        # No carried_ids supplied (the default) -> the resolved label is
+        # never honored, exactly like before this filter existed.
+        f = _finding(id="f1", convergence="resolved", file="foo.py", lines="13",
+                     provenance="pre-existing", impact="contract-breaking",
+                     contract_ref="AC1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        out = forge_run.classify_findings(v, DIFF_SINGLE)
+        self.assertEqual(out.findings, [f])
+        self.assertEqual(f.disposition, "fix")
+
+    def test_falsely_resolved_finding_reappearing_trips_regression(self):
+        # Attempt 1: a real fix finding f1 is outstanding after review.
+        state = forge_run.ConvergenceState()
+        f1_attempt1 = _finding(id="f1", file="foo.py", lines="13",
+                                provenance="in-diff", impact="contract-breaking",
+                                contract_ref="AC1")
+        v1 = forge_common.Verdict(kind="findings", findings=[f1_attempt1])
+        forge_run.classify_findings(v1, DIFF_SINGLE, carried_ids=state.carried_ids)
+        forge_run.advance_state(state, v1.findings, True)
+        self.assertIn("f1", state.carried_ids)
+
+        # Attempt 2: the reviewer (falsely) labels f1 resolved; f1's canon is
+        # a member of the carried set from attempt 1, so the guard honors the
+        # label and drops it — this attempt converges with nothing carried.
+        f1_attempt2 = _finding(id="f1", convergence="resolved", file="foo.py",
+                                lines="13", impact="contract-breaking",
+                                contract_ref="AC1")
+        v2 = forge_common.Verdict(kind="findings", findings=[f1_attempt2])
+        forge_run.classify_findings(v2, DIFF_SINGLE, carried_ids=state.carried_ids)
+        self.assertEqual(v2.findings, [])
+        action, halt_reason = forge_run.convergence_decision(
+            v2.findings, state, True, 2, "auto"
+        )
+        self.assertEqual(action, "pass")
+        forge_run.advance_state(state, v2.findings, True)
+        self.assertIn("f1", state.resolved_ids)
+
+        # Attempt 3: f1 reappears for real (the resolved claim was false) —
+        # the existing regression rule catches it via the runner's own
+        # resolved-id set, no second mechanism required.
+        f1_attempt3 = _finding(id="f1", file="foo.py", lines="13",
+                                provenance="in-diff", impact="contract-breaking",
+                                contract_ref="AC1")
+        v3 = forge_common.Verdict(kind="findings", findings=[f1_attempt3])
+        forge_run.classify_findings(v3, DIFF_SINGLE, carried_ids=state.carried_ids)
+        action, halt_reason = forge_run.convergence_decision(
+            v3.findings, state, True, 3, "auto"
+        )
+        self.assertEqual(action, "halt")
+        self.assertEqual(halt_reason, "regression")
+
+
+class SeededDispositionGroupTests(unittest.TestCase):
+    """decision.json's seeded group (forge_dispose._findings_by_disposition):
+    a seed-dispositioned finding groups under the key "seeded" alongside
+    fix/defer/halt, and never enters the fix set — so it cannot drive rework
+    or count as a carried fix finding for the stuck rule."""
+
+    def test_seed_finding_groups_under_seeded_key(self):
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        grouped = forge_dispose._findings_by_disposition([f])
+        self.assertEqual([d["id"] for d in grouped["seeded"]], ["f1"])
+        self.assertEqual(grouped["fix"], [])
+
+    def test_no_seed_findings_leaves_base_groups_unchanged(self):
+        # Back-compat proof: with no seed-dispositioned findings the grouped
+        # dict is exactly the pre-Task-4 three keys — no "seeded" key
+        # appears at all.
+        grouped = forge_dispose._findings_by_disposition([])
+        self.assertEqual(grouped, {"fix": [], "defer": [], "halt": []})
+
+    def test_seed_finding_excluded_from_real_fix_canons(self):
+        # A seed finding must not enter the fix set, so it cannot drive
+        # rework and is never counted as a carried fix finding for the
+        # stuck rule (_real_fix_canons keys strictly on disposition=="fix").
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        self.assertEqual(forge_run._real_fix_canons([f]), set())
+
+    def test_seed_finding_never_scope_halts_or_blocks_pass(self):
+        # convergence_decision only halts on disposition=="halt"; a seed
+        # finding is logged and the run continues — with acceptance green and
+        # no fix-disposition findings, the attempt still passes.
+        f = _finding(id="f1", file="foo.py", lines="41", provenance="in-run",
+                     impact="contract-breaking", contract_ref="AC1",
+                     disposition="seed")
+        state = forge_run.ConvergenceState()
+        action, halt_reason = forge_run.convergence_decision(
+            [f], state, True, 1, "auto"
+        )
+        self.assertEqual(action, "pass")
+        self.assertIsNone(halt_reason)
 
 
 if __name__ == "__main__":

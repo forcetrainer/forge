@@ -58,7 +58,7 @@ class DispatchDocSyncTests(unittest.TestCase):
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         with open(os.path.join(self.d, "README.md"), "w") as f:
             f.write("# Docs\n\nold reference\n")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
@@ -150,7 +150,7 @@ class DocSyncRunPlanGatingTests(unittest.TestCase):
 
     def _init_repo(self):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
             f.write("base\n")
         with open(os.path.join(self.d, "README.md"), "w") as f:

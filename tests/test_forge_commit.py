@@ -39,7 +39,7 @@ class CommitDisciplineTests(unittest.TestCase):
         # Harness artifacts are committed as ignored so the working tree is clean
         # at run start; the runner's own `.forge/` is also ignored.
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         for name in tracked:
             with open(os.path.join(self.d, name), "w") as f:
                 f.write("base\n")
@@ -245,3 +245,42 @@ class CommitDisciplineTests(unittest.TestCase):
         self.assertFalse(hasattr(forge_run, "_snapshot_worktree"))
         src = SCRIPT_PATH.read_text()
         self.assertNotIn("_snapshot_worktree", src)
+
+
+PLAN_NEW_FILE_ONLY = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: New file only
+- [ ] Done
+
+**Acceptance:** `printf 'def added():\\n    return 1\\n' > brand_new.py`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+
+class UntrackedFilesReviewedTests(CommitDisciplineTests):
+    """A task whose whole implementation is new files (nothing tracked
+    touched) must still put that implementation in front of the reviewer —
+    the per-task packet's diff includes untracked files, and the task's
+    commit sweeps them in as before."""
+
+    def test_new_file_only_task_review_packet_contains_the_file(self):
+        plan = self._plan(PLAN_NEW_FILE_ONLY)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},             # worker
+            {"exit": 0, "msg": _pass_msg()},    # per-task reviewer
+            {"exit": 0, "msg": _pass_msg()},    # final review
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        self.assertIn("+++ b/brand_new.py", packet)
+        self.assertIn("+def added():", packet)
+        self.assertNotIn("no changes vs", packet)
+        # Commit discipline unchanged: the new file rides in the task commit.
+        self.assertIn("brand_new.py", self._git("show", "--stat", "HEAD").stdout)

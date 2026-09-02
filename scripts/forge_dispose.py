@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 
 from forge_common import (
     AUTOFIX_MODES,
+    rp,
     MAX_ATTEMPTS_BACKSTOP,
+    CoverageEntry,
     Finding,
     Verdict,
     finding_to_dict,
@@ -39,11 +41,15 @@ def _finding_from_obj(obj):
     """Build one Finding from a reviewer finding object (the per-finding schema —
     nested ``location`` mirrored by finding_to_dict). The reviewer-proposed
     provenance/impact ride through unchanged; the runner verifies/derives them
-    later (classify_findings). Raises RuntimeError when the finding is not an
-    object, or when a ``contract-breaking`` finding omits its location — without a
-    file/line to point at, provenance cannot be verified against the diff, so an
-    unlocated contract-breaking claim is a contract error, never a silent guess
-    (Reviewer verdict contract; DECISIONS 2026-07-11)."""
+    later (classify_findings). Raises RuntimeError only when the finding is not
+    a JSON object — a ``contract-breaking`` finding with an absent or
+    unparseable location is *not* raised here. Without a file/line to point
+    at, provenance cannot be verified against the diff, but that is now a
+    verdict validation defect (``validate_locations``), reported and
+    re-dispatched through the same retry as a coverage defect, rather than an
+    immediate contract error — a reviewer who names one range gets the same
+    treatment as one who names two (Location parsing spec, 2026-08-21;
+    supersedes the immediate raise from DECISIONS 2026-07-11)."""
     if not isinstance(obj, dict):
         raise RuntimeError(
             "reviewer finding is not a JSON object (per-finding schema required); "
@@ -53,12 +59,6 @@ def _finding_from_obj(obj):
     file = location.get("file")
     lines = location.get("lines")
     impact = obj.get("impact")
-    if impact == "contract-breaking" and (file is None or lines is None):
-        raise RuntimeError(
-            "reviewer finding {!r} is contract-breaking but omits its location "
-            "(location.file/location.lines) — provenance cannot be verified "
-            "against the diff".format(obj.get("id"))
-        )
     return Finding(
         id=obj.get("id"),
         summary=obj.get("summary", ""),
@@ -73,30 +73,67 @@ def _finding_from_obj(obj):
     )
 
 
+def _coverage_from_obj(obj):
+    """Build the coverage list from a verdict-shaped object. Absent/empty
+    ``coverage`` tolerates as an empty list at *parse* time — validation
+    (validate_coverage), not parsing, is what rejects a missing or incomplete
+    coverage array, keeping a reviewer verdict that fails validation still a
+    parseable Verdict object (Reviewer verdict contract)."""
+    raw = obj.get("coverage")
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            "reviewer verdict coverage is not a list; got: " + repr(raw)[:200]
+        )
+    entries = []
+    for e in raw:
+        if not isinstance(e, dict):
+            raise RuntimeError(
+                "reviewer coverage entry is not a JSON object; got: "
+                + repr(e)[:200]
+            )
+        entries.append(CoverageEntry(
+            id=e.get("id"),
+            status=e.get("status"),
+            evidence=e.get("evidence", ""),
+        ))
+    return entries
+
+
 def _verdict_from_obj(obj):
     """Build the Verdict from a recognized verdict-shaped object (``verdict`` is
     ``pass`` or ``findings``; the authoritative last one in the stream). ``pass``
     carries no findings; ``findings`` parses each finding object into a Finding via
-    _finding_from_obj — which raises loudly on a malformed or unlocated
-    contract-breaking finding rather than dropping it."""
+    _finding_from_obj — which raises loudly only on a malformed finding object,
+    never on an unlocated contract-breaking one (that is validate_locations'
+    job). ``coverage`` is parsed on either verdict kind (present or absent) via
+    _coverage_from_obj."""
+    coverage = _coverage_from_obj(obj)
     if obj["verdict"] == "pass":
-        return Verdict(kind="pass")
+        return Verdict(kind="pass", coverage=coverage)
     raw = obj.get("findings")
     if not isinstance(raw, list):
         raise RuntimeError(
             "reviewer findings verdict has no findings list; got: "
             + repr(obj)[:300]
         )
-    return Verdict(kind="findings", findings=[_finding_from_obj(f) for f in raw])
+    return Verdict(
+        kind="findings",
+        findings=[_finding_from_obj(f) for f in raw],
+        coverage=coverage,
+    )
 
 
 def parse_verdict(last_message):
     """Extract the reviewer verdict: the last parseable JSON object in the
     message (fenced or bare) whose ``verdict`` is ``pass`` or ``findings``. No
     such object raises RuntimeError naming the cause; a recognized findings
-    verdict with a malformed / unlocated contract-breaking finding raises from
-    _verdict_from_obj — never guessed, never retried silently (DECISIONS
-    2026-07-11). The recognizer (last-object-wins) is deliberately separate from
+    verdict with a malformed finding object raises from _verdict_from_obj —
+    never guessed. An unlocated or unparseable-location contract-breaking
+    finding parses fine here; it surfaces as a validate_locations defect,
+    retried the same way as a coverage defect (Location parsing spec,
+    2026-08-21). The recognizer (last-object-wins) is deliberately separate from
     the strict build so only the authoritative verdict is parsed."""
     decoder = json.JSONDecoder()
     found = None  # last verdict-shaped raw dict in the stream
@@ -161,36 +198,127 @@ def diff_line_ranges(diff_text):
     return ranges
 
 
-def _parse_lines(lines):
-    """Parse a finding's ``lines`` field (``"12-20"`` or ``"12"``) into an
-    inclusive ``(lo, hi)`` pair, or None when absent/unparseable (an improvement
-    finding may carry no location — it defers regardless of provenance)."""
-    if not lines:
+def _parse_one_range(text):
+    """Parse a single range token (``"12-20"`` or ``"12"``, whitespace
+    tolerated) into an inclusive ``(lo, hi)`` pair, or None when it is not one
+    of those two forms (e.g. ``"abc"`` or ``"12--20"``)."""
+    text = text.strip()
+    if not text:
         return None
+    if "-" in text:
+        parts = text.split("-")
+        if len(parts) != 2:
+            return None
+        lo_text, hi_text = parts[0].strip(), parts[1].strip()
+        if not lo_text or not hi_text:
+            return None
+        try:
+            return int(lo_text), int(hi_text)
+        except ValueError:
+            return None
     try:
-        text = str(lines).strip()
-        if "-" in text:
-            lo, hi = text.split("-", 1)
-            return int(lo), int(hi)
         n = int(text)
         return n, n
-    except (ValueError, TypeError):
+    except ValueError:
         return None
 
 
-def verify_provenance(finding, ranges):
-    """Runner-verified provenance: ``in-diff`` when the finding's lines intersect
-    one of the changed ranges for its file, else ``pre-existing`` — overriding any
-    optimistic reviewer claim (a finding outside the diff is pre-existing no
-    matter how it was labeled; Disposition matrix)."""
-    span = _parse_lines(finding.lines)
-    if span is None:
+def _parse_lines(lines):
+    """Parse a finding's ``lines`` field into a **list** of inclusive
+    ``(lo, hi)`` pairs, or None when absent or genuinely unparseable. Accepts
+    a single number (``"12"``), a single range (``"12-20"``), or a
+    comma-separated combination of both (``"12-20,45,60-62"``), whitespace
+    tolerated around commas and dashes. A reviewer who names two ranges gets
+    the same treatment as one who names a single range spanning both — the
+    prior single-range-only parser silently returned None for a
+    comma-separated location, misclassifying it as having no evidence at all
+    (Location parsing spec, 2026-08-21). Any one malformed token invalidates
+    the whole field — a mix of one good range and one bad one is not silently
+    downgraded to just the good half; it is reported as unparseable via
+    validate_locations, never guessed at."""
+    if not lines:
+        return None
+    text = str(lines).strip()
+    if not text:
+        return None
+    ranges = []
+    for token in text.split(","):
+        span = _parse_one_range(token)
+        if span is None:
+            return None
+        ranges.append(span)
+    return ranges or None
+
+
+def _spans_intersect_ranges(spans, file_ranges):
+    """True when any of ``spans`` overlaps any of ``file_ranges`` (both lists
+    of inclusive ``(lo, hi)`` pairs) — the shared overlap test both provenance
+    tiers use."""
+    for lo, hi in spans:
+        for start, end in file_ranges:
+            if lo <= end and start <= hi:  # inclusive-range overlap
+                return True
+    return False
+
+
+def verify_provenance(finding, ranges, run_ranges=None):
+    """Runner-verified provenance: ``in-diff`` when **any** of the finding's
+    parsed line ranges intersects one of the changed ranges for its file in
+    ``ranges`` (this review's diff), overriding any optimistic reviewer claim
+    (a finding outside the diff is pre-existing no matter how it was labeled;
+    Disposition matrix). When ``run_ranges`` is also supplied (the run's
+    cumulative diff from run-start HEAD) and the finding is not in-diff, it is
+    ``in-run`` when it intersects ``run_ranges`` instead — code this run wrote
+    but outside this task's own diff (In-run provenance and the seed
+    disposition). Otherwise ``pre-existing``. ``run_ranges=None`` (the
+    default) makes this exactly the two-way function it was before Task 4 —
+    the back-compat proof. A finding with no location, or one whose location
+    is unparseable, also falls through to ``pre-existing`` here as a
+    defensive default — by the time a contract-breaking finding reaches this
+    function its location has already been validated (validate_locations,
+    retried via the reviewer verdict contract), so this fallback exists for
+    callers that invoke verify_provenance directly and for non-contract-
+    breaking findings."""
+    spans = _parse_lines(finding.lines)
+    if spans is None:
         return "pre-existing"
-    lo, hi = span
-    for start, end in ranges.get(finding.file, []):
-        if lo <= end and start <= hi:  # inclusive-range overlap
-            return "in-diff"
+    file_ranges = ranges.get(finding.file, [])
+    if _spans_intersect_ranges(spans, file_ranges):
+        return "in-diff"
+    if run_ranges is not None:
+        run_file_ranges = run_ranges.get(finding.file, [])
+        if _spans_intersect_ranges(spans, run_file_ranges):
+            return "in-run"
     return "pre-existing"
+
+
+def validate_locations(verdict):
+    """Validate a reviewer verdict's finding locations. Returns a list of
+    human-readable defect strings — empty means valid — in the same shape as
+    validate_coverage's, so both feed the same retry-once-then-contract-error
+    mechanism (Phase 13's ``_review_with_coverage``; Location parsing spec,
+    2026-08-21). A finding claiming ``impact: "contract-breaking"`` must carry
+    a parseable ``location.lines``: absent or unparseable is a defect. An
+    improvement finding may still carry no location — it defers regardless of
+    provenance, so it is never checked here."""
+    if verdict.kind != "findings":
+        return []
+    defects = []
+    for finding in verdict.findings:
+        if finding.impact != "contract-breaking":
+            continue
+        if finding.lines is None:
+            defects.append(
+                "contract-breaking finding {!r} has no location.lines".format(
+                    finding.id
+                )
+            )
+        elif _parse_lines(finding.lines) is None:
+            defects.append(
+                "contract-breaking finding {!r} has unparseable "
+                "location.lines: {!r}".format(finding.id, finding.lines)
+            )
+    return defects
 
 
 def derive_disposition(finding):
@@ -199,29 +327,152 @@ def derive_disposition(finding):
     acceptance criterion / spec section in ``contract_ref`` — a null contract_ref
     downgrades it to ``improvement`` (named-evidence rule, mirroring the
     tier-policy floor). Quadrants: in-diff×contract-breaking → ``fix`` (the only
-    auto-fix cell); pre-existing×contract-breaking → ``halt`` (a real scope
-    decision); every improvement → ``defer``."""
+    auto-fix cell); in-run×contract-breaking → ``seed`` (Task 4: a finding
+    against code this run wrote but outside this task's own diff — logged, the
+    run continues, and it is carried into the final review's discovery packet
+    rather than halting this task over another task's work);
+    pre-existing×contract-breaking → ``halt`` (a real scope decision); every
+    improvement → ``defer``."""
     contract_breaking = (
         finding.impact == "contract-breaking" and finding.contract_ref is not None
     )
     if not contract_breaking:
         return "defer"
-    return "fix" if finding.provenance == "in-diff" else "halt"
+    if finding.provenance == "in-diff":
+        return "fix"
+    if finding.provenance == "in-run":
+        return "seed"
+    return "halt"
 
 
-def classify_findings(verdict, diff_text):
+def classify_findings(verdict, diff_text, run_diff=None, carried_ids=None):
     """Set each finding's runner-verified provenance and derived disposition
     against ``diff_text`` (the review's actual diff), then return the verdict.
     A pass verdict is returned unchanged. The reviewer proposes classification;
     the runner decides — provenance is recomputed from the diff and disposition
-    is derived from the matrix, never trusted from the reviewer."""
+    is derived from the matrix, never trusted from the reviewer.
+
+    ``run_diff`` (the run's cumulative diff from run-start HEAD) is optional —
+    when supplied, provenance becomes three-way (in-diff/in-run/pre-existing,
+    verify_provenance); when absent (the default) provenance is exactly the
+    two-way classification this function had before Task 4, byte-identical.
+    In a final review the run base *is* the review base, so a caller never
+    needs to pass ``run_diff`` there — in-run is unreachable.
+
+    Before disposition, a finding carrying ``convergence == "resolved"`` is
+    dropped when its canonical id (``_canon``: ``carried_from`` or ``id``) is a
+    member of ``carried_ids`` — the prior attempt's outstanding fix-finding
+    set — so a listed resolved finding behaves identically to an omitted one
+    (Convergence label honored). The guard is load-bearing: a ``resolved``
+    label on an id the runner never tracked as outstanding is meaningless and
+    is ignored, dispositioning the finding normally — otherwise a reviewer
+    could dismiss any finding by self-labeling it resolved.
+    ``carried_ids=None`` (the default) never honors the label, reproducing
+    today's behavior exactly; ``convergence_decision`` is never touched here —
+    a dropped finding never reaches it, and a falsely-resolved finding that
+    reappears on a later attempt is still caught by the existing regression
+    rule against the runner's authoritative resolved-id set."""
     if verdict.kind != "findings":
         return verdict
     ranges = diff_line_ranges(diff_text)
+    run_ranges = diff_line_ranges(run_diff) if run_diff is not None else None
+    kept = []
     for finding in verdict.findings:
-        finding.provenance = verify_provenance(finding, ranges)
+        if (
+            carried_ids is not None
+            and finding.convergence == "resolved"
+            and _canon(finding) in carried_ids
+        ):
+            continue
+        finding.provenance = verify_provenance(finding, ranges, run_ranges)
         finding.disposition = derive_disposition(finding)
+        kept.append(finding)
+    verdict.findings = kept
     return verdict
+
+
+# --- coverage: the checklist-completeness validation -------------------------
+
+
+def _checklist_id(item):
+    """A checklist entry's id, accepting either a forge_checklist.ChecklistItem
+    (attribute access) or a plain dict (the CLI's --checklist JSON shape) —
+    mirrors forge_checklist.reduce_checklist's dual-access pattern."""
+    return item.id if hasattr(item, "id") else item["id"]
+
+
+def validate_coverage(verdict, checklist):
+    """Validate a reviewer verdict's coverage array against the supplied
+    checklist. Returns a list of human-readable defect strings — empty means
+    valid. This is validation, never parsing: a verdict with missing/invalid
+    coverage is still a well-formed Verdict object (parse_verdict already
+    tolerated absent coverage as an empty list); this function is what rejects
+    it. Coverage defects never touch ``action`` — the caller decides whether to
+    retry (Reviewer verdict contract).
+
+    Defects checked:
+    - missing ids: a checklist id with no coverage entry.
+    - unknown ids: a coverage entry whose id is not on the checklist.
+    - duplicate ids: a checklist id covered by more than one entry.
+    - empty evidence: any entry with blank/whitespace-only evidence.
+    - unbacked violated: a "violated" entry whose id is not named as the
+      contract_ref of at least one finding in this same verdict.
+    """
+    checklist_ids = [_checklist_id(it) for it in checklist]
+    checklist_id_set = set(checklist_ids)
+    coverage = verdict.coverage or []
+
+    seen = []
+    dup_ids = set()
+    for entry in coverage:
+        if entry.id in seen:
+            dup_ids.add(entry.id)
+        seen.append(entry.id)
+    coverage_id_set = set(seen)
+
+    defects = []
+
+    missing = [cid for cid in checklist_ids if cid not in coverage_id_set]
+    if missing:
+        defects.append(
+            "missing coverage for checklist id(s): " + ", ".join(missing)
+        )
+
+    unknown = sorted(
+        cid for cid in coverage_id_set if cid not in checklist_id_set
+    )
+    if unknown:
+        defects.append(
+            "coverage references unknown checklist id(s): " + ", ".join(unknown)
+        )
+
+    if dup_ids:
+        defects.append(
+            "duplicate coverage id(s): " + ", ".join(sorted(dup_ids))
+        )
+
+    empty_evidence = [
+        entry.id for entry in coverage if not (entry.evidence or "").strip()
+    ]
+    if empty_evidence:
+        defects.append(
+            "empty evidence for coverage id(s): " + ", ".join(empty_evidence)
+        )
+
+    backed_refs = {
+        f.contract_ref for f in (verdict.findings or []) if f.contract_ref
+    }
+    unbacked_violated = [
+        entry.id for entry in coverage
+        if entry.status == "violated" and entry.id not in backed_refs
+    ]
+    if unbacked_violated:
+        defects.append(
+            "'violated' coverage id(s) with no backing finding contract_ref: "
+            + ", ".join(unbacked_violated)
+        )
+
+    return defects
 
 
 # --- convergence: the pass/rework/halt decision + cross-attempt state -------
@@ -379,30 +630,28 @@ def execution_failure_finding(detail):
 
 
 def _run_git_diff(base):
-    """``git diff <base>`` in the caller's cwd — the CLI computes its own
-    authoritative diff (never trusts a caller-supplied diff), exactly as
-    classify_findings/verify_provenance require. Fails loud naming the cause on
-    a bad ref or a git invocation failure (DECISIONS 2026-07-11)."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", base], capture_output=True, text=True
-        )
-    except OSError as e:
-        raise RuntimeError("failed to invoke git: {}".format(e))
-    if result.returncode != 0:
-        raise RuntimeError(
-            "git diff {} failed: {}".format(base, result.stderr.strip())
-        )
-    return result.stdout
+    """The review diff against ``base`` in the caller's cwd — the CLI computes
+    its own authoritative diff (never trusts a caller-supplied diff), exactly as
+    classify_findings/verify_provenance require, via review-packet.py's
+    ``git_diff`` (tracked changes plus untracked new-file hunks — the same diff
+    the reviewer saw). Fails loud naming the cause on a bad ref or a git
+    invocation failure (DECISIONS 2026-07-11)."""
+    return rp.git_diff(os.getcwd(), base)
 
 
 def _findings_by_disposition(findings):
     """Group classified findings by disposition for decision.json, each
     serialized via forge_common.finding_to_dict — the same wire shape the
-    reviewer emits and the runner already persists to receipts/run.json."""
+    reviewer emits and the runner already persists to receipts/run.json.
+    ``seed``-dispositioned findings group under the key ``seeded`` (the
+    receipts/decision.json group name; Task 4) rather than the disposition
+    value itself. The base three keys are seeded eagerly so an all-empty
+    result (e.g. a clean pass verdict) is unchanged from before Task 4;
+    ``seeded`` only appears when a seed finding is actually present."""
     grouped = {"fix": [], "defer": [], "halt": []}
     for f in findings:
-        grouped.setdefault(f.disposition, []).append(finding_to_dict(f))
+        key = "seeded" if f.disposition == "seed" else f.disposition
+        grouped.setdefault(key, []).append(finding_to_dict(f))
     return grouped
 
 
@@ -445,6 +694,13 @@ def main(argv=None):
         help="reattempt guidance surfaced as the execution-failure finding's "
              "summary",
     )
+    parser.add_argument(
+        "--checklist", default=None,
+        help="path to the checklist JSON (forge_checklist.py --format json "
+             "output); when given, decision.json gains coverage_valid/"
+             "coverage_defects. Omitted: decision.json is unchanged from "
+             "today's output.",
+    )
     args = parser.parse_args(argv)
 
     if args.execution_failure and args.verdict:
@@ -475,6 +731,7 @@ def main(argv=None):
 
     acceptance_ok = args.acceptance_ok == "true"
 
+    verdict = None
     try:
         if args.execution_failure:
             findings = [execution_failure_finding(args.execution_detail)]
@@ -492,6 +749,19 @@ def main(argv=None):
                 return 1
             verdict = _verdict_from_obj(raw)
             if verdict.kind == "findings":
+                # The CLI has no retry loop of its own (that lives in
+                # forge-run.py's _review_with_coverage, for the harness that
+                # has one) — so here, unlike there, an invalid location is a
+                # loud contract error rather than a retried defect. Checked
+                # before classify_findings so an unlocated/unparseable
+                # contract-breaking claim never silently falls through to
+                # pre-existing (Location parsing spec, 2026-08-21).
+                location_defects = validate_locations(verdict)
+                if location_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid finding location(s): "
+                        + "; ".join(location_defects)
+                    )
                 diff_text = _run_git_diff(args.base)
                 verdict = classify_findings(verdict, diff_text)
             findings = verdict.findings
@@ -504,7 +774,24 @@ def main(argv=None):
     )
     advance_state(state, findings, acceptance_ok)
 
-    print(json.dumps(_build_decision(action, halt_reason, findings, state)))
+    decision = _build_decision(action, halt_reason, findings, state)
+    if args.checklist and verdict is not None:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                checklist = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        defects = validate_coverage(verdict, checklist)
+        decision["coverage_valid"] = not defects
+        decision["coverage_defects"] = defects
+
+    print(json.dumps(decision))
     return 0
 
 

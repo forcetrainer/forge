@@ -46,7 +46,7 @@ class WriteRunJsonProgressTests(unittest.TestCase):
             data = json.load(f)
         for k in (
             "current_task", "current_phase", "started_at", "updated_at", "pid",
-            "deferrals", "autofix_mode", "doc_sync",
+            "deferrals", "autofix_mode", "doc_sync", "seeded_findings",
         ):
             self.assertNotIn(k, data)
 
@@ -66,6 +66,23 @@ class WriteRunJsonProgressTests(unittest.TestCase):
         self.assertEqual(data["deferrals"], deferrals)
         self.assertEqual(data["autofix_mode"], "auto")
         self.assertEqual(data["doc_sync"], doc_sync)
+
+    def test_persists_seeded_findings_when_given(self):
+        # Task 4: seed-disposition findings (in-run x contract-breaking)
+        # persist in run.json under seeded_findings, so they survive a
+        # resume and can be surfaced in the end-of-plan summary.
+        d = self._dir()
+        seeded_findings = [
+            {"id": "f1", "summary": "cross-task defect", "provenance": "in-run",
+             "impact": "contract-breaking", "contract_ref": "AC2"},
+        ]
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "completed", [], "base",
+            seeded_findings=seeded_findings,
+        )
+        with open(os.path.join(d, "run.json")) as f:
+            data = json.load(f)
+        self.assertEqual(data["seeded_findings"], seeded_findings)
 
     def test_write_watch_launcher(self):
         d = self._dir()

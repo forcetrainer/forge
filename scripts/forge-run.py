@@ -56,9 +56,11 @@ REPO_ROOT = os.path.dirname(SCRIPTS_DIR)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+import forge_checklist
 import forge_common
 import forge_dispose
 import forge_git
+import forge_lint
 import forge_plan
 import forge_receipts
 import forge_status
@@ -83,6 +85,7 @@ from forge_common import (  # noqa: F401
     eb,
     finding_to_dict,
     rp,
+    run_json_teed,
     run_teed,
     verdict_to_dict,
 )
@@ -91,6 +94,7 @@ from forge_dispose import (  # noqa: F401
     _canon,
     _finding_from_obj,
     _is_execution_failure,
+    _parse_lines,
     _real_fix_canons,
     _verdict_from_obj,
     advance_state,
@@ -99,6 +103,7 @@ from forge_dispose import (  # noqa: F401
     derive_disposition,
     diff_line_ranges,
     parse_verdict,
+    validate_locations,
     verify_provenance,
 )
 from forge_git import (  # noqa: F401
@@ -119,6 +124,7 @@ from forge_receipts import (  # noqa: F401
     _read_base_commit,
     _read_latest_receipt,
     _read_run_tasks,
+    _read_seeded_findings,
     _read_started_at,
     annotate_ledger,
     ensure_forge_gitignore,
@@ -157,43 +163,128 @@ def contract_preamble(tier):
     return text.strip()
 
 
-def dispatch_worker(task, brief_path, codex_bin, run_dir, effort_override=None,
-                     timeout=DEFAULT_TIMEOUT):
+def _render_event_line(event):
+    """Map one ``codex exec --json`` event to a plain-text ``task-N-live.log``
+    line, or ``None`` for an event with no textual content to show. Only
+    ``item.completed`` events carry renderable text (the terminal state of one
+    output item — ``item.started``/``item.updated`` are progress deltas on the
+    same item, and rendering those too would duplicate the same text); every
+    other event type here (``thread.started``, ``turn.started``,
+    ``turn.completed``, ``turn.failed``, and any other control/bookkeeping
+    event) is control-only and renders nothing — that is how a JSONL event
+    stream becomes a live log with **zero raw JSON object lines** (the parity
+    bar this function exists to meet, not an improvement over the old
+    human-readable stream it replaces)."""
+    if not isinstance(event, dict):
+        return None
+    etype = event.get("type")
+    if etype == "item.completed":
+        item = event.get("item") or {}
+        item_type = item.get("item_type") or item.get("type")
+        if item_type == "command_execution":
+            lines = []
+            command = item.get("command")
+            if command:
+                lines.append("$ {}".format(command))
+            output = item.get("aggregated_output")
+            if output:
+                lines.append(output.rstrip("\n"))
+            return "\n".join(lines) if lines else None
+        # agent_message, reasoning, file_change, and any other item type this
+        # runner doesn't specifically special-case: fall back to its own `text`
+        # field when present (still zero raw JSON — a text field is a string).
+        text = item.get("text")
+        return text if text else None
+    if etype == "error":
+        message = event.get("message")
+        return "error: {}".format(message) if message else None
+    return None
+
+
+def dispatch_worker(task, brief_path, codex_bin, run_dir, threads=None,
+                     effort_override=None, timeout=DEFAULT_TIMEOUT,
+                     resume_thread=None):
     """One ``codex exec`` worker process, tier-pinned model/effort (``effort_
     override`` replaces only the effort, never the model, for a per-task
-    ``--effort N=LEVEL`` bump). Prompt = contract preamble + brief. Returns the
-    exit code, last message, and the exact argv emitted. A hung process is
-    killed at ``timeout`` seconds and reported as ``timed_out=True`` — the
-    caller treats that exactly like a failed iteration, never hangs the run."""
+    ``--effort N=LEVEL`` bump). Cold (``resume_thread=None``): prompt = contract
+    preamble + brief. Resumed (``resume_thread`` set to a prior ``codex exec``
+    thread id): prompt = ``brief_path``'s content verbatim, no preamble — the
+    resumed worker already holds the contract and the original brief from its
+    cold-spawn attempt (Session continuity spec), so the caller passes a
+    findings-only prompt file on a rework resume rather than the full brief.
+    Argv is ``codex exec resume --json --output-last-message <path> -m <model>
+    -c 'model_reasoning_effort="<effort>"' <thread_id> <prompt>`` on resume —
+    tier pinning and last-message capture preserved exactly as on a cold spawn.
+    Returns the exit code, last message, and the exact argv emitted. A hung
+    process is killed at ``timeout`` seconds and reported as ``timed_out=True``
+    — the caller treats that exactly like a failed iteration, never hangs the
+    run. Dispatched with ``--json`` (never ``--ephemeral``); the captured
+    ``thread_id`` (Codex mechanics spec) is written into ``threads`` under this
+    task's worker role and also carried on the returned ``WorkerResult``.
+    ``threads`` is optional — omitted (or None), a fresh dict is used and the
+    captured id is simply not persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
-    preamble = contract_preamble(task.tier)
     with open(brief_path, "r", encoding="utf-8") as f:
         brief = f.read()
-    prompt = preamble + "\n\n" + brief
     last_msg_path = os.path.join(run_dir, "task-{}-worker-last.txt".format(task.number))
-    argv = [
-        codex_bin,
-        "exec",
-        "-m",
-        model,
-        "-c",
-        "model_reasoning_effort={}".format(effort),
-        "--output-last-message",
-        last_msg_path,
-        prompt,
-    ]
+    if resume_thread:
+        prompt = brief
+        argv = [
+            codex_bin,
+            "exec",
+            "resume",
+            "--json",
+            "--output-last-message",
+            last_msg_path,
+            "-m",
+            model,
+            "-c",
+            'model_reasoning_effort="{}"'.format(effort),
+            resume_thread,
+        ]
+    else:
+        preamble = contract_preamble(task.tier)
+        prompt = preamble + "\n\n" + brief
+        argv = [
+            codex_bin,
+            "exec",
+            "--json",
+            "-m",
+            model,
+            "-c",
+            "model_reasoning_effort={}".format(effort),
+            "--output-last-message",
+            last_msg_path,
+        ]
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
-    header = "── worker · codex exec · {} · {} ──".format(model, effort)
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    events_path = os.path.join(run_dir, "task-{}-worker-events.jsonl".format(task.number))
+    header = "── worker · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
+    )
+    role = "task-{}-worker".format(task.number)
+    if result.thread_id:
+        threads[role] = result.thread_id
     if result.timed_out:
-        return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
+        return WorkerResult(
+            exit_code=None, last_message="", argv=argv, timed_out=True,
+            thread_id=result.thread_id, prompt=prompt,
+        )
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
             last_message = f.read()
-    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
+    return WorkerResult(
+        exit_code=result.exit_code, last_message=last_message, argv=argv,
+        thread_id=result.thread_id, prompt=prompt,
+    )
 
 
 def run_acceptance(task, cwd, live_path=None):
@@ -220,7 +311,8 @@ def run_acceptance(task, cwd, live_path=None):
 
 
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
-                           live_path, header, timeout=DEFAULT_TIMEOUT):
+                           live_path, events_path, header, role, threads,
+                           timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
     Verdict. Fail-loud on a crashed reviewer, a timed-out reviewer, or an
@@ -230,32 +322,62 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     and the reviewer's own exit code is checked (unlike a worker crash, a
     reviewer crash yields no verdict to judge, so it halts the run rather than
     consuming a rework iteration). A reviewer that hangs past ``timeout`` is
-    handled the same way — it also yields no verdict to judge."""
+    handled the same way — it also yields no verdict to judge. Dispatched with
+    ``--json`` (never ``--ephemeral``); the captured ``thread_id`` (Codex
+    mechanics spec) is written into ``threads`` under ``role``. ``resume_thread``
+    (Session continuity spec), when set, resumes that prior ``codex exec``
+    thread instead of spawning cold — argv becomes ``codex exec resume --json
+    --output-last-message <path> -m <model> -c 'model_reasoning_effort=
+    "<effort>"' <thread_id> <prompt>``, tier pinning and last-message capture
+    preserved exactly as on a cold spawn. The prompt (preamble + verdict
+    instruction + packet) is unchanged by resuming — only the dispatch
+    mechanics differ; scoping the packet itself down for a resumed verification
+    lap is a separate concern (Delta-scoped verification packets)."""
     with open(packet_path, "r", encoding="utf-8") as f:
         packet = f.read()
     prompt = preamble + "\n\n" + REVIEW_VERDICT_INSTRUCTION + "\n\n" + packet
-    argv = [
-        codex_bin,
-        "exec",
-        "-m",
-        model,
-        "-c",
-        "model_reasoning_effort={}".format(effort),
-        "--output-last-message",
-        last_msg_path,
-        prompt,
-    ]
+    if resume_thread:
+        argv = [
+            codex_bin,
+            "exec",
+            "resume",
+            "--json",
+            "--output-last-message",
+            last_msg_path,
+            "-m",
+            model,
+            "-c",
+            'model_reasoning_effort="{}"'.format(effort),
+            resume_thread,
+        ]
+    else:
+        argv = [
+            codex_bin,
+            "exec",
+            "--json",
+            "-m",
+            model,
+            "-c",
+            "model_reasoning_effort={}".format(effort),
+            "--output-last-message",
+            last_msg_path,
+        ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
+    )
+    if result.thread_id:
+        threads[role] = result.thread_id
     if result.timed_out:
         raise RuntimeError(
             "reviewer process ({} at effort {}) timed out after {}s without a "
             "usable verdict".format(model, effort, timeout)
         )
     if result.exit_code != 0:
-        # The stderr tail survives teeing (stderr is merged into the tee'd
-        # stream), so a crashed reviewer still names its cause.
+        # The raw-stream tail survives (a non-JSON line is still teed into it),
+        # so a crashed reviewer still names its cause.
         stderr_tail = (result.tail or "").strip()[:300]
         raise RuntimeError(
             "reviewer process ({} at effort {}) exited {} without a usable "
@@ -273,36 +395,161 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     return parse_verdict(last_message)
 
 
-def dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=DEFAULT_TIMEOUT):
+def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
+                       timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Per-task reviewer via ``codex exec`` — fresh context at the *same tier as
     the task it reviews* (routed by TIER_MAP[task.tier]; reviewer strength never
     escalates past the task's own tier). Preamble = the tier agent's review
-    paragraph. Returns the parsed Verdict."""
+    paragraph. Returns the parsed Verdict. ``threads`` is optional — omitted
+    (or None), a fresh dict is used and the captured thread id is not
+    persisted anywhere the caller can see. ``resume_thread`` (Session
+    continuity spec), when set, resumes that prior thread instead of spawning
+    cold — the caller is responsible for the discovery-cold /
+    verification-resumed rule; this function only carries out whichever mode
+    it is asked for."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[task.tier]
     preamble = contract_preamble(task.tier)
     last_msg_path = os.path.join(run_dir, "task-{}-review-last.txt".format(task.number))
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
-    header = "── review · codex exec · {} · {} ──".format(model, effort)
+    events_path = os.path.join(run_dir, "task-{}-reviewer-events.jsonl".format(task.number))
+    header = "── review · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
-        live_path, header, timeout=timeout,
+        live_path, events_path, header, "task-{}-reviewer".format(task.number),
+        threads, timeout=timeout, resume_thread=resume_thread,
     )
 
 
-def dispatch_final_review(packet_path, codex_bin, run_dir, tier, timeout=DEFAULT_TIMEOUT):
+def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
+                          timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Whole-plan final review: one ``codex exec`` call at ``tier`` (TIER_MAP[tier]
     — the plan's highest task tier, not a pinned ceiling) with that tier's
     contract preamble against the whole-plan diff + spec. Returns the parsed
-    Verdict; the header records the resolved model+effort."""
+    Verdict; the header records the resolved model+effort. ``threads`` is
+    optional — omitted (or None), a fresh dict is used and the captured
+    thread id is not persisted anywhere the caller can see. ``resume_thread``
+    accepted for interface parity with ``dispatch_reviewer`` (Session
+    continuity spec); wiring it into ``run_final_review_loop`` is a later
+    task's concern — this runner still dispatches this call cold unless a
+    caller explicitly passes one."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
     last_msg_path = os.path.join(run_dir, "final-review-last.txt")
     live_path = os.path.join(run_dir, "final-review-live.log")
-    header = "── final review · codex exec · {} · {} ──".format(model, effort)
+    events_path = os.path.join(run_dir, "final-reviewer-events.jsonl")
+    header = "── final review · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
-        live_path, header, timeout=timeout,
+        live_path, events_path, header, "final-reviewer", threads, timeout=timeout,
+        resume_thread=resume_thread,
     )
+
+
+# --- contract checklist + coverage retry ------------------------------------
+
+
+def _checklist_or_skip(builder, *args):
+    """Call a forge_checklist builder (build_task_checklist / build_final_
+    checklist). An empty checklist is a *runner-level* skip, not an error: a
+    task with no ``**Spec:**``, no plan ``**Global Constraints:**``, and only
+    command-only ``**Acceptance:**`` clauses is a legal plan (both fields are
+    optional) with no contract material for a reviewer to cover — forcing an
+    error there would make legal plans unexecutable (Contract checklist spec,
+    2026-08-21 amendment). forge_checklist.py's own CLI/library contract is
+    unchanged: it still raises on an empty checklist; this only catches that
+    specific raise at the runner boundary. Any other RuntimeError (an
+    unresolvable ``**Spec:**`` name, a task declaring ``**Spec:**`` with no
+    ``--spec`` given) is a genuine contract error and still propagates
+    fail-loud. Returns ``(checklist_or_None, skipped)``."""
+    try:
+        return builder(*args), False
+    except RuntimeError as e:
+        if "is empty" in str(e):
+            return None, True
+        raise
+
+
+def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
+    """Build the coverage-retry packet: the original packet plus a defects
+    note naming exactly what's missing/unbacked, so the re-dispatched
+    reviewer fixes only its coverage array. Written to a distinct path so the
+    original packet (and its receipt) are untouched."""
+    with open(packet_path, "r", encoding="utf-8") as f:
+        packet = f.read()
+    lines = [
+        "",
+        "",
+        "## Coverage retry — your prior verdict's coverage array was invalid",
+        "",
+        "Fix these defects and resubmit your full verdict (unchanged apart "
+        "from the corrected coverage array, unless a defect requires a real "
+        "correction):",
+        "",
+    ]
+    lines.extend("- {}".format(d) for d in defects)
+    packet = packet.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    path = os.path.join(run_dir, "{}-coverage-retry.md".format(label))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(packet)
+    return path
+
+
+def _verdict_defects(verdict, checklist, review_kind="discovery"):
+    """Every verdict validation defect for one dispatched verdict: coverage
+    defects against ``checklist`` (skipped when ``checklist`` is falsy — the
+    empty-checklist skip case, Contract checklist spec — OR when
+    ``review_kind`` is "verification": coverage is required on discovery
+    verdicts only, omitted on verification verdicts, and a verification
+    verdict that carries coverage anyway is not penalized for it — Coverage
+    on discovery only spec) plus location defects (``validate_locations`` —
+    always checked on BOTH kinds, checklist or not; a contract-breaking
+    finding with an absent or unparseable location is a defect regardless of
+    whether this task has a checklist or which review kind this is). Both
+    defect kinds are plain human-readable strings in the same shape, so they
+    share one retry-once-then-contract-error mechanism (Location parsing
+    spec, 2026-08-21 — reuses Phase 13's coverage retry rather than adding a
+    second one)."""
+    defects = (
+        list(forge_dispose.validate_coverage(verdict, checklist))
+        if checklist and review_kind == "discovery" else []
+    )
+    defects += forge_dispose.validate_locations(verdict)
+    return defects
+
+
+def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
+                           review_kind="discovery"):
+    """Dispatch a review and validate its verdict against ``checklist``
+    (coverage, discovery only) and its findings' locations (both kinds) via
+    ``_verdict_defects``. Validate the first verdict; on any defects,
+    re-dispatch **exactly once** with the defects named in the retry
+    packet's prompt; a second invalid verdict is a contract error (raised,
+    uncaught — same class as an unparseable verdict, never a halt). This is
+    not a rework attempt: the caller must not advance the convergence
+    attempt counter or touch ConvergenceState for the retry. Returns
+    ``(verdict, retried)``."""
+    verdict = dispatch_call(packet_path)
+    defects = _verdict_defects(verdict, checklist, review_kind)
+    if not defects:
+        return verdict, False
+    retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
+    verdict = dispatch_call(retry_path)
+    defects = _verdict_defects(verdict, checklist, review_kind)
+    if defects:
+        raise RuntimeError(
+            "reviewer verdict still invalid after one retry: {}".format(
+                "; ".join(defects)
+            )
+        )
+    return verdict, True
 
 
 # --- per-task execution & plan loop -----------------------------------------
@@ -326,6 +573,24 @@ def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings):
     return brief_path, sha
 
 
+def _resume_findings_prompt(findings, run_dir, task, attempt):
+    """Rework-resume prompt: the outstanding findings **only** — no brief
+    re-paste, no spec (Session continuity spec). The resumed worker already
+    holds the full brief and contract preamble from its cold-spawn attempt; a
+    fixer with memory fixes the cause instead of patching the symptom, and
+    re-pasting the brief here would defeat that. Overwritten fresh each
+    resumed attempt, like ``_brief_for``'s brief."""
+    lines = ["## Rework — address these findings before resubmitting", ""]
+    lines.extend("- {}".format(f) for f in findings)
+    prompt = "\n".join(lines) + "\n"
+    path = os.path.join(
+        run_dir, "task-{}-attempt-{}-resume-prompt.md".format(task.number, attempt)
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    return path
+
+
 def _execution_failure_finding(detail):
     """An execution failure (worker crash/timeout, acceptance non-zero) as an
     implicit fix-retry finding: disposition ``fix`` so the attempt cannot converge
@@ -339,8 +604,9 @@ def _execution_failure_finding(detail):
     )
 
 
-def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
-                  effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
+def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
+                  effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto",
+                  run_base=None, seeded_findings=None):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
     per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
@@ -352,7 +618,23 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     regression (green->red) and the backstop. ``autofix_mode`` ``gate``
     short-circuits any reviewer finding to a halt. ``effort_override`` (from a
     per-task ``--effort N=LEVEL`` CLI flag) replaces only this task's worker
-    effort, never the reviewer's."""
+    effort, never the reviewer's. ``threads`` is the run-wide per-role
+    ``codex exec`` session-id map (Codex mechanics spec); this task's worker
+    and reviewer dispatches write their captured thread ids into it in
+    place. ``run_base`` (the run-start HEAD, optional) lets each review's
+    classify_findings call compute the run's cumulative diff
+    (``git diff <run_base>``) alongside this review's own diff, so provenance
+    is three-way (in-diff/in-run/pre-existing; In-run provenance and the seed
+    disposition spec) — omitted (None), provenance stays exactly the two-way
+    classification from before that spec. ``carried_ids=state.carried_ids`` is
+    passed on every classify_findings call (the prior attempt's outstanding
+    fix-finding set, read before this attempt's ``advance_state`` runs) so a
+    reviewer-labeled ``convergence: "resolved"`` finding against a tracked id
+    is honored (Convergence label honored spec) instead of being silently
+    re-dispositioned. ``seeded_findings`` (optional; a list the caller
+    accumulates across every task in the run) receives one
+    ``finding_to_dict`` entry per ``seed``-dispositioned finding this task's
+    review produces — logged, never reworked, never halted on."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -365,6 +647,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     findings_carry = []     # outstanding fix-finding summaries -> next brief
     prior_findings = []     # outstanding fix findings (dicts) -> next re-review packet
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
+    worker_role = "task-{}-worker".format(task.number)
+    reviewer_role = "task-{}-reviewer".format(task.number)
+    review_attempts = 0     # count of REVIEWS actually dispatched (may lag `attempt`
+                             # when an execution failure preempted a review) — this,
+                             # not `attempt`, decides discovery (0) vs verification (>0)
 
     attempt = 0
     while True:
@@ -373,10 +660,44 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
             task, plan_path, spec_path, run_dir, attempt, findings_carry
         )
         update_run_progress(run_dir, task.number, "worker")
-        worker = dispatch_worker(
-            task, brief_path, codex_bin, run_dir,
-            effort_override=effort_override, timeout=timeout,
-        )
+        # Rework laps (attempt > 1) resume the worker with the outstanding
+        # findings alone (Session continuity spec) — a fixer with memory fixes
+        # the cause instead of patching the symptom. A missing thread id (the
+        # cold spawn never captured one) or a resume that fails outright
+        # (non-zero exit, missing session, context overflow) falls back to
+        # exactly one cold spawn with the full brief; the fallback is recorded
+        # on this attempt's receipt, never fatal (Continuity scope and failure).
+        worker_resume_thread = threads.get(worker_role) if attempt > 1 else None
+        worker_resume_fallback = attempt > 1 and worker_resume_thread is None
+        # Pre-repair snapshot (Delta-scoped verification packets spec): every
+        # rework lap dispatches a repair (resumed worker, or its cold
+        # fallback below) — snapshot the tree just before that dispatch so a
+        # later verification packet's delta is `git diff <repair_snapshot>`,
+        # scoped to this repair alone rather than the task's whole
+        # accumulated diff. Never taken on attempt 1 (nothing has repaired
+        # anything yet); never mutates the working tree.
+        repair_snapshot = forge_git.snapshot_tree(cwd) if attempt > 1 else None
+        if worker_resume_thread:
+            resume_prompt_path = _resume_findings_prompt(
+                findings_carry, run_dir, task, attempt
+            )
+            worker = dispatch_worker(
+                task, resume_prompt_path, codex_bin, run_dir, threads,
+                effort_override=effort_override, timeout=timeout,
+                resume_thread=worker_resume_thread,
+            )
+            if worker.timed_out or worker.exit_code != 0:
+                worker_resume_fallback = True
+                threads.pop(worker_role, None)  # stale session; don't retry it later
+                worker = dispatch_worker(
+                    task, brief_path, codex_bin, run_dir, threads,
+                    effort_override=effort_override, timeout=timeout,
+                )
+        else:
+            worker = dispatch_worker(
+                task, brief_path, codex_bin, run_dir, threads,
+                effort_override=effort_override, timeout=timeout,
+            )
         update_run_progress(run_dir, task.number, "acceptance")
         acceptance = run_acceptance(task, cwd, live_path)
 
@@ -386,6 +707,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         review_verdict = None
         findings = []       # classified Finding objects for this attempt
         cause = None        # short human-readable cause for an execution failure
+        coverage_skipped = None  # None: no review this attempt (unchanged)
+        coverage_retry = False
+        reviewer_resume_fallback = False
 
         if worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
@@ -414,14 +738,103 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
                     "repository".format(task.number)
                 )
             update_run_progress(run_dir, task.number, "review")
-            packet_path = _packet_for(
-                task, plan_path, run_dir, review_base, cwd,
-                prior_findings=prior_findings or None,
+            checklist, coverage_skipped = _checklist_or_skip(
+                forge_checklist.build_task_checklist, plan_path, spec_path,
+                task.number,
             )
-            verdict = dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=timeout)
-            classify_findings(verdict, _git_diff(cwd, review_base))
+            # Discovery (this task's first review) is always cold — an
+            # independent first read is the entire justification for a
+            # separate reviewer (DECISIONS 2026-07-16, 2026-07-17); resuming it
+            # would hand the review to an agent that already holds the
+            # worker's reasoning. Verification (every review after) resumes
+            # the reviewer thread, with the same missing-id/failed-resume
+            # cold fallback as the worker (Session continuity /
+            # Continuity scope and failure specs). Once a fallback happens
+            # within this attempt, the coverage-retry call (if any) also
+            # stays cold rather than re-attempting a session already known bad.
+            is_verification = review_attempts > 0
+            # The packet actually built (not just is_verification) decides
+            # which verdict contract applies: a stateful edge case
+            # (review_attempts > 0 but no repair_snapshot) still falls
+            # through to the discovery-shaped packet below, so coverage
+            # validation must track the packet, not the flag.
+            packet_review_kind = (
+                "verification" if is_verification and repair_snapshot is not None
+                else "discovery"
+            )
+            if is_verification and repair_snapshot is not None:
+                # Delta-scoped verification packet (Delta-scoped verification
+                # packets spec): the resumed reviewer already holds the task
+                # block, the full spec, and the whole-plan diff in session —
+                # re-sending them is exactly the waste this phase removes.
+                # Packet = outstanding findings + this repair's own delta
+                # (`git diff <repair_snapshot>`) + the reduced checklist
+                # (only items an outstanding finding's contract_ref names).
+                # `checklist` is reassigned to that same reduced list so the
+                # coverage validation below judges the verdict against
+                # exactly what the reviewer was shown — validating against
+                # the full checklist here would demand coverage of items the
+                # packet never mentioned, forcing a spurious retry-then-error
+                # on every verification lap of any multi-item checklist
+                # (fixed 2026-08-21; the spec's own words: "Verification laps
+                # carry the reduced checklist ... not the full one").
+                delta_diff = _git_diff(cwd, repair_snapshot)
+                checklist = (
+                    forge_checklist.reduce_checklist(checklist, prior_findings)
+                    if checklist else checklist
+                )
+                packet_text = rp.build_verification_packet(
+                    prior_findings, delta_diff, checklist
+                )
+                packet_path = os.path.join(
+                    run_dir, "task-{}-review.md".format(task.number)
+                )
+                with open(packet_path, "w", encoding="utf-8") as f:
+                    f.write(packet_text)
+            else:
+                packet_path = _packet_for(
+                    task, plan_path, run_dir, review_base, cwd,
+                    prior_findings=prior_findings or None, checklist=checklist,
+                )
+            review_resume_state = {
+                "thread": threads.get(reviewer_role) if is_verification else None,
+            }
+            reviewer_resume_fallback = is_verification and review_resume_state["thread"] is None
+
+            def _reviewer_dispatch_call(p):
+                nonlocal reviewer_resume_fallback
+                resume_thread = review_resume_state["thread"]
+                if resume_thread:
+                    try:
+                        return dispatch_reviewer(
+                            task, p, codex_bin, run_dir, threads, timeout=timeout,
+                            resume_thread=resume_thread,
+                        )
+                    except RuntimeError:
+                        reviewer_resume_fallback = True
+                        threads.pop(reviewer_role, None)
+                        review_resume_state["thread"] = None
+                return dispatch_reviewer(
+                    task, p, codex_bin, run_dir, threads, timeout=timeout,
+                )
+
+            verdict, coverage_retry = _review_with_coverage(
+                _reviewer_dispatch_call,
+                packet_path, checklist, run_dir, "task-{}".format(task.number),
+                review_kind=packet_review_kind,
+            )
+            review_attempts += 1
+            run_diff_text = _git_diff(cwd, run_base) if run_base else None
+            classify_findings(
+                verdict, _git_diff(cwd, review_base), run_diff=run_diff_text,
+                carried_ids=state.carried_ids,
+            )
             review_verdict = verdict_to_dict(verdict)
             findings = verdict.findings
+            if seeded_findings is not None:
+                seeded_findings.extend(
+                    finding_to_dict(f) for f in findings if f.disposition == "seed"
+                )
 
         action, halt_reason = convergence_decision(
             findings, state, acc_ok, attempt, autofix_mode
@@ -451,6 +864,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
             "halt_reason": halt_reason,
             "outstanding_findings": outstanding,
             "repair_task": repair_task,
+            "coverage_skipped": coverage_skipped,
+            "coverage_retry": coverage_retry,
+            "resume_fallback": worker_resume_fallback or reviewer_resume_fallback,
         }
         write_receipt(run_dir, task, attempt, receipt)
 
@@ -481,34 +897,48 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
 # --- final review: whole-plan review through the same convergence loop -----
 
 
-def _final_review_fix_brief(spec_path, diff, findings, run_dir, attempt):
-    """Write the final-review fix-dispatch prompt: spec + whole-plan diff (for
-    context) + the outstanding ``fix`` findings to resolve. Never a full task
-    brief — there is no task to reissue, only what the reviewer flagged as
-    in-diff and contract-breaking. Overwritten fresh each attempt, like the
-    per-task rework brief."""
-    with open(spec_path, "r", encoding="utf-8") as f:
-        spec_text = f.read()
+def _final_review_fix_brief(findings, run_dir, attempt, checklist=None):
+    """Write the cold-spawn final-review fix-dispatch prompt: the outstanding
+    ``fix`` findings + the files they're located at + the spec sections their
+    ``contract_ref`` names (Session continuity spec: "brief carries findings
+    + affected paths only"). The full spec and the whole-plan diff are never
+    pasted — the fixer reads the repo itself, the same principle as the
+    per-task rework-resume prompt (``_resume_findings_prompt``).
+    ``checklist`` (the final contract checklist, or None — the empty-
+    checklist skip case, or a caller with no plan) is narrowed via
+    ``forge_checklist.reduce_checklist`` against ``findings``' contract_ref
+    values; only its ``source == "spec"`` items are rendered (already
+    whitespace-collapsed prose text, straight from ``forge_checklist.
+    _spec_items`` — never fenced code, so no fence-safety is needed here,
+    unlike the whole-plan diff this replaces). Overwritten fresh each
+    attempt, like the per-task rework brief."""
     lines = ["## Final-review fix — resolve these findings", ""]
     for finding in findings:
         loc = " ({}:{})".format(finding.file, finding.lines) if finding.file else ""
         lines.append("- {}{}".format(finding.summary, loc))
-    diff_body = diff if diff.strip() else "(no changes)\n"
-    if not diff_body.endswith("\n"):
-        diff_body += "\n"
-    # Fence must outrun any backtick run in the diff so a diffed line like
-    # " ```" (context-prefixed fence, ≤3-space indent) can't close it early
-    # — same problem, same fix as review-packet.py's build_packet.
-    longest_run = max(
-        (len(m.group(0)) for m in re.finditer(r"`+", diff_body)), default=0
-    )
-    fence = "`" * max(3, longest_run + 1)
-    diff_section = fence + "diff\n" + diff_body + fence + "\n"
-    brief = (
-        spec_text.rstrip("\n") + "\n\n"
-        + "\n".join(lines) + "\n\n"
-        + "## Whole-plan diff\n\n" + diff_section
-    )
+
+    files = sorted({finding.file for finding in findings if finding.file})
+    if files:
+        lines.append("")
+        lines.append("## Affected files")
+        lines.append("")
+        lines.extend("- {}".format(f) for f in files)
+
+    if checklist:
+        spec_items = [
+            it for it in forge_checklist.reduce_checklist(checklist, findings)
+            if it.source == "spec"
+        ]
+        if spec_items:
+            lines.append("")
+            lines.append("## Referenced spec sections")
+            for it in spec_items:
+                lines.append("")
+                lines.append("### {}".format(it.id))
+                lines.append("")
+                lines.append(it.text)
+
+    brief = "\n".join(lines).rstrip("\n") + "\n"
     brief_path = os.path.join(
         run_dir, "final-review-fix-attempt-{}-brief.md".format(attempt)
     )
@@ -517,42 +947,107 @@ def _final_review_fix_brief(spec_path, diff, findings, run_dir, attempt):
     return brief_path
 
 
-def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt,
-                              timeout=DEFAULT_TIMEOUT):
+def _final_review_fix_resume_prompt(findings, run_dir, attempt):
+    """Final-review fix resume prompt: the new outstanding findings **only**
+    (Session continuity spec: "subsequent repairs resume it with the new
+    findings only") — no affected-files/spec-sections re-paste, mirroring
+    ``_resume_findings_prompt``'s per-task rework-resume prompt. The resumed
+    fixer already holds the brief, spec sections, and affected paths from its
+    cold-spawn attempt. Overwritten fresh each resumed attempt."""
+    lines = ["## Final-review fix — resolve these findings", ""]
+    for finding in findings:
+        loc = " ({}:{})".format(finding.file, finding.lines) if finding.file else ""
+        lines.append("- {}{}".format(finding.summary, loc))
+    prompt = "\n".join(lines) + "\n"
+    path = os.path.join(
+        run_dir, "final-review-fix-attempt-{}-resume-prompt.md".format(attempt)
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    return path
+
+
+def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt, threads=None,
+                              timeout=DEFAULT_TIMEOUT, resume_thread=None):
     """Final-review fix dispatch: one ``codex exec`` call scoped to the
-    outstanding ``fix`` findings against the whole-plan diff — the final-review
-    "worker" (Final review spec), never a full task brief re-dispatch. Same call
-    shape as dispatch_worker (contract preamble + prompt, --output-last-message,
-    timeout-bounded); tier = the plan's highest task tier."""
+    outstanding ``fix`` findings — the final-review "worker" (Final review
+    spec), never a full task brief re-dispatch. Same call shape as
+    ``dispatch_worker`` (contract preamble + prompt, --output-last-message,
+    timeout-bounded); tier = the plan's highest task tier. Cold
+    (``resume_thread=None``): prompt = contract preamble + ``brief_path``'s
+    content. Resumed (``resume_thread`` set to the persisted ``final-fixer``
+    thread): prompt = ``brief_path``'s content verbatim, no preamble — the
+    resumed fixer already holds the contract from its cold-spawn attempt
+    (Session continuity spec: "cold once, then resume"). Argv on resume is
+    ``codex exec resume --json --output-last-message <path> -m <model> -c
+    'model_reasoning_effort="<effort>"' <thread_id> <prompt>`` — tier pinning
+    and last-message capture preserved exactly as on a cold spawn. Dispatched
+    with ``--json`` (never ``--ephemeral``); the captured ``thread_id`` is
+    written into ``threads`` under the ``final-fixer`` role either way, so a
+    later attempt keeps resuming the same thread. ``threads`` is optional —
+    omitted (or None), a fresh dict is used and the captured id is not
+    persisted anywhere the caller can see."""
+    if threads is None:
+        threads = {}
     model, effort = TIER_MAP[tier]
-    preamble = contract_preamble(tier)
     with open(brief_path, "r", encoding="utf-8") as f:
         brief = f.read()
-    prompt = preamble + "\n\n" + brief
     last_msg_path = os.path.join(
         run_dir, "final-review-fix-attempt-{}-last.txt".format(attempt)
     )
-    argv = [
-        codex_bin,
-        "exec",
-        "-m",
-        model,
-        "-c",
-        "model_reasoning_effort={}".format(effort),
-        "--output-last-message",
-        last_msg_path,
-        prompt,
-    ]
+    if resume_thread:
+        argv = [
+            codex_bin,
+            "exec",
+            "resume",
+            "--json",
+            "--output-last-message",
+            last_msg_path,
+            "-m",
+            model,
+            "-c",
+            'model_reasoning_effort="{}"'.format(effort),
+            resume_thread,
+        ]
+        prompt = brief
+    else:
+        preamble = contract_preamble(tier)
+        prompt = preamble + "\n\n" + brief
+        argv = [
+            codex_bin,
+            "exec",
+            "--json",
+            "-m",
+            model,
+            "-c",
+            "model_reasoning_effort={}".format(effort),
+            "--output-last-message",
+            last_msg_path,
+        ]
     live_path = os.path.join(run_dir, "final-review-live.log")
-    header = "── final-review fix · codex exec · {} · {} ──".format(model, effort)
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    events_path = os.path.join(run_dir, "final-fixer-events.jsonl")
+    header = "── final-review fix · codex exec{} · {} · {} ──".format(
+        " resume" if resume_thread else "", model, effort
+    )
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
+    )
+    if result.thread_id:
+        threads["final-fixer"] = result.thread_id
     if result.timed_out:
-        return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
+        return WorkerResult(
+            exit_code=None, last_message="", argv=argv, timed_out=True,
+            thread_id=result.thread_id, prompt=prompt,
+        )
     last_message = ""
     if os.path.exists(last_msg_path):
         with open(last_msg_path, "r", encoding="utf-8") as f:
             last_message = f.read()
-    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
+    return WorkerResult(
+        exit_code=result.exit_code, last_message=last_message, argv=argv,
+        thread_id=result.thread_id, prompt=prompt,
+    )
 
 
 def _git_commit_final_review_fixes(cwd):
@@ -592,37 +1087,127 @@ def _git_commit_final_review_fixes(cwd):
 
 
 def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
-                          autofix_mode, timeout=DEFAULT_TIMEOUT):
+                          autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
+                          plan_path=None, seeded_findings=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
     edits are left uncommitted, so each re-review's diff simply accumulates them;
     a single ``fix: final-review`` commit lands once the loop converges to pass,
-    only if a fix was ever applied (Commit discipline). Attempt 1 is review-only
-    (nothing to fix yet); from attempt 2 on, the "worker" is a
+    only if a fix was ever applied (Commit discipline). ``threads`` is the
+    run-wide per-role session-id map; the final reviewer and fix dispatches
+    write their captured thread ids into it in place. Optional — omitted (or
+    None), a fresh dict is used and no caller can see the captured ids. Attempt
+    1 is review-only (nothing to fix yet); from attempt 2 on, the "worker" is a
     dispatch_final_review_fix call scoped to the outstanding ``fix`` findings — a
     fix-dispatch crash/timeout preempts the re-review as an implicit
     execution-failure finding, exactly like ``execute_task``. Halt carries the
-    drafted ``repair_task``."""
+    drafted ``repair_task``. ``plan_path`` (optional; omitted -> no checklist
+    generated, coverage validation skipped) is required to build the final
+    contract checklist (the union of every task's Spec/acceptance clauses +
+    integration items) — built once up front (the plan/spec don't change
+    mid-run) and reused by every attempt's fixer brief and reviewer packet —
+    a caller with no plan handy (e.g. a unit test exercising the loop in
+    isolation) still gets the loop's pre-Task-4 behavior unchanged.
+
+    Session continuity (Session continuity / Delta-scoped verification
+    packets specs): the final reviewer is cold at discovery (attempt 1) and
+    resumed for every verification lap (a later attempt whose review follows
+    a repair), against that repair's own delta — ``git diff <pre-repair
+    snapshot>`` — plus the reduced checklist, never the whole-plan diff or
+    full spec again. The final-review fixer is a cold spawn on its first
+    repair and resumed on every later repair, with a findings-only resume
+    prompt. Either resume failing (missing thread, non-zero exit, timeout)
+    falls back to exactly one cold spawn with the full packet/brief and is
+    recorded as ``resume_fallback`` on the final-review receipt — degraded,
+    never fatal. ``seeded_findings`` (optional; the run-wide accumulator
+    ``execute_task`` appended ``seed``-disposition findings into) pre-seeds
+    the discovery packet's prior-findings section — the final reviewer sees
+    every task's seeded findings as pre-seeded prior findings and labels each
+    current finding resolved/carried/new against them (In-run provenance and
+    the seed disposition spec). Only the discovery packet (attempt 1) is
+    seeded this way; every later verification packet carries only that lap's
+    own outstanding fix findings, exactly as before this parameter existed —
+    the seed values are naturally dropped from ``prior_findings`` once the
+    loop's own bottom-of-loop reassignment runs after attempt 1. In the final
+    review ``run_base`` **is** the diff base, so a caller never needs a
+    separate ``run_diff`` — ``in-run`` is unreachable here by construction
+    (In-run provenance and the seed disposition spec)."""
+    if threads is None:
+        threads = {}
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
-    prior_findings = []  # outstanding reviewer fix findings (dicts) -> next packet
+    # Discovery-only seed: pre-populate with every seed found across the run so
+    # far, so the first (and only the first) packet presents them as prior
+    # findings; every later round overwrites this with that round's own
+    # outstanding fix findings (see the bottom of the loop below).
+    prior_findings = list(seeded_findings) if seeded_findings else []
     applied_fix = False
+    coverage_retry = False
+    review_attempts = 0     # count of REVIEWS actually dispatched (may lag `attempt`
+                             # when a fix-dispatch crash preempted one) — decides
+                             # discovery (0) vs verification (>0), like execute_task
+    reviewer_role = "final-reviewer"
+    fixer_role = "final-fixer"
+
+    checklist = None
+    coverage_skipped = None
+    if plan_path is not None:
+        checklist, coverage_skipped = _checklist_or_skip(
+            forge_checklist.build_final_checklist, plan_path, spec_path,
+        )
+
     attempt = 0
     while True:
         attempt += 1
         exec_ok = True
         findings = []
+        # Pre-repair snapshot (Delta-scoped verification packets spec): taken
+        # just before this attempt's fix dispatch so a later verification
+        # packet's delta is `git diff <repair_snapshot>`, scoped to this
+        # repair alone rather than the whole run's accumulated diff. Never
+        # set outside a fix-dispatch attempt.
+        repair_snapshot = None
+        fixer_resume_fallback = False
+        reviewer_resume_fallback = False
 
         if fix_findings:
             update_run_progress(run_dir, None, "final-review-fix")
-            diff = _git_diff(cwd, run_base)
-            brief_path = _final_review_fix_brief(
-                spec_path, diff, fix_findings, run_dir, attempt
-            )
-            worker = dispatch_final_review_fix(
-                brief_path, codex_bin, run_dir, tier, attempt, timeout=timeout
-            )
+            repair_snapshot = forge_git.snapshot_tree(cwd)
+            # The first repair is deliberately cold (Session continuity spec:
+            # "cold once, then resume") — `applied_fix` is only True once a
+            # prior repair has actually been dispatched, so a missing thread
+            # on the FIRST repair is the intended cold start, not a fallback;
+            # a missing thread on any later repair (one was expected to
+            # exist) is a genuine fallback.
+            fixer_resume_thread = threads.get(fixer_role)
+            fixer_resume_fallback = applied_fix and fixer_resume_thread is None
+            if fixer_resume_thread:
+                resume_prompt_path = _final_review_fix_resume_prompt(
+                    fix_findings, run_dir, attempt
+                )
+                worker = dispatch_final_review_fix(
+                    resume_prompt_path, codex_bin, run_dir, tier, attempt, threads,
+                    timeout=timeout, resume_thread=fixer_resume_thread,
+                )
+                if worker.timed_out or worker.exit_code != 0:
+                    fixer_resume_fallback = True
+                    threads.pop(fixer_role, None)  # stale session; don't retry it later
+                    brief_path = _final_review_fix_brief(
+                        fix_findings, run_dir, attempt, checklist
+                    )
+                    worker = dispatch_final_review_fix(
+                        brief_path, codex_bin, run_dir, tier, attempt, threads,
+                        timeout=timeout,
+                    )
+            else:
+                brief_path = _final_review_fix_brief(
+                    fix_findings, run_dir, attempt, checklist
+                )
+                worker = dispatch_final_review_fix(
+                    brief_path, codex_bin, run_dir, tier, attempt, threads,
+                    timeout=timeout,
+                )
             applied_fix = True
             if worker.timed_out:
                 exec_ok = False
@@ -638,15 +1223,75 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
         if exec_ok:
             update_run_progress(run_dir, None, "final-review")
             diff = _git_diff(cwd, run_base)
-            packet_path = _final_packet(
-                spec_path, run_base, diff, run_dir,
-                prior_findings=prior_findings or None,
+            # Discovery (this loop's first review) is always cold — same
+            # justification as the per-task reviewer (DECISIONS 2026-07-16,
+            # 2026-07-17). Verification (every review after a repair) resumes
+            # the final-reviewer thread against the repair delta + reduced
+            # checklist (Delta-scoped verification packets spec) — the
+            # resumed reviewer already holds the full spec and whole-plan
+            # diff in session, so re-sending them is exactly the waste this
+            # phase removes.
+            is_verification = review_attempts > 0
+            # Track the packet actually built, not just the flag (same edge
+            # case as the per-task reviewer above).
+            packet_review_kind = (
+                "verification" if is_verification and repair_snapshot is not None
+                else "discovery"
             )
-            verdict = dispatch_final_review(
-                packet_path, codex_bin, run_dir, tier, timeout=timeout
+            if is_verification and repair_snapshot is not None:
+                delta_diff = _git_diff(cwd, repair_snapshot)
+                packet_checklist = (
+                    forge_checklist.reduce_checklist(checklist, prior_findings)
+                    if checklist else checklist
+                )
+                packet_text = rp.build_verification_packet(
+                    prior_findings, delta_diff, packet_checklist
+                )
+                packet_path = os.path.join(run_dir, "final-review.md")
+                with open(packet_path, "w", encoding="utf-8") as f:
+                    f.write(packet_text)
+            else:
+                packet_checklist = checklist
+                packet_path = _final_packet(
+                    spec_path, run_base, diff, run_dir,
+                    prior_findings=prior_findings or None, checklist=checklist,
+                )
+
+            review_resume_state = {
+                "thread": threads.get(reviewer_role) if is_verification else None,
+            }
+            reviewer_resume_fallback = (
+                is_verification and review_resume_state["thread"] is None
             )
-            classify_findings(verdict, diff)
-            write_final_review_receipt(run_dir, verdict)
+
+            def _final_reviewer_dispatch_call(p):
+                nonlocal reviewer_resume_fallback
+                resume_thread = review_resume_state["thread"]
+                if resume_thread:
+                    try:
+                        return dispatch_final_review(
+                            p, codex_bin, run_dir, tier, threads, timeout=timeout,
+                            resume_thread=resume_thread,
+                        )
+                    except RuntimeError:
+                        reviewer_resume_fallback = True
+                        threads.pop(reviewer_role, None)
+                        review_resume_state["thread"] = None
+                return dispatch_final_review(
+                    p, codex_bin, run_dir, tier, threads, timeout=timeout,
+                )
+
+            verdict, coverage_retry = _review_with_coverage(
+                _final_reviewer_dispatch_call,
+                packet_path, packet_checklist, run_dir, "final",
+                review_kind=packet_review_kind,
+            )
+            review_attempts += 1
+            # run_diff=diff: the final review's own diff base *is* the run
+            # base, so in-run is unreachable here (In-run provenance and the
+            # seed disposition spec) — passed anyway so both classify_findings
+            # call sites in the runner are wired identically.
+            classify_findings(verdict, diff, run_diff=diff, carried_ids=state.carried_ids)
             findings = verdict.findings
 
         # The final review has no acceptance command that can regress, so the
@@ -670,6 +1315,20 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
         repair_task = halted[0].repair_task if halted else None
         outstanding = [f.summary for f in findings] if action == "halt" else []
 
+        # Persist this attempt's state onto the final-review receipt
+        # unconditionally — including an `exec_ok=False` attempt whose fix
+        # dispatch itself crashed/timed out (no review this attempt) — matching
+        # execute_task's unconditional per-attempt receipt write (Receipts
+        # spec). `verdict` is always bound by here: attempt 1 never has
+        # fix_findings so it always runs the `exec_ok` branch that sets it;
+        # only a later fix-dispatch attempt can hit `exec_ok=False`, and it
+        # carries the prior attempt's verdict forward.
+        write_final_review_receipt(
+            run_dir, verdict, halt_reason=halt_reason if action == "halt" else None,
+            coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
+            resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
+        )
+
         if action == "pass":
             if applied_fix:
                 _git_commit_final_review_fixes(cwd)
@@ -677,14 +1336,6 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 status="passed", attempts=attempt, summary="", deferrals=deferrals
             )
         if action == "halt":
-            # Persist the halt-reason class onto the final-review receipt itself
-            # (not just this in-memory TaskOutcome) — `--status` reads run.json +
-            # receipts only, exactly like a per-task halt's receipt-carried
-            # `halt_reason` (Receipts spec). `verdict` is always bound by here:
-            # attempt 1 never has fix_findings so it always runs the `exec_ok`
-            # branch that sets it; only a later fix-dispatch attempt can hit
-            # `exec_ok=False`, and it carries the prior attempt's verdict forward.
-            write_final_review_receipt(run_dir, verdict, halt_reason=halt_reason)
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,
@@ -835,7 +1486,11 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
 
     A dispatch that crashes or times out also halts with the cause named — it
     produced no usable result, and silently treating that as "no drift" would
-    mask the failure (fail-loud, like a reviewer crash)."""
+    mask the failure (fail-loud, like a reviewer crash). Dispatched with
+    ``--json`` (never ``--ephemeral``) like every other stage; the doc-sync
+    stage has no role in ``run.json``'s ``threads`` map (Interface: worker |
+    reviewer | final-reviewer | final-fixer only) — it is terminal and never
+    resumed, so its captured thread id is discarded rather than persisted."""
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
     brief_path = _doc_sync_brief(spec_path, diff, run_dir)
@@ -846,20 +1501,24 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     argv = [
         codex_bin,
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
         "model_reasoning_effort={}".format(effort),
         "--output-last-message",
         last_msg_path,
-        prompt,
     ]
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior stage's message
     live_path = os.path.join(run_dir, "doc-sync-live.log")
+    events_path = os.path.join(run_dir, "doc-sync-events.jsonl")
     header = "── doc-sync · codex exec · {} · {} ──".format(model, effort)
     update_run_progress(run_dir, None, "doc-sync")
-    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    result = run_json_teed(
+        argv, timeout=timeout, live_path=live_path, events_path=events_path,
+        header=header, render_line=_render_event_line, stdin_text=prompt,
+    )
     if result.timed_out:
         return DocSyncResult(
             status="halt",
@@ -891,7 +1550,10 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
 
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
              timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
-    """Sequential whole-plan loop. Tasks already ``passed`` in this run-dir (a
+    """Sequential whole-plan loop. Every invocation first lints the plan (+ spec)
+    against documented grammar (Plan lint spec): any error defect is a contract
+    error before the run dir exists or anything dispatches, naming every defect;
+    a warning-only plan proceeds. Tasks already ``passed`` in this run-dir (a
     resume) are skipped; the rest run through execute_task in dependency order.
     Halts on the first escalation. After every task passes, one plan-level final
     review runs against the whole-plan diff + spec (git repo required), and — once
@@ -901,10 +1563,21 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     ``auto`` runs the disposition matrix, ``gate`` halts on any finding.
     Defer-disposition findings from every task and the final review aggregate into
     ``run.json`` under ``deferrals`` (the runner never writes DEFERRALS.md — the
-    orchestrator does, at completion). ``effort_overrides`` (``{task_number:
+    orchestrator does, at completion). ``seed``-disposition findings (in-run x
+    contract-breaking — a finding against an earlier task's already-committed
+    work) similarly aggregate into ``run.json`` under ``seeded_findings``: logged,
+    the task's own run is never halted or reworked over them, and they seed the
+    final review's discovery packet as pre-seeded prior findings (In-run
+    provenance and the seed disposition spec). ``effort_overrides`` (``{task_number:
     level}``, from repeatable ``--effort N=LEVEL``) must reference only task
     numbers present in the plan — an unknown number raises naming the cause.
-    ``timeout`` bounds every worker and reviewer ``codex exec`` call."""
+    ``timeout`` bounds every worker and reviewer ``codex exec`` call.
+    ``run.json``'s ``threads`` map (Codex mechanics / Receipts spec) is reset to
+    empty at the start of every invocation — including a resume — since a
+    persisted session may be stale once a halt lets a human hand-edit code; a
+    thread id is never carried across runner invocations, only within one.
+    ``seeded_findings``, unlike ``threads``, IS read back from a prior
+    invocation's run.json so a seed logged before a resume point is preserved."""
     # Clean-tree precondition (every invocation, first run and resume): commit
     # discipline only yields clean per-task/whole-plan boundaries if the tree
     # starts clean. Checked before creating the run dir or `.forge/` gitignore so
@@ -915,6 +1588,23 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             "working tree not clean at run start — commit or discard before "
             "re-invoking:\n{}".format("\n".join(dirty))
         )
+    # Plan lint (Plan lint spec): every documented-grammar defect, before any
+    # dispatch — a document defect can never be classified in-diff (a task's
+    # diff is code, not the plan/spec specifying it), so surfacing it here as
+    # a two-second contract error replaces what would otherwise become a
+    # pre-existing x contract-breaking halt mid-run. Every defect (error and
+    # warning) is printed; an error defect fails the run before the run dir is
+    # created or anything dispatches, naming every defect in the raised
+    # message too. A warning-only plan (e.g. a legal empty checklist) prints
+    # and proceeds.
+    lint_defects = forge_lint.lint_plan(plan_path, spec_path)
+    lint_lines = [
+        "[{}] {}: {}".format(d.severity, d.where, d.message) for d in lint_defects
+    ]
+    for line in lint_lines:
+        print(line, flush=True)
+    if any(d.severity == "error" for d in lint_defects):
+        raise RuntimeError("plan lint failed:\n" + "\n".join(lint_lines))
     # Parse and validate the plan BEFORE creating the run dir: an unparseable
     # plan (or an --effort pointing at a missing task) is a contract error that
     # must leave no run.json — the spec surfaces it via stderr only.
@@ -970,13 +1660,25 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # DEFERRALS.md at completion — the runner never touches that curated doc).
     deferrals = []
     doc_sync_record = None
+    # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at
+    # invocation start (never read back from a prior run.json), populated in
+    # place by dispatch_worker/_dispatch_review_call/dispatch_final_review_fix as
+    # the run proceeds, and rewritten into run.json alongside every other field.
+    threads = {}
+    # seed-disposition findings (in-run x contract-breaking; In-run provenance
+    # and the seed disposition spec) — unlike threads, this DOES read back a
+    # prior invocation's run.json, so a seed logged by an already-passed task
+    # is never lost when this invocation's own accumulator starts fresh; every
+    # task still executed this invocation appends its own seeds in place.
+    seeded_findings = list(_read_seeded_findings(run_dir) or [])
 
     # Incremental run.json: write `running` before the first task so --status/the
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
     # each passed task so live per-task progress is visible. base_commit rides
     # along so a resume still reads it; started_at/pid feed the monitor.
     write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
-                   started_at=run_started, pid=run_pid)
+                   started_at=run_started, pid=run_pid, threads=threads,
+                   seeded_findings=seeded_findings or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -1008,11 +1710,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # it completes).
         summary.update({"status": "running", "started_at": task_started})
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads,
+                       seeded_findings=seeded_findings or None)
         outcome = execute_task(
-            task, plan_path, spec_path, run_dir, codex_bin, cwd,
+            task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
-            autofix_mode=autofix_mode,
+            autofix_mode=autofix_mode, run_base=run_base,
+            seeded_findings=seeded_findings,
         )
         deferrals.extend(outcome.deferrals)
         print("task {}: {} ({} attempt(s))".format(
@@ -1031,7 +1735,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             summary["commit"] = _git_commit_task(cwd, task)
             write_run_json(
                 run_dir, plan_path, spec_path, "running", task_summaries, run_base,
-                started_at=run_started, pid=run_pid,
+                started_at=run_started, pid=run_pid, threads=threads,
+                seeded_findings=seeded_findings or None,
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
@@ -1045,7 +1750,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # whole final-review phase. Flush the corrected summaries before entering it.
     if not escalated:
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
-                       run_base, started_at=run_started, pid=run_pid)
+                       run_base, started_at=run_started, pid=run_pid, threads=threads,
+                       seeded_findings=seeded_findings or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -1060,7 +1766,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_outcome = run_final_review_loop(
                 spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
-                autofix_mode, timeout=timeout,
+                autofix_mode, threads, timeout=timeout, plan_path=plan_path,
+                seeded_findings=seeded_findings,
             )
             deferrals.extend(final_outcome.deferrals)
             if final_outcome.status == "escalated":
@@ -1092,7 +1799,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base,
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
-                   doc_sync=doc_sync_record)
+                   doc_sync=doc_sync_record, threads=threads,
+                   seeded_findings=seeded_findings or None)
     return 0 if overall == "passed" else 2
 
 
