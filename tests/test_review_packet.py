@@ -426,3 +426,102 @@ class ReviewPacketOutsideGitRepoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UntrackedFilesInDiffTests(unittest.TestCase):
+    """The review diff must include untracked (new, never-staged) files — a
+    task whose whole implementation is new files otherwise reviews as an empty
+    diff. ``rp.git_diff`` is read-only: no staging, no index mutation."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="review-packet-untracked-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("ignored.txt\n")
+        with open(os.path.join(self.d, "tracked.txt"), "w") as f:
+            f.write("base\n")
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", ".")
+        self._git("commit", "-m", "base")
+        self.base = self._git("rev-parse", "HEAD").stdout.strip()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rp_under_test", SCRIPT)
+        self.rp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.rp)
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git"] + list(args), cwd=self.d, check=True,
+            capture_output=True, text=True,
+        )
+
+    def _status(self):
+        return self._git("status", "--porcelain").stdout
+
+    def test_untracked_file_appears_as_new_file_hunk(self):
+        with open(os.path.join(self.d, "brand_new.py"), "w") as f:
+            f.write("def added():\n    return 1\n")
+        diff = self.rp.git_diff(self.d, self.base)
+        self.assertIn("+++ b/brand_new.py", diff)
+        self.assertIn("new file mode", diff)
+        self.assertIn("+def added():", diff)
+
+    def test_tracked_change_and_untracked_file_both_present(self):
+        with open(os.path.join(self.d, "tracked.txt"), "a") as f:
+            f.write("changed\n")
+        with open(os.path.join(self.d, "brand_new.py"), "w") as f:
+            f.write("x = 1\n")
+        diff = self.rp.git_diff(self.d, self.base)
+        self.assertIn("+changed", diff)
+        self.assertIn("+++ b/brand_new.py", diff)
+        self.assertLess(diff.index("tracked.txt"), diff.index("brand_new.py"))
+
+    def test_gitignored_file_is_not_included(self):
+        with open(os.path.join(self.d, "ignored.txt"), "w") as f:
+            f.write("secret\n")
+        diff = self.rp.git_diff(self.d, self.base)
+        self.assertEqual(diff, "")
+
+    def test_untracked_file_in_subdirectory_uses_repo_relative_path(self):
+        os.makedirs(os.path.join(self.d, "src", "pkg"))
+        with open(os.path.join(self.d, "src", "pkg", "mod.py"), "w") as f:
+            f.write("y = 2\n")
+        diff = self.rp.git_diff(self.d, self.base)
+        self.assertIn("+++ b/src/pkg/mod.py", diff)
+
+    def test_leaves_index_and_status_untouched(self):
+        with open(os.path.join(self.d, "brand_new.py"), "w") as f:
+            f.write("x = 1\n")
+        before = self._status()
+        self.assertEqual(before.strip(), "?? brand_new.py")
+        self.rp.git_diff(self.d, self.base)
+        self.assertEqual(self._status(), before)
+
+    def test_clean_tree_yields_empty_string(self):
+        self.assertEqual(self.rp.git_diff(self.d, self.base), "")
+
+    def test_bad_ref_raises_runtime_error_naming_ref(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.rp.git_diff(self.d, "not-a-real-ref-xyz")
+        self.assertIn("not-a-real-ref-xyz", str(cm.exception))
+
+    def test_cli_packet_includes_untracked_file(self):
+        plan_path = os.path.join(self.d, "plan.md")
+        with open(plan_path, "w") as f:
+            f.write(PLAN_TASK1)
+        self._git("add", "plan.md")
+        self._git("commit", "-m", "plan")
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        with open(os.path.join(self.d, "brand_new.py"), "w") as f:
+            f.write("z = 3\n")
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script([plan_path, "1", "--base", base, "--out", out_dir])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            content = f.read()
+        self.assertIn("+++ b/brand_new.py", content)
+        self.assertIn("+z = 3", content)
+        self.assertNotIn("no changes vs", content)

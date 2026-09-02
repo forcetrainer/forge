@@ -19,9 +19,11 @@ finding resolved/carried/new against them. Omitted, the packet is unchanged.
 the packet gains a ``## Contract checklist`` section, appended after the diff
 and before any prior-findings section. Omitted, the packet is unchanged.
 
-The diff is ``git diff <base>``: committed, staged, and unstaged *tracked*
-changes — untracked files are invisible to it. Commit (or at least ``git
-add``) the task's work before generating a packet.
+The diff is ``git_diff(cwd, base)``: ``git diff <base>`` (committed, staged,
+and unstaged tracked changes) followed by one new-file hunk per untracked,
+non-ignored file — so a task whose whole implementation is new files never
+reviews as an empty diff. Read-only: nothing is staged, the index is never
+touched.
 """
 import argparse
 import json
@@ -33,6 +35,52 @@ import tempfile
 
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def git_diff(cwd, base):
+    """The review diff in ``cwd`` against ``base``: ``git diff <base>`` plus a
+    ``git diff --no-index /dev/null <path>`` new-file hunk for every untracked,
+    non-ignored file (``git ls-files --others --exclude-standard``, so a
+    gitignored ``.forge/`` never leaks in). Plain ``git diff`` never looks at
+    untracked files, and the runner only stages a task's work in the commit
+    *after* review — without this, a task creating only new files reviewed as
+    "no changes" (fixed 2026-09-02). Read-only: no ``git add``, no index
+    mutation, so the single-commit discipline and ``git stash create``
+    snapshots are undisturbed. Raises RuntimeError naming the cause on a git
+    failure (a packet-generation error — halt per the Halt spec)."""
+    def run(args):
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=cwd, capture_output=True, text=True
+            )
+        except OSError as e:
+            raise RuntimeError("failed to invoke git: {}".format(e))
+
+    tracked = run(["diff", base])
+    if tracked.returncode != 0:
+        raise RuntimeError(
+            "git diff {} failed in {}: {}".format(base, cwd, tracked.stderr.strip())
+        )
+    others = run(["ls-files", "--others", "--exclude-standard", "-z"])
+    if others.returncode != 0:
+        raise RuntimeError(
+            "git ls-files --others failed in {}: {}".format(cwd, others.stderr.strip())
+        )
+    parts = [tracked.stdout]
+    for path in others.stdout.split("\0"):
+        if not path:
+            continue
+        # --no-index exits 1 when the files differ (always, vs /dev/null) —
+        # only >1 is an error.
+        hunk = run(["diff", "--no-index", "--", os.devnull, path])
+        if hunk.returncode > 1:
+            raise RuntimeError(
+                "git diff --no-index for untracked {} failed in {}: {}".format(
+                    path, cwd, hunk.stderr.strip()
+                )
+            )
+        parts.append(hunk.stdout)
+    return "".join(parts)
 
 
 def fence_mask(lines):
@@ -342,26 +390,13 @@ def main(argv=None):
     plan_dir = os.path.dirname(os.path.abspath(args.plan)) or "."
 
     try:
-        result = subprocess.run(
-            ["git", "diff", args.base],
-            cwd=plan_dir,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as e:
-        print("error: failed to invoke git: {}".format(e), file=sys.stderr)
-        return 1
-
-    if result.returncode != 0:
-        print(
-            "error: git diff {} failed in {}:".format(args.base, plan_dir),
-            file=sys.stderr,
-        )
-        print(result.stderr, end="", file=sys.stderr)
+        diff_output = git_diff(plan_dir, args.base)
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
         return 1
 
     packet = build_packet(
-        task_block, args.base, result.stdout, prior_findings, checklist
+        task_block, args.base, diff_output, prior_findings, checklist
     )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()

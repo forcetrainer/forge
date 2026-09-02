@@ -293,6 +293,12 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self._git("init")
         self._git("config", "user.email", "t@example.com")
         self._git("config", "user.name", "Test")
+        # Harness artifacts are ignored (as in every other repo fixture and in
+        # real usage, where `.forge/` is gitignored): the review diff now
+        # includes untracked files, so an unignored fake-codex log or run dir
+        # would leak into the packet as a new-file hunk.
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
             f.write("base\n")
         self._git("add", "-A")

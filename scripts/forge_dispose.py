@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from forge_common import (
     AUTOFIX_MODES,
+    rp,
     MAX_ATTEMPTS_BACKSTOP,
     CoverageEntry,
     Finding,
@@ -629,21 +630,13 @@ def execution_failure_finding(detail):
 
 
 def _run_git_diff(base):
-    """``git diff <base>`` in the caller's cwd — the CLI computes its own
-    authoritative diff (never trusts a caller-supplied diff), exactly as
-    classify_findings/verify_provenance require. Fails loud naming the cause on
-    a bad ref or a git invocation failure (DECISIONS 2026-07-11)."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", base], capture_output=True, text=True
-        )
-    except OSError as e:
-        raise RuntimeError("failed to invoke git: {}".format(e))
-    if result.returncode != 0:
-        raise RuntimeError(
-            "git diff {} failed: {}".format(base, result.stderr.strip())
-        )
-    return result.stdout
+    """The review diff against ``base`` in the caller's cwd — the CLI computes
+    its own authoritative diff (never trusts a caller-supplied diff), exactly as
+    classify_findings/verify_provenance require, via review-packet.py's
+    ``git_diff`` (tracked changes plus untracked new-file hunks — the same diff
+    the reviewer saw). Fails loud naming the cause on a bad ref or a git
+    invocation failure (DECISIONS 2026-07-11)."""
+    return rp.git_diff(os.getcwd(), base)
 
 
 def _findings_by_disposition(findings):

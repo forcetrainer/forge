@@ -119,16 +119,13 @@ def _git_commit_task(cwd, task):
 
 
 def _git_diff(cwd, base):
-    """``git diff <base>`` in ``cwd``. Raises RuntimeError naming the cause on a
-    git failure (a packet-generation error — halt per the Halt spec)."""
-    proc = subprocess.run(
-        ["git", "diff", base], cwd=cwd, capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "git diff {} failed in {}: {}".format(base, cwd, proc.stderr.strip())
-        )
-    return proc.stdout
+    """The review diff: ``git diff <base>`` plus new-file hunks for untracked,
+    non-ignored files (review-packet.py's ``git_diff`` — one implementation
+    behind every packet, the finding classifier, and the standalone CLIs, so
+    "in-diff" means the same thing everywhere). Raises RuntimeError naming the
+    cause on a git failure (a packet-generation error — halt per the Halt
+    spec)."""
+    return rp.git_diff(cwd, base)
 
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
