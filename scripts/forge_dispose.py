@@ -13,7 +13,7 @@ harnesses regardless of who acts on it.
 Imported as a plain module (not via importlib) so ``sys.modules`` caches one
 instance and ``Finding``/``Verdict`` keep a single class identity across
 forge-run.py and this module — the same discipline forge_git/forge_plan/
-forge_receipts follow (DECISIONS 2026-07-14).
+forge_receipts follow.
 """
 import argparse
 import json
@@ -49,7 +49,7 @@ def _finding_from_obj(obj):
     re-dispatched through the same retry as a coverage defect, rather than an
     immediate contract error — a reviewer who names one range gets the same
     treatment as one who names two (Location parsing spec, 2026-08-21;
-    supersedes the immediate raise from DECISIONS 2026-07-11)."""
+    supersedes the immediate raise required by constraint: parsers-fail-loud)."""
     if not isinstance(obj, dict):
         raise RuntimeError(
             "reviewer finding is not a JSON object (per-finding schema required); "
@@ -667,7 +667,7 @@ def _run_git_diff(base):
     classify_findings/verify_provenance require, via review-packet.py's
     ``git_diff`` (tracked changes plus untracked new-file hunks — the same diff
     the reviewer saw). Fails loud naming the cause on a bad ref or a git
-    invocation failure (DECISIONS 2026-07-11)."""
+    invocation failure (constraint: parsers-fail-loud)."""
     return rp.git_diff(os.getcwd(), base)
 
 

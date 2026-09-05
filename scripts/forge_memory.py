@@ -52,9 +52,9 @@ if __name__ == "__main__":
     # raises — the user got a raw traceback instead of the named error.
     # So ``__main__`` defines nothing of its own; it imports the one
     # canonical module and delegates. One ``sys.modules`` object, one class
-    # identity (DECISIONS 2026-07-14, the same rule ``forge_common`` and
-    # ``forge_lint`` follow), and the import cycle is broken at the entry
-    # point rather than papered over inside it.
+    # identity (the same discipline ``forge_common`` and ``forge_lint``
+    # follow), and the import cycle is broken at the entry point rather
+    # than papered over inside it.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import forge_memory
 

@@ -31,8 +31,9 @@ docs address them as ``forge_run.<name>``):
 Reuses ``extract-brief.py``/``review-packet.py`` (via forge_common) for all
 plan/spec parsing and packet assembly — no duplicated heading grammar. Tier ->
 model/effort mapping lives in exactly one table (``TIER_MAP``). All parse
-failures raise loudly naming the cause (DECISIONS 2026-07-11); ``ultra``
-reasoning effort is never emitted (DECISIONS 2026-07-13).
+failures raise loudly naming the cause (constraint: parsers-fail-loud);
+``ultra`` reasoning effort is never emitted (spec:
+docs/forge/specs/2026-07-13-codex-exec-runner-design.md).
 """
 import argparse
 import datetime
@@ -753,9 +754,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             )
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
-            # separate reviewer (DECISIONS 2026-07-16, 2026-07-17); resuming it
-            # would hand the review to an agent that already holds the
-            # worker's reasoning. Verification (every review after) resumes
+            # separate reviewer (constraint: discovery-review-is-cold);
+            # resuming it would hand the review to an agent that already
+            # holds the worker's reasoning. Verification (every review after) resumes
             # the reviewer thread, with the same missing-id/failed-resume
             # cold fallback as the worker (Session continuity /
             # Continuity scope and failure specs). Once a fallback happens
@@ -1233,10 +1234,11 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             update_run_progress(run_dir, None, "final-review")
             diff = _git_diff(cwd, run_base)
             # Discovery (this loop's first review) is always cold — same
-            # justification as the per-task reviewer (DECISIONS 2026-07-16,
-            # 2026-07-17). Verification (every review after a repair) resumes
-            # the final-reviewer thread against the repair delta + reduced
-            # checklist (Delta-scoped verification packets spec) — the
+            # justification as the per-task reviewer (constraint:
+            # discovery-review-is-cold). Verification (every review after a
+            # repair) resumes the final-reviewer thread against the repair
+            # delta + reduced checklist (Delta-scoped verification packets
+            # spec) — the
             # resumed reviewer already holds the full spec and whole-plan
             # diff in session, so re-sending them is exactly the waste this
             # phase removes.

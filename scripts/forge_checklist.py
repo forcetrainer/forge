@@ -23,7 +23,7 @@ checklist.
 
 Imported as a plain module (``import forge_common``, not importlib) so
 ``sys.modules`` caches one instance and ``Finding``/``Verdict`` keep a single
-class identity across the runner and this module (DECISIONS 2026-07-14).
+class identity across the runner and this module.
 """
 import argparse
 import json

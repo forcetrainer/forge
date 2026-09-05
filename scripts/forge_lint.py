@@ -25,7 +25,7 @@ one task's bad tier never hides a defect in another task.
 
 Imported as a plain module (``import forge_common``, not importlib) so
 ``sys.modules`` caches one instance and ``Finding``/``Verdict`` keep a single
-class identity across the runner and this module (DECISIONS 2026-07-14).
+class identity across the runner and this module.
 """
 import argparse
 import os
@@ -332,8 +332,8 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
     error.
 
     ``repo_root`` is a required keyword-only argument (no process-cwd
-    guessing here, by design — DECISIONS 2026-07-11 prefers fail-loud over
-    guessing, and a library function that inferred the repo root from
+    guessing here, by design (constraint: parsers-fail-loud) — a library
+    function that inferred the repo root from
     ``os.getcwd()`` would silently check the wrong directory the moment a
     caller's own tracked cwd diverges from the process cwd, exactly the
     failure this harness-agnostic check exists to prevent). Every caller

@@ -78,7 +78,7 @@ def _normalize_tier_level(raw):
 def parse_plan_tasks(plan_path):
     """Parse every ``### Task N:`` block into a Task. Raises RuntimeError naming
     the cause on a wrong-level task heading or a duplicate task number — never
-    guesses (DECISIONS 2026-07-11)."""
+    guesses (constraint: parsers-fail-loud)."""
     lines = eb.read_lines(plan_path)
     mask = eb.fence_mask(lines)
 
