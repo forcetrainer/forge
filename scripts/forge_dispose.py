@@ -321,6 +321,38 @@ def validate_locations(verdict):
     return defects
 
 
+def validate_finding_ids(verdict):
+    """Validate that a reviewer verdict names each finding id at most once.
+    Returns a list of human-readable defect strings — empty means valid — in
+    the same shape as ``validate_coverage``/``validate_locations``, so all
+    three feed the one retry-once-then-contract-error mechanism
+    (``forge-run.py``'s ``_review_with_coverage``).
+
+    A finding id is the runner's only handle on a finding, and several
+    mechanisms treat it as naming exactly one: ``carried_ids``/``resolved_ids``
+    drive the stuck and regression rules, ``convergence: "resolved"`` is
+    matched by canonical id, and ``run.json``'s staged ``deferrals`` are
+    selected for filing by id (plus an ordinal). Two findings sharing an id
+    inside ONE verdict make every one of those ambiguous, so it is a malformed
+    verdict — rejected loudly here, exactly as a duplicate coverage id already
+    is, rather than left for a downstream stage to paper over. Ids are only
+    required to be unique within a verdict: they are reviewer-authored per
+    review and are deliberately not namespaced across a run."""
+    if verdict.kind != "findings":
+        return []
+    seen = []
+    dup_ids = set()
+    for finding in verdict.findings or []:
+        if finding.id in seen:
+            dup_ids.add(finding.id)
+        seen.append(finding.id)
+    if not dup_ids:
+        return []
+    return [
+        "duplicate finding id(s) in one verdict: " + ", ".join(sorted(dup_ids))
+    ]
+
+
 def derive_disposition(finding):
     """Disposition matrix over (verified provenance × contract-gated impact).
     Impact is ``contract-breaking`` only when the reviewer named the violated

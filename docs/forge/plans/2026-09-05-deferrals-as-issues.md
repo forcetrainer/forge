@@ -4,7 +4,7 @@
 > of the planning skill, with strict TDD per task. Checkboxes track progress.
 
 **Goal:** Retire docs/forge/DEFERRALS.md — defer-disposition findings stage during a run and become GitHub issues only through a reviewed close-out gate.
-**Architecture:** `forge-run.py` is unchanged: it already aggregates defer findings into `run.json` and writes no durable record. `forge_status.py` gains stage-and-emit rendering; `forge_memory.py`'s `defer` gains run.json write-back so idempotency is mechanical. The remaining change is skill and doc text plus a guided migration of the existing file.
+**Architecture:** `forge-run.py` still writes no durable record, but it does change in two narrow ways: it stages a task number with each defer finding, and it reads prior deferrals back on resume so staged entries survive. `forge_status.py` gains stage-and-emit rendering; `forge_memory.py`'s `defer` gains run.json write-back so idempotency is mechanical. The remaining change is skill and doc text plus a guided migration of the existing file.
 **Tech stack:** Python 3 stdlib only; `gh` CLI via the Phase 1 store; pytest; markdown skill text.
 **Global Constraints:** No third-party dependencies. `forge-run.py` must never invoke `gh`. No fallback to the file store on any path. Tasks 1-3 get strict TDD; Task 4 is prose with mechanical acceptance only and adds no test file.
 

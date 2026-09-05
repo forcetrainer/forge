@@ -57,6 +57,15 @@ class Store:
     def retire(self, ref, reason=None):
         raise NotImplementedError
 
+    def describe_ref(self, ref):
+        """How this store names one ``ref`` from a ``scan`` error or a
+        ``Record.ref``, for a message a human reads. A ref is
+        store-specific — an issue number here, a file line number there —
+        so the store that produced it is the only thing that can label it
+        accurately; a caller printing a bare "#{ref}" rendered a file's
+        line 1 as issue 1."""
+        raise NotImplementedError
+
 
 def _matches(record, filters):
     return all(record.fields.get(k) == v for k, v in filters.items())
@@ -148,6 +157,13 @@ class FileStore(Store):
             _, message = errors[0]
             raise forge_memory.SchemaError(message)
         return records
+
+    def describe_ref(self, ref):
+        """The file. ``FileStore``'s refs are line numbers, and every
+        message they accompany comes from ``forge_memory.parse``, which
+        already names the line — what the reader is missing is which file
+        it is in."""
+        return self.path
 
     def retire(self, ref, reason=None):
         heading = self._heading_field()
@@ -298,6 +314,9 @@ class GitHubStore(Store):
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         number = url.rstrip("/").rsplit("/", 1)[-1]
         return number
+
+    def describe_ref(self, ref):
+        return "issue #{}".format(ref)
 
     def scan(self, type, state="all", **filters):
         """Returns ``(records, errors)`` — the same shape ``FileStore.scan``

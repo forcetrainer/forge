@@ -10,6 +10,8 @@ import inspect
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,7 +24,9 @@ SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
 HOOK = os.path.join(REPO_ROOT, "hooks", "guard-memory-writes")
 sys.path.insert(0, SCRIPTS_DIR)
 
+from _forge_support import forge_run  # noqa: E402
 import forge_memory as fm  # noqa: E402
+import forge_status  # noqa: E402
 import forge_memory_store as fms  # noqa: E402
 
 
@@ -461,7 +465,11 @@ class SubcommandSurfaceTests(CLITestCase):
         "add-constraint": {"id", "rule", "because", "scope", "issue", "spec"},
         "retire-constraint": {"id"},
         "list-constraints": {"scope", "json"},
-        "defer": {"title", "why", "follow_up", "from_", "run", "finding_id"},
+        # --occurrence added deliberately (typed, closed-vocabulary
+        # selector: a 1-based ordinal among the staged deferrals sharing a
+        # finding id), never a free-form text surface.
+        "defer": {"title", "why", "follow_up", "from_", "run", "finding_id",
+                  "occurrence"},
         "list-deferrals": {"json"},
         "resolve-deferral": {"ref", "reason"},
         "fmt": {"check", "write", "paths", "local_only"},
@@ -683,6 +691,33 @@ class DeferCLITests(CLITestCase):
         self.assertIn("#1", err)
         self.assertIn("#3", err)
 
+    def test_github_store_scan_errors_are_prefixed_as_issue_numbers(self):
+        payload = json.dumps([{"number": 12, "body": "## bad\nnope\n"}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(["list-deferrals"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("issue #12:", err)
+
+    def test_file_store_scan_errors_name_the_file_not_a_fake_issue_number(self):
+        # Under FileStore a scan error's ref is a LINE NUMBER, so the old
+        # "#{ref}: ..." prefix rendered "#1: line 1: unparsable ..." — where
+        # "#1" reads as issue 1. The prefix must describe the ref the store
+        # it came from actually uses.
+        self._use_file_store_for_deferrals()
+        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        _write(path, "this is not a record line\n")
+        code, out, err = _run_cli(["list-deferrals"])
+        self.assertNotEqual(code, 0)
+        self.assertIn(path, err)
+        self.assertNotIn("#1:", err)
+
     def test_resolve_deferral_against_file_store(self):
         self._use_file_store_for_deferrals()
         _run_cli([
@@ -696,6 +731,11 @@ class DeferCLITests(CLITestCase):
         with open(path, encoding="utf-8") as f:
             text = f.read()
         self.assertNotIn("improve-x", text)
+
+
+# The fixture run.json's plan path: what a runner-staged deferral's ``from``
+# must record (plan path, plus task number when the entry carries one).
+_PROVENANCE = "/x/plan.md"
 
 
 class DeferRunJsonCLITests(CLITestCase):
@@ -731,15 +771,34 @@ class DeferRunJsonCLITests(CLITestCase):
             json.dump(data, f, indent=2)
         return path, data
 
-    def _defer_args(self, run=None, finding_id=None, title="improve-x"):
+    def _defer_args(self, run=None, finding_id=None, title="improve-x",
+                    from_=_PROVENANCE, occurrence=None):
+        """``--from`` defaults to real run provenance (the fixture's plan
+        path), never to nothing: an omitted ``--from`` used to bake
+        ``from: user`` into every write-back test, and ``from: user`` is
+        the marker the spec reserves for a deferral that deliberately
+        SKIPS the close-out review gate. Pass ``from_=None`` to exercise
+        the omitted-flag path deliberately."""
         args = [
             "defer", "--title", title, "--why", "polish", "--follow-up", "backlog",
         ]
+        if from_ is not None:
+            args += ["--from", from_]
         if run is not None:
             args += ["--run", run]
         if finding_id is not None:
             args += ["--finding-id", finding_id]
+        if occurrence is not None:
+            args += ["--occurrence", str(occurrence)]
         return args
+
+    def _filed_records(self):
+        """Every deferral the file store holds, parsed back through the one
+        renderer/parser pair — so a test asserts the RECORD, not a substring
+        of the file."""
+        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        with open(path, encoding="utf-8") as f:
+            return fm.parse(f.read(), "deferral")
 
     def test_run_without_finding_id_exits_nonzero(self):
         self._use_file_store_for_deferrals()
@@ -874,6 +933,120 @@ class DeferRunJsonCLITests(CLITestCase):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         self.assertNotIn("issue", data["deferrals"][0])
+
+    def test_omitted_from_on_a_run_filing_records_provenance_not_user(self):
+        # `from: user` is the spec's marker for a deferral that skipped the
+        # close-out review gate. A --run filing is by definition a
+        # runner-staged deferral that went THROUGH the gate, so an omitted
+        # --from must resolve to the run's provenance, never to "user".
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1", "summary": "one"}])
+        code, out, err = _run_cli(
+            self._defer_args(run=path, finding_id="f1", from_=None)
+        )
+        self.assertEqual(code, 0, err)
+        record = self._filed_records()[0]
+        self.assertEqual(record.fields["from"], "/x/plan.md")
+
+    def test_omitted_from_on_a_run_filing_includes_the_task_number(self):
+        # Staged through the runner's own path rather than hand-written, so
+        # this asserts the shape a real run produces.
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json(
+            forge_run.stage_deferrals(
+                [], [{"id": "f1", "summary": "one"}], task_number=3)
+        )
+        code, out, err = _run_cli(
+            self._defer_args(run=path, finding_id="f1", from_=None)
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._filed_records()[0].fields["from"], "/x/plan.md, Task 3")
+
+    def test_explicit_from_still_wins_over_the_derived_value(self):
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1", "summary": "one"}])
+        code, out, err = _run_cli(
+            self._defer_args(run=path, finding_id="f1", from_="user")
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._filed_records()[0].fields["from"], "user")
+
+    def test_no_second_copy_of_the_run_provenance_rule(self):
+        # forge_status.deferral_provenance is the one definition of the
+        # `from` value for a runner-staged deferral — the same function
+        # that renders the emitted template. cmd_defer must call it rather
+        # than assembling its own "<plan>, Task N" string, or the value the
+        # template advertises and the value a bare filing records could
+        # drift apart.
+        source = inspect.getsource(fm.cmd_defer)
+        self.assertIn("deferral_provenance", source)
+        self.assertNotIn("Task {}", source)
+
+    def test_two_staged_deferrals_sharing_an_id_can_both_be_filed(self):
+        # Finding ids are reviewer-authored per review and never namespaced,
+        # so a run's deferrals list can hold two entries with id "F1". Both
+        # must be filable, each recording ITS OWN issue number.
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([
+            {"id": "F1", "summary": "first thing"},
+            {"id": "F1", "summary": "second thing"},
+        ])
+        first = _run_cli(self._defer_args(
+            run=path, finding_id="F1", occurrence=1, title="first-title"))
+        second = _run_cli(self._defer_args(
+            run=path, finding_id="F1", occurrence=2, title="second-title"))
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(second[0], 0, second[2])
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["deferrals"][0]["issue"], "first-title")
+        self.assertEqual(data["deferrals"][1]["issue"], "second-title")
+
+    def test_ambiguous_finding_id_without_occurrence_refuses_loudly(self):
+        # The floor: never a silent wrong match. The message must name the
+        # ambiguity, every colliding entry, and the flag that resolves it.
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([
+            {"id": "F1", "summary": "first thing"},
+            {"id": "F1", "summary": "second thing"},
+        ])
+        with open(path, encoding="utf-8") as f:
+            before = f.read()
+        code, out, err = _run_cli(self._defer_args(run=path, finding_id="F1"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("F1", err)
+        self.assertIn("--occurrence", err)
+        self.assertIn("first thing", err)
+        self.assertIn("second thing", err)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_filing_one_of_two_colliding_ids_never_marks_the_other(self):
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([
+            {"id": "F1", "summary": "first thing"},
+            {"id": "F1", "summary": "second thing"},
+        ])
+        code, out, err = _run_cli(self._defer_args(
+            run=path, finding_id="F1", occurrence=2, title="second-title"))
+        self.assertEqual(code, 0, err)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertNotIn("issue", data["deferrals"][0])
+        self.assertEqual(data["deferrals"][1]["issue"], "second-title")
+
+    def test_occurrence_out_of_range_exits_nonzero_naming_the_count(self):
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "F1", "summary": "only one"}])
+        code, out, err = _run_cli(self._defer_args(
+            run=path, finding_id="F1", occurrence=2))
+        self.assertNotEqual(code, 0)
+        self.assertIn("F1", err)
+
+    def test_occurrence_without_run_exits_nonzero(self):
+        self._use_file_store_for_deferrals()
+        code, out, err = _run_cli(self._defer_args(occurrence=1))
+        self.assertNotEqual(code, 0)
 
     def test_no_second_copy_of_the_status_vocabulary(self):
         # The terminal/non-terminal split is forge_status.is_terminal's
@@ -2115,6 +2288,208 @@ class MissingPathFmtTests(CLITestCase):
         with self.assertRaises(fm.SchemaError) as ctx:
             fm.fmt_check([os.path.join(self.tmp, "gone-constraints.md")])
         self.assertIn("gone-constraints.md", str(ctx.exception))
+
+
+class EmittedTemplateEndToEndTests(CLITestCase):
+    """The seam the substring assertions in tests/test_forge_status.py could
+    never catch: an emitted template that reads right but files WRONG. Here
+    the command `forge_status.render_staged_deferrals` emits is filled in and
+    actually RUN, and the resulting record — not a substring of the command —
+    is asserted."""
+
+    def _run_dir(self, deferrals, plan="docs/forge/plans/p.md"):
+        run_dir = os.path.join(self.tmp, ".forge", "runs", "r1")
+        os.makedirs(run_dir, exist_ok=True)
+        path = os.path.join(run_dir, "run.json")
+        data = {
+            "status": "passed",
+            "tasks": [{"number": 1, "status": "passed"}],
+            "deferrals": deferrals,
+        }
+        if plan is not None:
+            data["plan"] = plan
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return run_dir, path
+
+    def _staged(self, findings, **stage):
+        """Staged deferral entries built through the RUNNER's own staging
+        path. Hand-writing the dict here is what let this suite assert the
+        `from` contract against a key production never wrote — an entry shape
+        that cannot occur, exercising a branch no real run can reach."""
+        return forge_run.stage_deferrals([], findings, **stage)
+
+    def _emitted_commands(self, run_dir, run_json_path):
+        state = forge_status.read_run_state(run_dir)
+        lines = forge_status.render_staged_deferrals(state, run_json_path)
+        return [l.strip() for l in lines if "forge_memory.py defer" in l]
+
+    def _fill_in(self, command, title, why):
+        """Shell-split the emitted line, drop the script name, and replace the
+        two visible placeholders with authored values — exactly what a human
+        or an agent does at the review gate."""
+        argv = shlex.split(command)
+        self.assertEqual(argv[0], "forge_memory.py")
+        argv = argv[1:]
+        self.assertIn("<title>", argv)
+        self.assertIn("<why>", argv)
+        return [
+            title if a == "<title>" else (why if a == "<why>" else a)
+            for a in argv
+        ]
+
+    def _gh_stub(self, bodies):
+        """A stubbed gh that records every created issue body and hands back
+        an incrementing issue URL. No network, no real gh."""
+        counter = {"n": 100}
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            if args[1:3] == ["issue", "create"]:
+                bodies.append(args[args.index("--body") + 1])
+                counter["n"] += 1
+                return _completed(
+                    returncode=0,
+                    stdout="https://github.com/o/r/issues/{}\n".format(counter["n"]),
+                )
+            return _completed(returncode=0, stdout="")
+
+        return mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+            mock.patch.object(fms.subprocess, "run", side_effect=fake_run)
+
+    def test_emitted_template_files_with_run_provenance_not_user(self):
+        run_dir, path = self._run_dir(
+            self._staged([{"id": "F1", "summary": "s" * 120}], task_number=2)
+        )
+        commands = self._emitted_commands(run_dir, path)
+        self.assertEqual(len(commands), 1)
+        argv = self._fill_in(commands[0], "shorten the deferral formatter",
+                             "polish, not required by the current spec")
+        bodies = []
+        which, run = self._gh_stub(bodies)
+        with which, run:
+            code, out, err = _run_cli(argv)
+        self.assertEqual(code, 0, err)
+        record = fm.parse(bodies[0], "deferral")[0]
+        self.assertEqual(record.fields["from"], "docs/forge/plans/p.md, Task 2")
+        self.assertNotEqual(record.fields["from"], "user")
+        self.assertEqual(record.fields["follow-up"], "backlog")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["deferrals"][0]["issue"], "101")
+
+    def test_both_emitted_commands_for_a_colliding_id_file_their_own_entry(self):
+        run_dir, path = self._run_dir([
+            {"id": "F1", "summary": "first colliding finding"},
+            {"id": "F1", "summary": "second colliding finding"},
+        ])
+        commands = self._emitted_commands(run_dir, path)
+        self.assertEqual(len(commands), 2)
+        bodies = []
+        which, run = self._gh_stub(bodies)
+        with which, run:
+            for i, command in enumerate(commands, start=1):
+                argv = self._fill_in(command, "title {}".format(i), "why {}".format(i))
+                code, out, err = _run_cli(argv)
+                self.assertEqual(code, 0, err)
+        self.assertEqual(len(bodies), 2)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["deferrals"][0]["issue"], "101")
+        self.assertEqual(data["deferrals"][1]["issue"], "102")
+        titles = [fm.parse(b, "deferral")[0].fields["title"] for b in bodies]
+        self.assertEqual(titles, ["title 1", "title 2"])
+
+    def test_plan_less_run_json_files_the_same_from_the_template_advertises(self):
+        # With no `plan` key the provenance falls back to the run.json path
+        # itself — and the two callers reach that fallback by different
+        # routes: the emitter derives run_dir + "run.json", while a filing
+        # uses whatever path the user typed. A relative --run must therefore
+        # still record exactly what the emitted template promised.
+        self._use_file_store_for_deferrals()
+        run_dir, path = self._run_dir(
+            self._staged([{"id": "F1", "summary": "s" * 120}], task_number=2),
+            plan=None,
+        )
+        advertised = self._emitted_commands(run_dir, path)[0]
+        argv = shlex.split(advertised)
+        promised = argv[argv.index("--from") + 1]
+        code, out, err = _run_cli([
+            "defer", "--title", "a title", "--why", "a why",
+            "--follow-up", "backlog",
+            "--run", os.path.relpath(path), "--finding-id", "F1",
+        ])
+        self.assertEqual(code, 0, err)
+        store_path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        with open(store_path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "deferral")[0]
+        self.assertEqual(record.fields["from"], promised)
+        self.assertNotEqual(record.fields["from"], "user")
+
+    def test_rerunning_an_emitted_command_files_nothing_a_second_time(self):
+        run_dir, path = self._run_dir([{"id": "F1", "summary": "one finding"}])
+        command = self._emitted_commands(run_dir, path)[0]
+        argv = self._fill_in(command, "a title", "a why")
+        bodies = []
+        which, run = self._gh_stub(bodies)
+        with which, run:
+            first = _run_cli(argv)
+            second = _run_cli(argv)
+        self.assertEqual(first[0], 0, first[2])
+        self.assertNotEqual(second[0], 0)
+        self.assertEqual(len(bodies), 1)
+
+
+class StatusVocabularyCopyTests(unittest.TestCase):
+    """One definition of the run-status terminal/non-terminal split across
+    the whole ``scripts/`` package — not just forge_memory.py, which is all
+    the original test greped, leaving forge-monitor.py's private copy free
+    to drift."""
+
+    # A membership test against a set of mapped terminal states, in any
+    # order and across line breaks: `state["state"] in ("completed",
+    # "halted", "contract-error")` — the exact shape forge-monitor.py's
+    # private copy took. Deliberately narrower than "mentions the states":
+    # the monitor's state -> display-label map is a different question
+    # (what to PRINT), and naming a single status (`st == "contract-error"`)
+    # is not a copy of the split.
+    _MEMBERSHIP_RE = re.compile(
+        r'in\s*[\(\[\{][^)\]\}]*"contract-error"[^)\]\}]*[\)\]\}]', re.S
+    )
+
+    def _scripts(self):
+        d = os.path.join(REPO_ROOT, "scripts")
+        return [
+            os.path.join(d, n) for n in sorted(os.listdir(d))
+            if n.endswith(".py") and n != "forge_status.py"
+        ]
+
+    def test_only_forge_status_defines_is_terminal(self):
+        for path in self._scripts():
+            with open(path, encoding="utf-8") as f:
+                source = f.read()
+            for definition in ("def is_terminal", "def _is_terminal"):
+                self.assertNotIn(
+                    definition, source,
+                    "{} defines its own {} — forge_status.is_terminal is the "
+                    "one definition of that split".format(path, definition),
+                )
+
+    def test_no_script_reimplements_the_mapped_terminal_state_set(self):
+        # The monitor's drifted copy was `state["state"] in ("completed",
+        # "halted", "contract-error")` — the same question is_terminal
+        # answers, asked of the mapped state instead of the raw status.
+        for path in self._scripts():
+            with open(path, encoding="utf-8") as f:
+                source = f.read()
+            match = self._MEMBERSHIP_RE.search(source)
+            self.assertIsNone(
+                match,
+                "{} re-derives the terminal-state vocabulary ({!r}) — call "
+                "forge_status.is_terminal instead".format(
+                    path, match.group(0) if match else "",
+                ),
+            )
 
 
 if __name__ == "__main__":

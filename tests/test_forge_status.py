@@ -842,3 +842,140 @@ class ProgressFieldsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeferralProvenanceTests(unittest.TestCase):
+    """``deferral_provenance`` — the one definition of the ``from`` value a
+    runner-staged deferral is filed with. The spec reserves ``from: user``
+    for a deferral a human asked for directly (which deliberately skips the
+    close-out review gate), so a runner-staged entry must never be
+    describable that way."""
+
+    def test_plan_path_alone_when_entry_carries_no_task(self):
+        self.assertEqual(
+            forge_status.deferral_provenance(
+                "docs/forge/plans/p.md", {"id": "F1"}, "/runs/x/run.json"),
+            "docs/forge/plans/p.md",
+        )
+
+    def test_plan_path_and_task_number_when_the_entry_carries_one(self):
+        self.assertEqual(
+            forge_status.deferral_provenance(
+                "docs/forge/plans/p.md", {"id": "F1", "task_number": 3},
+                "/runs/x/run.json"),
+            "docs/forge/plans/p.md, Task 3",
+        )
+
+    def test_run_json_path_is_the_fallback_when_run_json_records_no_plan(self):
+        # Never "user" — that value means something else entirely.
+        value = forge_status.deferral_provenance(None, {"id": "F1"}, "/runs/x/run.json")
+        self.assertEqual(value, "/runs/x/run.json")
+        self.assertNotEqual(value, "user")
+
+    def test_final_review_stage_is_named_and_no_task_number_is_invented(self):
+        # A final-review deferral belongs to no single task, so the runner
+        # stages the stage that produced it instead of a task number. The one
+        # thing this must never do is manufacture a "Task N" for it.
+        value = forge_status.deferral_provenance(
+            "docs/forge/plans/p.md", {"id": "F1", "stage": "final-review"},
+            "/runs/x/run.json",
+        )
+        self.assertEqual(value, "docs/forge/plans/p.md, final review")
+        self.assertNotIn("Task", value)
+
+    def test_run_json_fallback_is_absolute_so_both_callers_agree(self):
+        # The two callers spell the same file differently: the `--status`
+        # emitter derives it as run_dir + "run.json", while `defer --run` uses
+        # whatever path the user typed. A plan-less run.json must still yield
+        # ONE provenance string across both, so the fallback is normalized.
+        relative = forge_status.deferral_provenance(
+            None, {"id": "F1"}, os.path.join("runs", "x", "run.json"))
+        absolute = forge_status.deferral_provenance(
+            None, {"id": "F1"},
+            os.path.join(os.getcwd(), "runs", "x", "run.json"))
+        self.assertEqual(relative, absolute)
+        self.assertTrue(os.path.isabs(relative))
+
+
+class StagedDeferralProvenanceTests(unittest.TestCase):
+    """The emitted template must record real provenance. Pasting it without
+    ``--from`` would file a runner-staged deferral as ``from: user``."""
+
+    def _run_json(self, d, deferrals, plan="docs/forge/plans/p.md"):
+        path = os.path.join(d, "run.json")
+        with open(path, "w") as f:
+            json.dump({"status": "passed", "plan": plan, "deferrals": deferrals}, f)
+        return path
+
+    def test_emitted_command_carries_plan_path_as_from(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [{"id": "F1", "summary": "s" * 110}])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            self.assertIn("--from {}".format(shlex.quote("docs/forge/plans/p.md")), text)
+
+    def test_emitted_command_carries_task_number_when_staged_entry_has_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(
+                d, [{"id": "F1", "summary": "s" * 110, "task_number": 3}])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            self.assertIn(
+                "--from {}".format(shlex.quote("docs/forge/plans/p.md, Task 3")), text)
+
+    def test_emitted_command_never_says_user(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [{"id": "F1", "summary": "s" * 110}])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            command = [l for l in text.splitlines() if "forge_memory.py defer" in l][0]
+            self.assertNotIn("--from user", command)
+
+
+class StagedDeferralDuplicateIdTests(unittest.TestCase):
+    """Finding ids are reviewer-authored per review and are never namespaced,
+    so one run's ``deferrals`` list can hold two entries with the same id.
+    The emitted commands must file BOTH, each attributed to its own entry."""
+
+    def _run_json(self, d, deferrals):
+        path = os.path.join(d, "run.json")
+        with open(path, "w") as f:
+            json.dump(
+                {"status": "passed", "plan": "docs/forge/plans/p.md",
+                 "deferrals": deferrals}, f)
+        return path
+
+    def test_colliding_ids_emit_distinct_occurrence_selectors(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [
+                {"id": "F1", "summary": "first thing"},
+                {"id": "F1", "summary": "second thing"},
+            ])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            commands = [l for l in text.splitlines() if "forge_memory.py defer" in l]
+            self.assertEqual(len(commands), 2)
+            self.assertIn("--occurrence 1", commands[0])
+            self.assertIn("--occurrence 2", commands[1])
+            self.assertNotEqual(commands[0], commands[1])
+
+    def test_occurrence_counts_only_entries_sharing_the_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [
+                {"id": "F1", "summary": "one"},
+                {"id": "F2", "summary": "two"},
+                {"id": "F1", "summary": "three"},
+            ])
+            state = forge_status.read_run_state(d)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            commands = [l for l in lines if "forge_memory.py defer" in l]
+            self.assertIn("--occurrence 1", commands[0])
+            self.assertNotIn("--occurrence", commands[1])  # F2 is unique
+            self.assertIn("--occurrence 2", commands[2])
+
+    def test_unique_id_emits_no_occurrence_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [{"id": "F1", "summary": "only one"}])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            self.assertNotIn("--occurrence", text)

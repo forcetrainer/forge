@@ -484,12 +484,33 @@ def cmd_list_constraints(args, repo_root):
     return 0
 
 
-def _load_run_json_entry(run_path, finding_id):
+def _load_run_json_entry(run_path, finding_id, occurrence=None):
     """Load ``run_path`` and return ``(data, entry)`` where ``entry`` is the
     ``deferrals`` list item whose ``id`` matches ``finding_id``. Raises
     ``SchemaError`` naming ``run_path`` (missing or malformed) or naming
     ``finding_id`` (no matching entry) — never a guess. Read-only; the
-    caller decides whether and what to write back."""
+    caller decides whether and what to write back.
+
+    Finding ids are reviewer-authored per review and are never namespaced
+    across a run, so two staged deferrals can legitimately share the id
+    ``F1``. Returning the first match would then write the issue number
+    onto the wrong entry, and permanently strand the other (it would read
+    as "already filed" forever). ``occurrence`` — the 1-based ordinal among
+    the entries sharing ``finding_id`` — is what disambiguates them, and it
+    is always available — but NOT because the runner writes the list once
+    at close-out; it rewrites ``run.json`` on every invocation, resume
+    included. What actually holds the list still is two rules. First, the
+    runner READS THE PRIOR ``deferrals`` LIST BACK at the start of each
+    invocation and only ever appends to it (``forge-run.py``'s
+    ``stage_deferrals`` over ``forge_receipts._read_deferrals``), so a
+    resume never rebuilds the list from scratch, never drops an entry an
+    earlier invocation staged, and never inserts ahead of one. Second,
+    filing only ever ADDS an ``issue`` key to an entry it already found.
+    Positions are therefore append-only, which is what makes an ordinal
+    name the same entry on every re-run.
+    That lets BOTH colliding deferrals be filed, each carrying its own
+    issue. Without it, an ambiguous id is refused loudly, naming every
+    candidate — a wrong match is never made silently."""
     if not os.path.exists(run_path):
         raise SchemaError(
             "{}: no such file — --run takes the path to an existing run's "
@@ -513,12 +534,42 @@ def _load_run_json_entry(run_path, finding_id):
             "{}: malformed run.json (expected a top-level JSON "
             "object)".format(run_path)
         )
-    for entry in data.get("deferrals") or []:
-        if isinstance(entry, dict) and entry.get("id") == finding_id:
-            return data, entry
-    raise SchemaError(
-        "{}: no staged deferral with finding-id {!r}".format(run_path, finding_id)
-    )
+    matches = [
+        entry for entry in data.get("deferrals") or []
+        if isinstance(entry, dict) and entry.get("id") == finding_id
+    ]
+    if not matches:
+        raise SchemaError(
+            "{}: no staged deferral with finding-id {!r}".format(run_path, finding_id)
+        )
+    if occurrence is not None:
+        if not 1 <= occurrence <= len(matches):
+            raise SchemaError(
+                "{}: --occurrence {} is out of range for finding-id {!r} — {} "
+                "staged deferral(s) carry that id (occurrences 1-{}).".format(
+                    run_path, occurrence, finding_id, len(matches), len(matches),
+                )
+            )
+        return data, matches[occurrence - 1]
+    if len(matches) > 1:
+        listing = "\n".join(
+            "  --occurrence {}: {}{}".format(
+                n,
+                (entry.get("summary") or "(no summary)").strip(),
+                " [already filed as issue #{}]".format(entry["issue"])
+                if entry.get("issue") is not None else "",
+            )
+            for n, entry in enumerate(matches, start=1)
+        )
+        raise SchemaError(
+            "{}: finding-id {!r} is ambiguous — {} staged deferrals carry it "
+            "(reviewer finding ids are per-review and are not unique across a "
+            "run). Filing without saying which one would attribute the issue "
+            "to the wrong finding, so re-run with --occurrence N:\n{}".format(
+                run_path, finding_id, len(matches), listing,
+            )
+        )
+    return data, matches[0]
 
 
 def _atomic_write_json(path, data):
@@ -556,24 +607,22 @@ def cmd_defer(args, repo_root):
             file=sys.stderr,
         )
         return 1
-
-    record = Record(type="deferral", fields={
-        "title": args.title,
-        "why": args.why,
-        "from": args.from_ or "user",
-        "follow-up": args.follow_up,
-    })
-
-    defects = validate(record)
-    if defects:
-        _print_lines(defects, sys.stderr)
+    if args.occurrence is not None and not args.run:
+        print(
+            "defer: --occurrence selects among the staged deferrals in a "
+            "run.json that share one finding id — it means nothing without "
+            "--run/--finding-id.",
+            file=sys.stderr,
+        )
         return 1
 
     run_data = None
     run_entry = None
     if args.run:
         try:
-            run_data, run_entry = _load_run_json_entry(args.run, args.finding_id)
+            run_data, run_entry = _load_run_json_entry(
+                args.run, args.finding_id, args.occurrence,
+            )
         except SchemaError as e:
             print(str(e), file=sys.stderr)
             return 1
@@ -589,10 +638,15 @@ def cmd_defer(args, repo_root):
         # while a run is in progress (forge-run.py/forge_receipts.py write
         # it, forge-monitor.py/forge_status.py read it), and writing
         # another process's live artifact is not something to allow by
-        # convention alone. ``forge_status.is_terminal`` is the one
-        # definition of the status vocabulary's terminal/non-terminal
-        # split (built on its own ``_STATE_MAP``) — imported here, inside
-        # the function, rather than at module level, so this runner
+        # convention alone. ``forge_status`` owns BOTH runner-facing
+        # definitions this function needs, so it is imported once, here:
+        # ``is_terminal``, the one definition of the status vocabulary's
+        # terminal/non-terminal split (built on its own ``_STATE_MAP``),
+        # and ``deferral_provenance``, the one definition of what a
+        # runner-staged deferral's ``from`` records — shared with the
+        # template ``--status`` emits, so the value that template
+        # advertises and the value a filing actually records cannot drift.
+        # Inside the function rather than at module level so this runner
         # concern is pulled in only on the ``--run`` path and never adds
         # to every other forge_memory invocation's (or forge_lint's)
         # startup cost.
@@ -608,6 +662,33 @@ def cmd_defer(args, repo_root):
                 file=sys.stderr,
             )
             return 1
+
+    if args.from_:
+        provenance = args.from_
+    elif run_entry is not None:
+        # A --run filing is by definition a runner-staged deferral that
+        # came through the close-out review gate. Defaulting it to "user"
+        # — the marker the spec reserves for a deferral a human asked for
+        # directly, which SKIPS that gate — would misrecord the one field
+        # that says where the deferral came from. ``forge_status`` is
+        # already imported above, on this same ``--run`` path.
+        provenance = forge_status.deferral_provenance(
+            run_data.get("plan"), run_entry, args.run,
+        )
+    else:
+        provenance = "user"
+
+    record = Record(type="deferral", fields={
+        "title": args.title,
+        "why": args.why,
+        "from": provenance,
+        "follow-up": args.follow_up,
+    })
+
+    defects = validate(record)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
 
     try:
         store = fms.select_store(repo_root, "deferral")
@@ -663,8 +744,12 @@ def cmd_list_deferrals(args, repo_root):
         print(str(e), file=sys.stderr)
         return 1
     if errors:
+        # ``ref`` means different things per store — an issue number for
+        # GitHubStore, a LINE NUMBER for FileStore — so a bare "#{ref}"
+        # prefix rendered a file's line 1 as "#1", which reads as issue 1.
+        # The store names its own refs.
         _print_lines(
-            ["#{}: {}".format(ref, msg) for ref, msg in errors],
+            ["{}: {}".format(store.describe_ref(ref), msg) for ref, msg in errors],
             sys.stderr,
         )
         return 1
@@ -695,13 +780,14 @@ def _issue_fmt_defects(store):
     either from ``errors`` directly or via the record's ``.ref``."""
     records, parse_errors = store.scan("deferral", state="open")
     defects = [
-        "issue #{}: {}".format(ref, msg) for ref, msg in parse_errors
+        "{}: {}".format(store.describe_ref(ref), msg) for ref, msg in parse_errors
     ]
     for record in records:
         for msg in validate(record):
             defects.append(
-                "issue #{}: deferral {!r}: {}".format(
-                    record.ref, record.fields.get("title", "?"), msg,
+                "{}: deferral {!r}: {}".format(
+                    store.describe_ref(record.ref),
+                    record.fields.get("title", "?"), msg,
                 )
             )
     return defects
@@ -974,6 +1060,15 @@ def build_parser():
         "--finding-id", dest="finding_id",
         help="Id of the staged deferral in --run's run.json to record the "
              "filed issue number into. Requires --run.",
+    )
+    p.add_argument(
+        "--occurrence", dest="occurrence", type=int,
+        help="1-based ordinal among the staged deferrals sharing "
+             "--finding-id. Reviewer finding ids are per-review and are not "
+             "unique across a run; when two staged deferrals carry the same "
+             "id, this says which one is being filed (both can be). "
+             "Requires --run/--finding-id; an ambiguous id without it is "
+             "refused, never guessed at.",
     )
     p.set_defaults(func=cmd_defer)
 

@@ -14,12 +14,23 @@ to be longer. 20 of 25 cannot be migrated mechanically — migration is authorsh
 
 ## Flow
 
-Unchanged during a run. Only close-out changes.
+Close-out changes; the runner changes in two narrow ways, both required by contracts
+below that it alone can satisfy.
+
+- **The runner stages a task number** with each defer-disposition finding. `from` is
+  specified as plan path **plus task number**; nothing downstream can recover which
+  task produced a finding, so the runner must record it at staging time.
+- **The runner reads prior deferrals back on resume**, the way `_read_seeded_findings`
+  already does for seeded findings. Otherwise a resumed run's terminal write replaces
+  `deferrals` with only the current invocation's entries, erasing earlier staged
+  deferrals and their recorded `issue` numbers.
 
 - **Codex** — `forge-run.py` aggregates `defer`-disposition findings into `run.json`
   under `deferrals`, exactly as today. The runner **never files an issue** and never
   writes a durable record. At completion it **stages and emits**: prints each staged
-  deferral plus a ready-to-run `forge_memory.py defer` command.
+  deferral plus a `forge_memory.py defer` command template — every flag filled
+  in except `--title`/`--why`, which are visible placeholders for the reviewer
+  to author (see the 2026-09-05 note below).
 - **Claude** — the orchestrator holds `defer` findings in context as today (dispatch and
   inline alike), presents them at close-out, and files accepted ones by invoking
   `forge_memory.py defer`. It never writes an issue body or a file directly.
@@ -58,7 +69,24 @@ request already carries it. `follow-up` is whatever the user states, defaulting 
 
 ## Staging and idempotency
 
-- Staged shape in `run.json` is the existing finding dict. No new runner fields.
+- Staged shape in `run.json` is the existing finding dict plus the stage that
+  produced it: `task_number: N` for a per-task finding, `stage: "final-review"`
+  for one the plan-level final review raised. A final-review finding belongs to
+  no single task, so its `from` reads `<plan>, final review` — named rather than
+  collapsed to a bare plan path, and never given an invented task number.
+- A resumed run re-reports findings from the task it re-runs. An entry is
+  skipped only when the PRIOR invocation already staged one with the same
+  `(task_number, stage, id)` — task 1's `F1` and task 2's `F1` are different
+  deferrals and both are kept. Within one invocation staging is lossless:
+  every `defer` finding a verdict raised is staged, none collapsed.
+- A reviewer verdict naming two findings with one id is malformed and is
+  rejected (retry once, then contract error), like a duplicate coverage id.
+  Ids are unique within a verdict, never namespaced across a run.
+- Staged deferrals persist across a resume. A deferral, once staged, is never lost and
+  never re-emitted as unfiled once it carries an `issue`.
+- `--occurrence` selects among entries sharing a finding id by ordinal position. That
+  key is only sound because the list persists across invocations — it depends on the
+  resume rule above, not merely on the runner writing the list once.
 - On filing, the issue number is recorded back into `run.json` under the deferral's
   `issue` key.
 - Close-out re-run skips any staged deferral carrying an `issue`. Filing is idempotent
@@ -152,3 +180,5 @@ Dated per the current convention. Phase 5 de-dates and migrates it.
 
 2026-09-05: D1's fix made uniform across both stores (scan/list) — a GitHubStore-only tuple return forced isinstance branching at call sites and contradicted the Phase 1 Stores contract (Task 1 review, issue #44).
 2026-09-05: halted runs may file — is_terminal gates on write safety, not clean completion; acceptance grep permits a retirement notice naming the retired path (Task 4 review, issue #44).
+2026-09-05: the emitted `defer` command is a fill-in template, not a runnable command — `--title`/`--why` are placeholders. It carries `--from` (plan path, plus `, Task N` when the staged entry records one), since an omitted `--from` files as `from: user`, the marker reserved for deferrals that skip this gate; and `--occurrence N` when two staged deferrals share a finding id, so both can be filed and neither is attributed to the other's finding — an ambiguous id without it is refused, never guessed (Phase 2 final review, issue #44).
+2026-09-05: the runner is NOT unchanged — it must stage a task number (nothing downstream can recover it) and persist deferrals across a resume (or staged entries and their issue numbers are erased). Both surfaced by the final review; the original claim that forge-run.py needed no change was wrong (issue #44).

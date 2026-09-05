@@ -93,6 +93,31 @@ def _read_seeded_findings(run_dir):
         return None
 
 
+def _read_deferrals(run_dir):
+    """The ``deferrals`` list from an existing ``run.json``, or ``None`` when
+    absent — the resume counterpart of ``_read_seeded_findings``, and required
+    for the same reason plus a stronger one.
+
+    ``run_plan``'s deferral accumulator starts empty every invocation, and a
+    resume ``continue``s past an already-passed task before that task's
+    findings are ever aggregated, so the terminal write would otherwise
+    replace ``deferrals`` with only the current invocation's entries. That
+    erases earlier staged deferrals outright, and with them any ``issue``
+    numbers ``forge_memory.py defer --run`` already recorded onto them — so a
+    filed deferral would come back as unfiled and be filed a second time.
+
+    Reading the prior list back and appending to it is also what makes
+    ``forge_memory.py defer --occurrence`` sound: that selector is an ORDINAL
+    into this list, so the list has to name the same entries in the same order
+    on every invocation, not merely be written once."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("deferrals")
+    except (OSError, ValueError):
+        return None
+
+
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,

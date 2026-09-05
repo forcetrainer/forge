@@ -290,6 +290,42 @@ def render_status(state):
     return "\n".join(lines)
 
 
+def deferral_provenance(plan, entry, run_json_path):
+    """The ``from`` field value for a runner-staged deferral: the plan the
+    run executed, plus the stage that produced the entry — the
+    ``"<plan>, Task N"`` shape ``skills/project-memory`` documents.
+
+    One definition, used by both sides of the seam: the template
+    ``render_staged_deferrals`` emits, and ``forge_memory.py defer``'s own
+    derivation when a ``--run`` filing omits ``--from``. The one value it
+    must never produce is ``user``, which the spec reserves for a deferral
+    a human asked for directly (no close-out gate) — so when run.json
+    records no plan, the fallback is the run.json path itself: still real
+    provenance, and still not a claim that a human initiated it. That
+    fallback is normalized to an absolute path because the two callers
+    reach it by different routes — ``render_staged_deferrals`` derives it
+    from the run dir, ``cmd_defer`` uses the path the user typed at
+    ``--run`` — and one definition that returned two different strings for
+    the same file would defeat the point of there being one.
+
+    A staged entry is the runner's finding dict (``forge_common.
+    finding_to_dict``) plus the stamp ``forge-run.py``'s ``stage_deferrals``
+    adds. A per-task entry carries ``task_number`` (a bare ``task`` is also
+    accepted). A final-review entry belongs to no single task, so it carries
+    ``stage: "final-review"`` instead and reads ``"<plan>, final review"`` —
+    named, rather than collapsing to a bare plan path indistinguishable from
+    a task entry, and never given an invented task number."""
+    source = plan or os.path.abspath(run_json_path)
+    task = entry.get("task_number")
+    if task is None:
+        task = entry.get("task")
+    if task is not None and str(task).strip() != "":
+        return "{}, Task {}".format(source, task)
+    if entry.get("stage") == "final-review":
+        return "{}, final review".format(source)
+    return str(source)
+
+
 def render_staged_deferrals(state, run_json_path):
     """The close-out review surface for `state["deferrals"]`: one block per
     staged deferral.
@@ -311,16 +347,36 @@ def render_staged_deferrals(state, run_json_path):
     authorship happens at the review gate, by a human or an LLM holding
     judgment this module doesn't have.
 
-    ``run_json_path`` and each finding id are shlex-quoted before being
-    interpolated into the emitted command, so the line is safe to paste even
-    when a path or id carries a space, quote, or newline."""
+    The command carries ``--from`` explicitly. ``forge_memory.py defer``
+    defaults an omitted ``from`` to ``user``, and ``from: user`` is the
+    value the spec reserves for a deferral a human asked for directly —
+    one that deliberately SKIPS this review gate. A template that omitted
+    the flag would therefore file every runner-staged deferral under the
+    one provenance it certainly does not have; ``deferral_provenance``
+    supplies the real one from the run itself.
+
+    ``--occurrence`` is emitted only for a finding id that more than one
+    staged entry shares. Finding ids are reviewer-authored per review and
+    never namespaced, so a run's ``deferrals`` list can hold two entries
+    with id ``F1``; the ordinal is what tells ``defer`` which of them a
+    command means, so both can be filed and neither is attributed to the
+    other's finding.
+
+    ``run_json_path``, each finding id, and the provenance value are
+    shlex-quoted before being interpolated into the emitted command, so the
+    line is safe to paste even when a path or id carries a space, quote, or
+    newline."""
     deferrals = state.get("deferrals") or []
     if not deferrals:
         return []
 
+    all_ids = [e.get("id", "?") for e in deferrals]
+    seen = {}
+
     lines = []
     for entry in deferrals:
         finding_id = entry.get("id", "?")
+        seen[finding_id] = seen.get(finding_id, 0) + 1
         summary = (entry.get("summary") or "").strip()
         lines.append("deferral {}:".format(finding_id))
         lines.append("  {}".format(summary))
@@ -328,12 +384,21 @@ def render_staged_deferrals(state, run_json_path):
         if issue is not None:
             lines.append("  filed as issue #{}".format(issue))
         else:
-            lines.append(
+            command = (
                 "  forge_memory.py defer --title <title> --why <why> "
-                "--follow-up backlog --run {} --finding-id {}".format(
-                    shlex.quote(run_json_path), shlex.quote(finding_id)
+                "--follow-up backlog --from {} --run {} --finding-id {}".format(
+                    shlex.quote(
+                        deferral_provenance(
+                            state.get("plan"), entry, run_json_path,
+                        )
+                    ),
+                    shlex.quote(run_json_path),
+                    shlex.quote(finding_id),
                 )
             )
+            if all_ids.count(finding_id) > 1:
+                command += " --occurrence {}".format(seen[finding_id])
+            lines.append(command)
         lines.append("")
     if lines and lines[-1] == "":
         lines.pop()

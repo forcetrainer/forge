@@ -35,8 +35,9 @@ forge_memory.py defer --title "Skipped retry backoff on the sync client" \
 forge_memory.py list-deferrals
 ```
 
-`title` (≤80 chars), `why` (≤300 chars), `from` (plan path + task number, or
-`user`), `follow-up` (`backlog` — the issue stays open — or `drop`, or
+`title` (≤80 chars), `why` (≤300 chars), `from` (plan path plus the stage
+that produced it — `, Task N`, or `, final review` for a finding the
+plan-level final review raised — or `user`), `follow-up` (`backlog` — the issue stays open — or `drop`, or
 `revisit-when:<condition>`; `roadmap` is retired along with `ROADMAP.md`'s
 role as a deferral destination) are the record's fields; budget overrun is a
 hard error, not a truncation.

@@ -180,21 +180,73 @@ accepts, i.e. anything but a run still in progress — `forge-run.py --status`
 stages and emits: for each staged deferral it prints the finding id, its
 full untruncated summary, and — unless the entry already carries a recorded
 `issue` (meaning `forge_memory.py defer --run ... --finding-id ...` already
-filed it) — a ready-to-run template:
+filed it) — a **fill-in-the-blanks** command template, not a ready-to-run
+command:
 
 ```
 forge_memory.py defer --title <title> --why <why> --follow-up backlog \
-  --run <run.json> --finding-id <id>
+  --from <plan path[, Task N]> --run <run.json> --finding-id <id> [--occurrence N]
 ```
 
-`<title>` and `<why>` are left as visible placeholders; this module never
-fabricates them — a reviewer summary runs 100–200 chars against the
-deferral schema's 80-char title budget, and budget overrun is an error, not
-a truncation, so authoring within budget takes judgment the runner doesn't
-have. A human or an agent fills in `--title`/`--why` and runs the command,
-which invokes `forge_memory.py defer` to file the issue and records the
-resulting issue number back into that finding's `run.json` entry (via
-`--run`/`--finding-id`), so a repeated close-out never double-files.
+`<title>` and `<why>` are emitted literally, as visible placeholders; this
+module never fabricates them — a reviewer summary runs 100–200 chars against
+the deferral schema's 80-char title budget, and budget overrun is an error,
+not a truncation, so authoring within budget takes judgment the runner
+doesn't have. **The command as emitted does not run**: `<title>` and `<why>`
+are not values. A human or an agent replaces those two placeholders with
+authored text and then runs it; every other flag is already filled in with a
+real value and must be left alone. Running it invokes `forge_memory.py
+defer`, which files the issue and records the resulting issue number back
+into that finding's `run.json` entry (via `--run`/`--finding-id`), so a
+repeated close-out never double-files.
+
+**Staged deferrals survive a resume.** Like `seeded_findings` and unlike
+`threads`, `run.json`'s `deferrals` list **is read back** at the start of
+every invocation (`_read_deferrals`) and only ever appended to. A resume
+skips past every already-passed task before its findings are aggregated, so
+an accumulator that started empty would have the terminal write replace the
+list with just this invocation's entries — erasing earlier staged deferrals
+and the `issue` numbers already filed against them, which would re-emit a
+filed deferral as unfiled and file it twice. That read-back is the ONLY
+thing the dedupe covers: an entry is skipped when the PRIOR invocation
+already staged one with the same key — `(task_number, stage, id)`, so
+task 1's `F1` and task 2's `F1` are two different deferrals and both are
+kept. Within a single invocation staging is lossless: every `defer`
+finding a verdict raised is appended, none collapsed. This is also what
+makes `--occurrence` sound: positions are append-only, so an ordinal names
+the same entry on every re-run.
+
+**Duplicate finding ids are a malformed verdict.** `validate_finding_ids`
+(`forge_dispose.py`) rejects a verdict naming two findings with one id, on
+every review kind and with or without a checklist, through the same
+retry-once-then-contract-error path as coverage and location defects. The
+id is the runner's only handle on a finding — `carried_ids`/`resolved_ids`
+convergence tracking, `convergence: "resolved"` matching, and the staged
+deferral `defer --finding-id` selects — so a collision inside one verdict
+makes all of them ambiguous. Ids stay deliberately un-namespaced ACROSS a
+run; only within one verdict must they be unique.
+
+`--from` is emitted filled in, carrying the run's own provenance: the plan
+path, plus the stage that produced the finding — `, Task N` for a per-task
+finding, and `, final review` for a final-review one, which belongs to no
+single task and is never given an invented task number. The runner stamps
+that stage onto the entry at staging time (`stage_deferrals`), because a
+reviewer finding dict carries no task of its own and nothing downstream can
+recover which task produced it. A bare
+`defer` defaults `from` to `user` — the value reserved for a deferral a
+human asked for directly, which deliberately skips this review gate — so a
+runner-staged deferral must never be filed under it. `defer --run` derives
+the same provenance itself when `--from` is omitted, through the one
+function that renders it here (`forge_status.deferral_provenance`), so what
+the template advertises and what a filing records cannot drift apart.
+
+`--occurrence N` appears only when two or more staged deferrals share one
+finding id. Reviewer finding ids are authored per review and are not
+namespaced across a run, so `F1` can legitimately name two entries; the
+ordinal says which one a command means, so both can be filed and neither is
+attributed to the other's finding. Filing an ambiguous id without it is
+refused, loudly and by name — never resolved by guessing.
+
 `follow-up` defaults to `backlog` for every runner-generated deferral —
 `--status` never emits a template guessing `drop` or `revisit-when:<condition>`.
 An autonomous Codex run that reaches a terminal state ends with its
