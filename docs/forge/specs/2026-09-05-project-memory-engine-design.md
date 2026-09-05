@@ -84,7 +84,13 @@ forge_memory.py list-deferrals [--json]
 forge_memory.py resolve-deferral --ref <issue-number|slug> --reason <text>
 
 forge_memory.py fmt [--check | --write] [PATH ...]
+
+forge_memory.py install-guards [--pre-commit] [--ci]
 ```
+
+`install-guards` installs the layer-2 pre-commit hook and the layer-3 CI workflow.
+Neither runs by default; no other forge stage invokes it. Installation is always
+explicit, per "on request" in the enforcement table.
 
 **Composition contract:** the CLI builds every record from typed arguments. It accepts
 no free-form body and never reads existing entries to derive format. `--help` is the
@@ -188,3 +194,8 @@ rewrite (Phase 4); spec de-dating and migration (Phase 5).
 
 This spec is dated per the current convention. Phase 5 de-dates and migrates it with
 the rest of `docs/forge/specs/`.
+
+## Changelog
+
+2026-09-05: added `install-guards` to the CLI surface — layers 2 and 3 required an
+explicit installation path that the original CLI list omitted (planning, issue #43).
