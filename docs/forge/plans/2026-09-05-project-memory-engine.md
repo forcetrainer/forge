@@ -124,6 +124,10 @@ forge_memory.py list-deferrals [--json]
 forge_memory.py resolve-deferral --ref <issue-number|slug> --reason <text>
 forge_memory.py fmt [--check | --write] [PATH ...]
 ```
+With no `PATH` argument, `fmt` covers all managed files **and**, when the GitHub store
+is selected, every open `forge:deferral` issue body — fetched via `GitHubStore.list`
+and checked through the same `parse` + `validate` path as a file. Explicit `PATH`
+arguments restrict it to those files and skip issues.
 `main(argv) -> int`; exit 0 on success, non-zero on any validation or store failure.
 
 **Tests:**
@@ -138,6 +142,11 @@ forge_memory.py fmt [--check | --write] [PATH ...]
 - `list-*` `--json` emits parseable JSON; without it, human-readable text.
 - `fmt` with neither `--check` nor `--write` exits non-zero.
 - `fmt --check` exits non-zero on a drifted file and zero on a canonical one.
+- `fmt --check` with no PATH argument checks managed files and open `forge:deferral`
+  issue bodies; a drifted issue body exits non-zero and names the issue number.
+- A budget-overrunning but parsable issue body is reported, not only an unparsable one.
+- `fmt --check` with explicit PATH arguments does not call `gh` at all.
+- `fmt --check` with no PATH under the file store does not call `gh`.
 
 **Acceptance:** `python3 -m pytest tests/test_forge_memory.py -q` passes; `python3 scripts/forge_memory.py --help` exits 0.
 
