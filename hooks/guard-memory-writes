@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# forge PreToolUse guard hook.
+# Denies direct Edit/Write/MultiEdit to forges managed memory files
+# (docs/forge/constraints.md always; docs/forge/deferrals.md only when the
+# repo has opted into the file-backed deferral store), redirecting the
+# agent to the forge_memory.py CLI instead. This is the fast-feedback
+# layer, not the guarantee -- it cannot see Bash writes or Codex, and
+# forge_lint fmt --check (a separate, harness-agnostic layer) is what
+# actually enforces the schema. Emits nothing and exits 0 whenever it is
+# not denying, including on any internal failure: a hook that blocks on
+# its own failure would break every Edit in the repo, so this is the one
+# place in forge where silent tolerance is the deliberate, correct choice.
+#
+# This hook is plugin-level: it fires on every Edit/Write/MultiEdit in
+# every repo where forge is installed, whether or not that repo uses the
+# forge flow. So the signal-directory walk -- reused from
+# hooks/session-start, same signal directories, same stopping rule at the
+# git root -- runs FIRST, in plain bash, before stdin is even read. Only
+# when a signal is found do we pay for reading the payload, writing a
+# temp file, and spawning python3. In a non-forge repo this hook is a
+# handful of stat calls and nothing else, matching session-start's own
+# near-zero cost in that case.
+#
+# The walk starts from this hook's own $PWD, not from the (not yet
+# parsed) tool_input.file_path -- parsing JSON requires python3, which is
+# exactly the cost we are trying to avoid paying unconditionally. A
+# file_path that names a location outside $PWD's tree is an accepted
+# edge here, same as it already is for session-start.
+
+set -uo pipefail
+# Note: no -e. A failure anywhere below (bad json, missing python3, a
+# read error) must fall through to the final exit 0, never abort the
+# script mid-way in a state that could be mistaken for a deny.
+
+dir="$PWD"
+signal=""
+marker=""
+while :; do
+    if [ -d "$dir/docs/forge" ]; then
+        signal="$dir"; marker="docs/forge"; break
+    fi
+    if [ -d "$dir/.forge" ]; then
+        signal="$dir"; marker=".forge"; break
+    fi
+    if [ -d "$dir/docs/theforge" ]; then
+        signal="$dir"; marker="docs/theforge"; break
+    fi
+    if [ -d "$dir/.theforge" ]; then
+        signal="$dir"; marker=".theforge"; break
+    fi
+    [ -d "$dir/.git" ] && break   # stop at repo root
+    parent="$(dirname "$dir")"
+    [ "$parent" = "$dir" ] && break
+    dir="$parent"
+done
+
+if [ -z "$signal" ]; then
+    # Not a forge repo. Drain stdin so the caller never sees a broken
+    # pipe from us exiting before it finishes writing, then exit clean --
+    # no python3, no temp file, no output.
+    cat >/dev/null 2>&1 || true
+    exit 0
+fi
+
+payload="$(cat)"
+
+# The matching logic is delegated to python3, which is already a hard
+# dependency of this repo (scripts/forge_memory.py itself is python3) and
+# gives us robust JSON parsing, path resolution, and filesystem-identity
+# comparison in one place. The python source is written to a temp file
+# rather than piped in via a heredoc nested inside command substitution --
+# that combination trips a bash parser quirk on quote characters
+# appearing in the heredoc body.
+pyfile="$(mktemp "${TMPDIR:-/tmp}/forge-guard-XXXXXX" 2>/dev/null)" || exit 0
+trap 'rm -f "$pyfile"' EXIT
+
+cat <<'PYEOF' > "$pyfile"
+import json
+import os
+import sys
+
+
+def emit_deny(reason):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+
+
+def probe_case_insensitive(existing_dir):
+    """existing_dir is a real, already-existing directory -- the forge
+    signal marker directory itself (docs/forge, .forge, docs/theforge, or
+    .theforge), guaranteed to exist because the bash gate only reaches
+    here after finding it. Flip the case of its final path component and
+    check via os.path.samefile whether the flipped spelling resolves to
+    the same directory. That is the only safe way to learn whether the
+    filesystem folds case (as APFS does by default) without assuming it
+    either way. Returns False -- assume case-sensitive, the default that
+    can never produce a false deny -- when the basename has no case to
+    flip, or the probe itself fails for any reason."""
+    existing_dir = existing_dir.rstrip(os.sep)
+    parent, base = os.path.split(existing_dir)
+    flipped = base.swapcase()
+    if not parent or flipped == base:
+        return False
+    variant = os.path.join(parent, flipped)
+    try:
+        return os.path.exists(variant) and os.path.samefile(variant, existing_dir)
+    except OSError:
+        return False
+
+
+def matches_managed(resolved, managed_path, marker_dir):
+    """Identity, not string equality: on a case-insensitive filesystem
+    (APFS by default) docs/forge/Constraints.md and
+    docs/forge/constraints.md are the SAME file, and a naive string
+    compare misses that entirely. When managed_path already exists,
+    os.path.samefile settles it correctly on both case-sensitive and
+    case-insensitive filesystems. When it does not exist yet (no
+    constraint has been written), there is nothing to call samefile on,
+    so we fall back to a case-insensitive compare ONLY where
+    probe_case_insensitive confirms the filesystem actually folds case --
+    never lowercase unconditionally, since that would falsely deny an
+    edit to a distinctly-cased, unrelated file on a case-sensitive
+    filesystem (e.g. Linux), and a false deny here is worse than a missed
+    one: forge_lint (layer 2) still catches what this layer misses, but
+    nothing rescues a user who cannot edit their own file."""
+    if os.path.exists(managed_path):
+        try:
+            return os.path.exists(resolved) and os.path.samefile(resolved, managed_path)
+        except OSError:
+            return False
+    if probe_case_insensitive(marker_dir):
+        # os.path.normcase is a no-op on POSIX -- it only folds case on
+        # Windows -- so it would silently do nothing here and leave this
+        # branch equivalent to plain string equality, the exact bypass
+        # this function exists to close. Fold explicitly instead. Do not
+        # "simplify" this back to normcase; it looks more idiomatic and
+        # is wrong on macOS and Linux.
+        return resolved.lower() == managed_path.lower()
+    return resolved == managed_path
+
+
+def main():
+    cwd, signal, marker_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return
+
+    tool_name = payload.get("tool_name")
+    if tool_name not in ("Edit", "Write", "MultiEdit"):
+        return
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return
+
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return
+
+    payload_cwd = payload.get("cwd")
+    base = payload_cwd if isinstance(payload_cwd, str) and payload_cwd else cwd
+    # os.path.realpath (not just normpath) so that a symlinked tmpdir or a
+    # /var-vs-/private/var style alias -- the payload's cwd and this
+    # hook's own $PWD can each spell the same directory differently --
+    # collapses to one canonical form before comparison. It resolves
+    # symlinks in whatever prefix of the path already exists and leaves
+    # a not-yet-existing leaf (e.g. a constraints.md not yet written)
+    # untouched, which is exactly the granularity matches_managed needs.
+    resolved = os.path.realpath(os.path.normpath(os.path.join(base, file_path)))
+
+    constraints_path = os.path.realpath(os.path.normpath(
+        os.path.join(signal, "docs", "forge", "constraints.md")
+    ))
+    if matches_managed(resolved, constraints_path, marker_dir):
+        emit_deny(
+            "docs/forge/constraints.md is machine-managed. Use "
+            "scripts/forge_memory.py add-constraint or "
+            "retire-constraint instead of editing it directly."
+        )
+        return
+
+    deferrals_path = os.path.realpath(os.path.normpath(
+        os.path.join(signal, "docs", "forge", "deferrals.md")
+    ))
+    if matches_managed(resolved, deferrals_path, marker_dir):
+        config_path = os.path.join(signal, "docs", "forge", "config.json")
+        file_backed = False
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    config = json.load(f)
+                file_backed = (
+                    isinstance(config, dict)
+                    and isinstance(config.get("deferrals"), dict)
+                    and config["deferrals"].get("store") == "file"
+                )
+            except Exception:
+                file_backed = False
+        if file_backed:
+            emit_deny(
+                "docs/forge/deferrals.md is machine-managed. Use "
+                "scripts/forge_memory.py defer or resolve-deferral "
+                "instead of editing it directly."
+            )
+        return
+
+
+main()
+PYEOF
+
+output="$(printf '%s' "$payload" | python3 "$pyfile" "$PWD" "$signal" "$signal/$marker" 2>/dev/null)"
+
+if [ -n "$output" ]; then
+    printf '%s\n' "$output"
+fi
+exit 0
