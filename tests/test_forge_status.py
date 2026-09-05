@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -306,20 +307,217 @@ class RenderStatusTests(unittest.TestCase):
             self.assertIn("HALTED", out)
             self.assertIn("scope-decision", out)
 
-    def test_render_shows_deferrals_count_and_summaries(self):
+    def test_render_shows_deferrals_count_and_summaries_on_running_run(self):
+        # Terse one-liner is for a run still in progress — a terminal run
+        # gets the full staged-deferrals block instead (see the two tests
+        # below), never both.
         with tempfile.TemporaryDirectory() as d:
             deferrals = [{"summary": "unused import"}, {"summary": "dead comment"}]
-            _write_run(d, "passed", [_summary(1, "passed")], deferrals=deferrals)
+            _write_run(d, "running", [_summary(1, "passed")], deferrals=deferrals)
             out = forge_status.render_status(forge_status.read_run_state(d))
             self.assertIn("deferrals: 2", out)
             self.assertIn("unused import", out)
             self.assertIn("dead comment", out)
+
+    def test_terminal_run_shows_full_block_not_terse_line(self):
+        # A terminal run must show each deferral exactly once — the full
+        # staged block, never the terse "deferrals: N — ..." prefix too
+        # (that would restate every summary twice, in two truncations).
+        with tempfile.TemporaryDirectory() as d:
+            deferrals = [
+                {"id": "f1", "summary": "unused import"},
+                {"id": "f2", "summary": "dead comment"},
+            ]
+            _write_run(d, "passed", [_summary(1, "passed")], deferrals=deferrals)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertNotIn("deferrals: 2", out)
+            self.assertEqual(out.count("unused import"), 1)
+            self.assertEqual(out.count("dead comment"), 1)
+            self.assertIn("forge_memory.py defer", out)
+
+    def test_running_run_unaffected_by_terminal_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            deferrals = [{"summary": "unused import"}]
+            _write_run(d, "running", [_summary(1, "passed")], deferrals=deferrals)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("deferrals: 1 — unused import", out)
+            self.assertNotIn("forge_memory.py defer", out)
 
     def test_render_no_deferrals_line_when_absent(self):
         with tempfile.TemporaryDirectory() as d:
             out = forge_status.render_status(
                 self._state(d, "passed", [_summary(1, "passed")]))
             self.assertNotIn("deferrals", out)
+
+
+class RenderStagedDeferralsTests(unittest.TestCase):
+    """``render_staged_deferrals`` — the close-out review surface. It must never
+    fabricate a ``--title``/``--why``: a reviewer finding summary runs
+    100-200 chars against the deferral schema's 80-char title budget, and this
+    module has no way to author prose within budget, so it emits a runnable
+    ``forge_memory.py defer`` command template with those two flags left as
+    visible placeholders, plus the full untruncated summary above it so a
+    human or LLM at the review gate has the material to write from."""
+
+    def _run_json(self, d, deferrals):
+        path = os.path.join(d, "run.json")
+        with open(path, "w") as f:
+            json.dump({"deferrals": deferrals}, f)
+        return path
+
+    def test_no_deferrals_renders_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [])
+            state = forge_status.read_run_state(d)
+            self.assertEqual(forge_status.render_staged_deferrals(state, run_path), [])
+
+    def test_no_deferrals_leaves_status_output_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "passed", [_summary(1, "passed")])
+            state = forge_status.read_run_state(d)
+            before = forge_status.render_status(state)
+            run_path = os.path.join(d, "run.json")
+            forge_status.render_staged_deferrals(state, run_path)
+            after = forge_status.render_status(state)
+            self.assertEqual(before, after)
+
+    def test_staged_deferral_renders_runnable_defer_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            summary = "x" * 150
+            run_path = self._run_json(d, [{"id": "f1", "summary": summary}])
+            state = forge_status.read_run_state(d)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            text = "\n".join(lines)
+            self.assertIn("f1", text)
+            self.assertIn(summary, text)
+            self.assertIn("forge_memory.py defer", text)
+            self.assertIn("--follow-up backlog", text)
+            self.assertIn("--run {}".format(shlex.quote(run_path)), text)
+            self.assertIn("--finding-id {}".format(shlex.quote("f1")), text)
+
+    def test_command_uses_title_and_why_placeholders_not_fabrications(self):
+        with tempfile.TemporaryDirectory() as d:
+            summary = "y" * 120
+            run_path = self._run_json(d, [{"id": "f1", "summary": summary}])
+            state = forge_status.read_run_state(d)
+            text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
+            self.assertIn("--title", text)
+            self.assertIn("--why", text)
+            # The summary itself (fabrication material) must never land
+            # inside the --title/--why flag values of the emitted command.
+            command_lines = [l for l in text.splitlines() if "forge_memory.py defer" in l]
+            self.assertTrue(command_lines)
+            for line in command_lines:
+                self.assertNotIn(summary, line)
+
+    def test_filed_entry_renders_filed_with_issue_number_and_no_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(
+                d, [{"id": "f1", "summary": "already filed thing", "issue": "42"}]
+            )
+            state = forge_status.read_run_state(d)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            text = "\n".join(lines)
+            self.assertIn("f1", text)
+            self.assertIn("42", text)
+            self.assertNotIn("forge_memory.py defer", text)
+
+    def test_mixed_run_renders_command_only_for_unfiled(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(d, [
+                {"id": "already-done", "summary": "already done", "issue": "7"},
+                {"id": "still-pending", "summary": "still pending"},
+            ])
+            state = forge_status.read_run_state(d)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            text = "\n".join(lines)
+            defer_commands = [l for l in text.splitlines() if "forge_memory.py defer" in l]
+            self.assertEqual(len(defer_commands), 1)
+            self.assertIn("still-pending", defer_commands[0])
+            self.assertNotIn("already-done", defer_commands[0])
+
+    def test_issue_key_presence_detected_regardless_of_looking_numeric(self):
+        # Task 2 pins ``issue`` as a string deliberately (FileStore refs are
+        # not numeric) — detection must be presence-of-key, never a type or
+        # numeric check.
+        with tempfile.TemporaryDirectory() as d:
+            run_path = self._run_json(
+                d, [{"id": "f1", "summary": "a file-store backed ref", "issue": "deferral-f1-slug"}]
+            )
+            state = forge_status.read_run_state(d)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            text = "\n".join(lines)
+            self.assertIn("deferral-f1-slug", text)
+            self.assertNotIn("forge_memory.py defer", text)
+
+    def test_emitted_values_with_spaces_quotes_newlines_are_quoted(self):
+        with tempfile.TemporaryDirectory() as d:
+            tricky_dir = os.path.join(d, "has space's \"quote\"")
+            os.makedirs(tricky_dir)
+            run_path = self._run_json(
+                tricky_dir, [{"id": "weird id\nwith newline", "summary": "z" * 110}]
+            )
+            state = forge_status.read_run_state(tricky_dir)
+            lines = forge_status.render_staged_deferrals(state, run_path)
+            text = "\n".join(lines)
+            self.assertIn("forge_memory.py defer", text)
+            self.assertIn(shlex.quote(run_path), text)
+            self.assertIn(shlex.quote("weird id\nwith newline"), text)
+
+    def test_rendering_makes_no_gh_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            stub_dir = os.path.join(d, "stub-bin")
+            os.makedirs(stub_dir)
+            marker = os.path.join(d, "gh-was-called")
+            gh_stub = os.path.join(stub_dir, "gh")
+            with open(gh_stub, "w") as f:
+                f.write("#!/bin/sh\ntouch \"{}\"\nexit 1\n".format(marker))
+            os.chmod(gh_stub, 0o755)
+
+            run_path = self._run_json(d, [{"id": "f1", "summary": "z" * 110}])
+            state = forge_status.read_run_state(d)
+
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = stub_dir + os.pathsep + old_path
+            try:
+                forge_status.render_staged_deferrals(state, run_path)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertFalse(
+                os.path.exists(marker), "render_staged_deferrals must never invoke gh"
+            )
+
+    def test_forge_run_clean_run_invokes_gh_zero_times(self):
+        with tempfile.TemporaryDirectory() as d:
+            stub_dir = os.path.join(d, "stub-bin")
+            os.makedirs(stub_dir)
+            marker = os.path.join(d, "gh-was-called")
+            gh_stub = os.path.join(stub_dir, "gh")
+            with open(gh_stub, "w") as f:
+                f.write("#!/bin/sh\ntouch \"{}\"\nexit 1\n".format(marker))
+            os.chmod(gh_stub, 0o755)
+
+            plan_path = os.path.join(d, "plan.md")
+            with open(plan_path, "w") as f:
+                f.write(_plan())
+            spec_path = os.path.join(d, "spec.md")
+            with open(spec_path, "w") as f:
+                f.write(MINIMAL_SPEC)
+            run_dir = os.path.join(d, "run")
+            codex_bin = write_fake_codex(d)
+
+            env = dict(os.environ)
+            env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), plan_path,
+                 "--spec", spec_path, "--run-dir", run_dir,
+                 "--codex-bin", codex_bin],
+                cwd=d, capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertFalse(
+                os.path.exists(marker), "forge-run.py must never invoke gh"
+            )
 
 
 class StatusCliTests(unittest.TestCase):
@@ -356,17 +554,21 @@ class StatusCliTests(unittest.TestCase):
             self.assertIn("malformed plan", r.stdout)
 
     def test_halted_run_with_deferrals_prints_halt_reason_and_deferrals(self):
+        # escalated is terminal (halted), so the full staged-deferrals block
+        # replaces the terse "deferrals: N — ..." prefix — each summary
+        # appears exactly once, not twice in two truncations.
         with tempfile.TemporaryDirectory() as d:
             rd = os.path.join(d, "run")
-            deferrals = [{"summary": "unused import"}]
+            deferrals = [{"id": "f1", "summary": "unused import"}]
             _write_run(rd, "escalated", [_summary(1, "passed"), _summary(2, "escalated")],
                        deferrals=deferrals)
             _write_receipt(rd, 2, 2, "escalated", findings=["bad thing"], halt_reason="stuck")
             r = self._status(rd)
             self.assertEqual(r.returncode, 0)
             self.assertIn("stuck", r.stdout)
-            self.assertIn("deferrals: 1", r.stdout)
-            self.assertIn("unused import", r.stdout)
+            self.assertNotIn("deferrals: 1", r.stdout)
+            self.assertEqual(r.stdout.count("unused import"), 1)
+            self.assertIn("forge_memory.py defer", r.stdout)
 
     def test_status_without_scope_autonomy_fields_renders_unchanged(self):
         with tempfile.TemporaryDirectory() as d:
@@ -392,6 +594,53 @@ class StatusCliTests(unittest.TestCase):
             env["FORGE_FAKE_LOG"] = log
             self._status(rd, codex_bin=fake, env=env)
             self.assertFalse(os.path.exists(log))
+
+    def test_terminal_run_status_cli_shows_defer_template_for_unfiled_only(self):
+        # End-to-end: the real `--status` CLI path (forge-run.py --status ->
+        # forge_status.render_status -> render_staged_deferrals), not a
+        # direct call to the renderer, against a TERMINAL run.json.
+        with tempfile.TemporaryDirectory() as d:
+            rd = os.path.join(d, "run")
+            deferrals = [
+                {"id": "already-done", "summary": "already done", "issue": "7"},
+                {"id": "still-pending", "summary": "z" * 110},
+            ]
+            _write_run(rd, "passed", [_summary(1, "passed")], deferrals=deferrals)
+            r = self._status(rd)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("COMPLETED", r.stdout)
+            self.assertIn("forge_memory.py defer", r.stdout)
+            self.assertIn("--title", r.stdout)
+            self.assertIn("--why", r.stdout)
+            self.assertIn("still-pending", r.stdout)
+            self.assertIn("z" * 110, r.stdout)
+            self.assertIn("already-done", r.stdout)
+            self.assertIn("filed as issue #7", r.stdout)
+            defer_lines = [l for l in r.stdout.splitlines() if "forge_memory.py defer" in l]
+            self.assertEqual(len(defer_lines), 1)
+            self.assertIn("still-pending", defer_lines[0])
+            self.assertNotIn("already-done", defer_lines[0])
+            # No duplicated terse prefix, and each summary appears exactly
+            # once — the full block replaces it, not adds to it.
+            self.assertNotIn("deferrals: 2", r.stdout)
+            self.assertEqual(r.stdout.count("already done"), 1)
+
+    def test_running_run_status_cli_shows_terse_line_and_no_defer_command(self):
+        # A running run must never show a pasteable filing command — Task 2's
+        # `defer --run` refuses to write into a non-terminal run.json, so
+        # showing the command mid-run would hand the user something
+        # guaranteed to be rejected.
+        with tempfile.TemporaryDirectory() as d:
+            rd = os.path.join(d, "run")
+            deferrals = [{"id": "still-pending", "summary": "unused import"}]
+            _write_run(rd, "running", [_summary(1, "passed")], deferrals=deferrals)
+            r = self._status(rd)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("RUNNING", r.stdout)
+            self.assertIn("deferrals: 1", r.stdout)
+            self.assertIn("unused import", r.stdout)
+            self.assertNotIn("forge_memory.py defer", r.stdout)
+            self.assertNotIn("--title", r.stdout)
 
 
 class IncrementalRunJsonTests(unittest.TestCase):

@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import time
 
 _ATTEMPT_RE = re.compile(r"^task-(\d+)-attempt-(\d+)\.json$")
@@ -226,6 +227,13 @@ def read_run_state(run_dir, now=None):
     return {
         "run_dir": run_dir,
         "plan": run.get("plan") if run else None,
+        # Raw run.json `status` (untranslated through _STATE_MAP), kept
+        # alongside the mapped `state` so a caller that needs the exact
+        # terminal/non-terminal split (render_status gating the staged-
+        # deferrals review surface) can call `is_terminal` directly against
+        # the same field it was written for, rather than re-deriving the
+        # split from `state`.
+        "status": raw_status,
         "state": state,
         "reason": reason,
         "halt_class": halt_class,
@@ -261,6 +269,72 @@ def render_status(state):
             line += " — " + t["finding"]
         lines.append(line)
     if state.get("deferrals"):
-        summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
-        lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
+        # The terse one-liner is for a run still in progress. Once the run
+        # is terminal, the full close-out review surface (untruncated
+        # summary + a pasteable `defer` command template per unfiled entry)
+        # REPLACES it rather than adding to it — showing both would restate
+        # every summary twice, in two different truncations, which degrades
+        # the one thing this surface exists to do. `is_terminal` is the one
+        # public definition of that split, checked against the same raw
+        # `status` field it was written for (never re-derived from the
+        # mapped `state`). Task 2's `defer --run` also refuses to write into
+        # a non-terminal run.json, so a running run must never show a
+        # filing command guaranteed to be rejected.
+        if is_terminal(state.get("status")):
+            run_json_path = os.path.join(state["run_dir"], "run.json")
+            lines.append("")
+            lines.extend(render_staged_deferrals(state, run_json_path))
+        else:
+            summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
+            lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
     return "\n".join(lines)
+
+
+def render_staged_deferrals(state, run_json_path):
+    """The close-out review surface for `state["deferrals"]`: one block per
+    staged deferral.
+
+    An entry already carrying an ``issue`` key (recorded by `forge_memory.py
+    defer --run ... --finding-id ...`) renders as already filed, with its
+    issue number, and emits no command — presence of the key is the whole
+    test (Task 2 pins `issue` as always a string; never check its type or
+    whether it looks numeric, since a file-store ref is an arbitrary slug,
+    not a number).
+
+    An unfiled entry renders its finding id, its FULL untruncated summary (so
+    whoever files it has the material to write from), and a `forge_memory.py
+    defer` command TEMPLATE with `--title` and `--why` left as visible
+    placeholders. This module never fabricates a title or a why: a reviewer
+    finding summary runs 100-200 chars against the deferral schema's 80-char
+    title budget, budget overrun is an error not a truncation, and this is
+    deterministic Python with no way to author prose within budget —
+    authorship happens at the review gate, by a human or an LLM holding
+    judgment this module doesn't have.
+
+    ``run_json_path`` and each finding id are shlex-quoted before being
+    interpolated into the emitted command, so the line is safe to paste even
+    when a path or id carries a space, quote, or newline."""
+    deferrals = state.get("deferrals") or []
+    if not deferrals:
+        return []
+
+    lines = []
+    for entry in deferrals:
+        finding_id = entry.get("id", "?")
+        summary = (entry.get("summary") or "").strip()
+        lines.append("deferral {}:".format(finding_id))
+        lines.append("  {}".format(summary))
+        issue = entry.get("issue")
+        if issue is not None:
+            lines.append("  filed as issue #{}".format(issue))
+        else:
+            lines.append(
+                "  forge_memory.py defer --title <title> --why <why> "
+                "--follow-up backlog --run {} --finding-id {}".format(
+                    shlex.quote(run_json_path), shlex.quote(finding_id)
+                )
+            )
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
