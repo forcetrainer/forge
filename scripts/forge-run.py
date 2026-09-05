@@ -1597,7 +1597,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # created or anything dispatches, naming every defect in the raised
     # message too. A warning-only plan (e.g. a legal empty checklist) prints
     # and proceeds.
-    lint_defects = forge_lint.lint_plan(plan_path, spec_path)
+    lint_defects = forge_lint.lint_plan(plan_path, spec_path, repo_root=cwd)
     lint_lines = [
         "[{}] {}: {}".format(d.severity, d.where, d.message) for d in lint_defects
     ]

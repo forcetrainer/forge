@@ -40,6 +40,8 @@ sys.path.insert(0, SCRIPTS_DIR)
 import forge_common  # noqa: E402
 import forge_plan  # noqa: E402
 import forge_checklist  # noqa: E402
+import forge_memory  # noqa: E402
+import forge_memory_store  # noqa: E402
 
 eb = forge_common.eb
 
@@ -293,7 +295,41 @@ def _dedup(defects):
     return deduped
 
 
-def lint_plan(plan_path, spec_path=None):
+def check_memory_files(repo_root):
+    """Every ``forge_memory.fmt_check`` defect across this repo's managed
+    project-memory files, reusing ``fmt_check``/``select_store`` rather than
+    reimplementing parsing or store selection — the harness-agnostic layer
+    that catches a drifted ``constraints.md``/``deferrals.md`` no matter
+    which harness (Bash, Codex, a human) wrote it.
+
+    Managed paths: ``docs/forge/constraints.md`` always; ``docs/forge/
+    deferrals.md`` only when the repo's config selects the file store for
+    deferrals (the default is GitHub, which this function never touches —
+    no ``gh`` call, no network, ever). A managed path that does not exist is
+    not a defect: most repos will never have these files, and this check
+    must never reject a legal repo for lacking them."""
+    paths = []
+
+    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
+    if os.path.exists(constraints_path):
+        paths.append(constraints_path)
+
+    try:
+        deferral_store = forge_memory_store.select_store(repo_root, "deferral")
+    except forge_memory_store.ConfigError as e:
+        return [_error("memory", str(e))]
+
+    if isinstance(deferral_store, forge_memory_store.FileStore):
+        if os.path.exists(deferral_store.path):
+            paths.append(deferral_store.path)
+
+    if not paths:
+        return []
+
+    return [_error("memory", msg) for msg in forge_memory.fmt_check(paths)]
+
+
+def lint_plan(plan_path, spec_path=None, *, repo_root):
     """Every documented-grammar defect in ``plan_path`` (and ``spec_path``
     when given), never short-circuiting on the first — including when the
     heading structure itself is broken: a wrong-level or duplicated task
@@ -302,10 +338,24 @@ def lint_plan(plan_path, spec_path=None):
     rejects a legal plan: ``**Spec:**``, ``**Global Constraints:**``, and
     prose acceptance are all optional per the planning skill, so their
     absence is never an error — and an empty checklist is a warning, not an
-    error."""
+    error.
+
+    ``repo_root`` is a required keyword-only argument (no process-cwd
+    guessing here, by design — DECISIONS 2026-07-11 prefers fail-loud over
+    guessing, and a library function that inferred the repo root from
+    ``os.getcwd()`` would silently check the wrong directory the moment a
+    caller's own tracked cwd diverges from the process cwd, exactly the
+    failure this harness-agnostic check exists to prevent). Every caller
+    resolves and passes its own repo root explicitly; only a CLI edge may
+    default it to ``os.getcwd()``. It is where ``check_memory_files`` looks
+    for managed project-memory files; a memory defect and a plan/spec defect
+    are always reported together in one run, never one suppressing the
+    other."""
+    memory_defects = check_memory_files(repo_root)
+
     lines = eb.read_lines(plan_path)
     mask = eb.fence_mask(lines)
-    defects = []
+    defects = list(memory_defects)
 
     heading_defects, task_numbers, blocks = _lint_heading_structure(lines, mask)
     defects.extend(heading_defects)
@@ -339,10 +389,19 @@ def main(argv):
     parser = argparse.ArgumentParser(prog="forge_lint.py")
     parser.add_argument("plan")
     parser.add_argument("--spec")
+    parser.add_argument(
+        "--repo-root",
+        help="repo root to check managed project-memory files under "
+             "(default: cwd)",
+    )
     args = parser.parse_args(argv)
+    # The CLI is an edge — a human is present — so it's the one place
+    # allowed to default repo_root to the process cwd; lint_plan itself
+    # never guesses.
+    repo_root = args.repo_root if args.repo_root is not None else os.getcwd()
 
     try:
-        defects = lint_plan(args.plan, args.spec)
+        defects = lint_plan(args.plan, args.spec, repo_root=repo_root)
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 1

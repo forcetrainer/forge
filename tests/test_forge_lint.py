@@ -132,7 +132,7 @@ class ForgeLintTests(unittest.TestCase):
 
     def _lint(self, plan_text, spec_path=None):
         _write(self.plan_path, plan_text)
-        return fl.lint_plan(self.plan_path, spec_path)
+        return fl.lint_plan(self.plan_path, spec_path, repo_root=self.tmp)
 
     def _errors(self, defects):
         return [d for d in defects if d.severity == "error"]
@@ -314,6 +314,156 @@ class ForgeLintTests(unittest.TestCase):
         errors = self._errors(defects)
         self.assertTrue(any("three #" in d.message for d in errors))
         self.assertTrue(any("depends on unknown task 77" in d.message for d in errors))
+
+
+def _constraint_text(entries):
+    """entries: [(id, because), ...] -> canonical-shaped constraints.md text
+    (one record per entry; ``because`` is the field under test since it
+    carries the widest budget)."""
+    blocks = []
+    for cid, because in entries:
+        blocks.append(
+            "## {}\n**Rule:** does a thing\n**Because:** {}\n"
+            "**Scope:** repo\n**Added:** 2026-01-01\n**Source:** user\n".format(
+                cid, because,
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _deferral_text(entries):
+    """entries: [(title, why), ...] -> canonical-shaped deferrals.md text."""
+    blocks = []
+    for title, why in entries:
+        blocks.append(
+            "## {}\n**Why:** {}\n**From:** user\n**Follow-up:** backlog\n".format(
+                title, why,
+            )
+        )
+    return "\n".join(blocks)
+
+
+class ForgeLintMemoryTests(unittest.TestCase):
+    """``check_memory_files`` — the harness-agnostic layer that catches a
+    drifted constraints.md/deferrals.md no matter which harness wrote it."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.docs_dir = os.path.join(self.repo, "docs", "forge")
+
+    def _write_constraints(self, text):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        _write(os.path.join(self.docs_dir, "constraints.md"), text)
+
+    def _write_deferrals(self, text):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        _write(os.path.join(self.docs_dir, "deferrals.md"), text)
+
+    def _write_config(self, config_obj):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        import json
+        _write(os.path.join(self.docs_dir, "config.json"), json.dumps(config_obj))
+
+    def test_drifted_constraints_one_defect_per_record(self):
+        drifted = _constraint_text([
+            ("bad-one", "x" * 310),
+            ("bad-two", "y" * 310),
+        ])
+        self._write_constraints(drifted)
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(len(defects), 2)
+        self.assertTrue(all(d.severity == "error" for d in defects))
+
+    def test_canonical_constraints_no_defects(self):
+        self._write_constraints(_constraint_text([("good-one", "a short reason")]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_absent_constraints_no_defects(self):
+        # No docs/forge directory at all.
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_deferrals_checked_when_file_store_configured(self):
+        self._write_config({"deferrals": {"store": "file"}})
+        self._write_deferrals(_deferral_text([("bad-title", "z" * 310)]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(len(defects), 1)
+        self.assertEqual(defects[0].severity, "error")
+
+    def test_deferrals_ignored_without_file_store_config(self):
+        # No config.json => deferral store defaults to GitHub. A drifted
+        # deferrals.md must be ignored entirely — no gh call, no defect.
+        self._write_deferrals(_deferral_text([("bad-title", "z" * 310)]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_memory_and_plan_defects_both_reported_in_one_run(self):
+        self._write_constraints(_constraint_text([("bad-one", "x" * 310)]))
+        defects = fl.lint_plan(
+            self._write_plan_with_bad_tier(), repo_root=self.repo,
+        )
+        errors = [d for d in defects if d.severity == "error"]
+        self.assertTrue(any("bogus" in d.message for d in errors))
+        self.assertTrue(any(d.where == "memory" for d in errors))
+
+    def _write_plan_with_bad_tier(self):
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, _base_plan(task1_tier="**Tier:** `bogus`"))
+        return plan_path
+
+    def test_existing_lint_behavior_unchanged_with_no_memory_files(self):
+        # No docs/forge/ at all under repo_root: the memory check must
+        # contribute zero defects, leaving every pre-existing lint defect
+        # exactly as it was.
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+        other_clean_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-other-")
+        self.addCleanup(shutil.rmtree, other_clean_repo, ignore_errors=True)
+        defects_a = fl.lint_plan(plan_path, repo_root=self.repo)
+        defects_b = fl.lint_plan(plan_path, repo_root=other_clean_repo)
+        self.assertEqual(defects_a, defects_b)
+
+    def test_repo_root_omitted_fails_loud_instead_of_guessing(self):
+        # lint_plan must never fall back to os.getcwd() itself — a caller
+        # that forgets repo_root gets a loud error, not a silent guess.
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+        with self.assertRaises(TypeError):
+            fl.lint_plan(plan_path)
+
+    def test_lint_plan_checks_the_given_repo_root_not_process_cwd(self):
+        # This is the test that would have caught the original bug: process
+        # cwd and repo_root are made to disagree, and lint_plan must follow
+        # repo_root, never the process cwd, in either direction.
+        dirty_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-dirty-")
+        self.addCleanup(shutil.rmtree, dirty_repo, ignore_errors=True)
+        os.makedirs(os.path.join(dirty_repo, "docs", "forge"))
+        _write(
+            os.path.join(dirty_repo, "docs", "forge", "constraints.md"),
+            _constraint_text([("bad-one", "x" * 310)]),
+        )
+        clean_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-clean-")
+        self.addCleanup(shutil.rmtree, clean_repo, ignore_errors=True)
+
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+
+        old_cwd = os.getcwd()
+        self.addCleanup(os.chdir, old_cwd)
+
+        # process cwd is the dirty repo, but repo_root explicitly names the
+        # clean one — no memory defect must appear.
+        os.chdir(dirty_repo)
+        defects = fl.lint_plan(plan_path, repo_root=clean_repo)
+        self.assertFalse(any(d.where == "memory" for d in defects))
+
+        # process cwd is the clean repo, but repo_root explicitly names the
+        # dirty one — the memory defect must appear.
+        os.chdir(clean_repo)
+        defects = fl.lint_plan(plan_path, repo_root=dirty_repo)
+        self.assertTrue(any(d.where == "memory" for d in defects))
 
 
 class ForgeLintCLITests(unittest.TestCase):
