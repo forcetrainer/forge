@@ -6,6 +6,7 @@ including on a file a human hand-drifted (reordered fields) but that still
 parses; and unparsable or budget-violating input fails loud naming the line."""
 import argparse
 import contextlib
+import dataclasses
 import inspect
 import io
 import json
@@ -53,7 +54,6 @@ def _valid_deferral_fields(**overrides):
         "title": "Improve error messages in the deferral formatter",
         "why": "Nice-to-have polish, not required by the current spec.",
         "from": "user",
-        "follow-up": "backlog",
     }
     fields.update(overrides)
     return fields
@@ -132,38 +132,45 @@ class ValidateTests(unittest.TestCase):
         defects = fm.validate(record)
         self.assertEqual([d for d in defects if "id" in d], [])
 
-    def test_followup_accepts_valid_values(self):
-        for good in ("backlog", "drop", "revisit-when:phase-15-lands"):
-            record = fm.Record(type="deferral", fields=_valid_deferral_fields(**{
-                "follow-up": good,
-            }))
-            defects = fm.validate(record)
-            self.assertEqual([d for d in defects if "follow-up" in d], [], (good, defects))
+    def test_deferral_record_is_title_why_from(self):
+        # `follow-up` is retired. A deferral IS an open issue nobody is
+        # working on, so `backlog` only restated the record's own
+        # existence; `drop` meant "do not file this at all", which is a
+        # decision taken at the review gate BEFORE the record exists; and
+        # `revisit-when:<condition>` is a comment on the issue. The field
+        # bought nothing and forced an unbounded condition string into a
+        # bounded label set.
+        self.assertEqual(
+            [spec.name for spec in fm.SCHEMA["deferral"]],
+            ["title", "why", "from"],
+        )
+        self.assertEqual(
+            [spec.form for spec in fm.SCHEMA["deferral"]],
+            [None, None, None],
+        )
+        self.assertNotIn("_FOLLOWUP_RE", inspect.getsource(fm))
 
-    def test_followup_rejects_roadmap(self):
-        record = fm.Record(type="deferral", fields=_valid_deferral_fields(**{
-            "follow-up": "roadmap",
-        }))
-        defects = fm.validate(record)
-        self.assertTrue(any("follow-up" in d for d in defects), defects)
-
-    def test_followup_rejects_unknown_value(self):
-        record = fm.Record(type="deferral", fields=_valid_deferral_fields(**{
-            "follow-up": "someday",
-        }))
-        defects = fm.validate(record)
-        self.assertTrue(any("follow-up" in d for d in defects), defects)
+    def test_a_stray_followup_key_is_never_rendered(self):
+        # render/parse are SCHEMA-driven, so a caller that still passes the
+        # retired key writes a record without it rather than a record the
+        # parser would reject as an unknown field.
+        record = fm.Record(type="deferral", fields=dict(
+            _valid_deferral_fields(), **{"follow-up": "backlog"},
+        ))
+        self.assertNotIn("Follow-up", fm.render(record))
+        self.assertEqual(
+            fm.parse(fm.render(record), "deferral")[0].fields,
+            _valid_deferral_fields(),
+        )
 
     def test_multiple_defects_all_reported(self):
-        record = fm.Record(type="deferral", fields=_valid_deferral_fields(
-            title="x" * 81,
-            why="",
-            **{"follow-up": "roadmap"},
-        ))
+        fields = _valid_deferral_fields(title="x" * 81, why="")
+        del fields["from"]
+        record = fm.Record(type="deferral", fields=fields)
         defects = fm.validate(record)
         self.assertTrue(any("title" in d for d in defects), defects)
         self.assertTrue(any("why" in d for d in defects), defects)
-        self.assertTrue(any("follow-up" in d for d in defects), defects)
+        self.assertTrue(any("from" in d for d in defects), defects)
         self.assertGreaterEqual(len(defects), 3)
 
 
@@ -297,34 +304,38 @@ class SchemaErrorLineAttributeTests(unittest.TestCase):
         self.assertIsNone(ctx.exception.line)
 
 
-class RecordRefTests(unittest.TestCase):
-    """``ref`` is store-assigned metadata (e.g. a GitHub issue number), not
-    part of the record's data — two records with identical fields but
-    different refs are the same record from ``render``/``parse``/
-    ``validate``'s point of view, so equality and repr must ignore it."""
+class RecordShapeTests(unittest.TestCase):
+    """A ``Record`` is its type and its fields, and nothing else. ``ref``
+    carried a store-assigned issue number for a record read back from
+    GitHub; ``GitHubStore.scan`` was its only writer, and the GitHub read
+    path is gone. A field nothing can set is what misleads the next
+    reader — and ``field(compare=False, repr=False)``, which existed so a
+    ref could not affect record equality, guards nothing once no ref
+    exists."""
 
-    def test_equal_fields_different_ref_compare_equal(self):
+    def test_record_has_no_ref_field(self):
+        self.assertEqual(
+            [f.name for f in dataclasses.fields(fm.Record)],
+            ["type", "fields"],
+        )
+        with self.assertRaises(TypeError):
+            fm.Record(type="deferral", fields=_valid_deferral_fields(), ref="7")
+
+    def test_records_with_equal_fields_compare_equal(self):
+        # The property the ref exclusion existed to protect. It now holds
+        # by construction rather than by a dataclass flag.
         fields = _valid_deferral_fields()
-        a = fm.Record(type="deferral", fields=dict(fields), ref="1")
-        b = fm.Record(type="deferral", fields=dict(fields), ref="2")
-        self.assertEqual(a, b)
+        self.assertEqual(
+            fm.Record(type="deferral", fields=dict(fields)),
+            fm.Record(type="deferral", fields=dict(fields)),
+        )
 
-    def test_repr_omits_ref(self):
-        record = fm.Record(type="deferral", fields=_valid_deferral_fields(), ref="7")
-        self.assertNotIn("7", repr(record))
-        self.assertNotIn("ref", repr(record))
-
-    def test_ref_is_settable_and_readable_and_untouched_by_render_parse_validate(self):
+    def test_render_parse_round_trip_is_unaffected(self):
         record = fm.Record(type="deferral", fields=_valid_deferral_fields())
-        record.ref = "42"
-        self.assertEqual(record.ref, "42")
-
         text = fm.render(record)
-        self.assertNotIn("42", text)
-
         reparsed = fm.parse(text, "deferral")[0]
-        self.assertIsNone(reparsed.ref)
-
+        self.assertEqual(reparsed, record)
+        self.assertEqual(fm.render(reparsed), text)
         self.assertEqual(fm.validate(record), [])
 
 
@@ -388,6 +399,21 @@ class FmtTests(unittest.TestCase):
             fm.fmt_write([path])
 
 
+def _gh_label_preflight(args):
+    """The label step ``GitHubStore.create`` runs before every filing:
+    ``gh label list --json name`` to decide whether the origin label
+    exists, then ``gh label create`` only when it does not. A stub that
+    answers just ``auth`` and ``issue create`` starves that step — it would
+    hand the label query an issue URL, which is not the JSON the store
+    asked for. Returns a stubbed result for a label call, or None when
+    ``args`` is not one, so a caller can fall through to its own answer."""
+    if args[:3] == ["gh", "label", "list"]:
+        return _completed(returncode=0, stdout="[]")
+    if args[:3] == ["gh", "label", "create"]:
+        return _completed(returncode=0)
+    return None
+
+
 def _completed(returncode=0, stdout="", stderr=""):
     return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
 
@@ -447,7 +473,7 @@ class SubcommandSurfaceTests(CLITestCase):
         )
         self.assertEqual(set(sub_action.choices), {
             "add-constraint", "retire-constraint", "list-constraints",
-            "defer", "list-deferrals", "resolve-deferral", "fmt",
+            "defer", "resolve-deferral", "fmt",
             "install-guards",
         })
 
@@ -468,11 +494,14 @@ class SubcommandSurfaceTests(CLITestCase):
         # --occurrence added deliberately (typed, closed-vocabulary
         # selector: a 1-based ordinal among the staged deferrals sharing a
         # finding id), never a free-form text surface.
-        "defer": {"title", "why", "follow_up", "from_", "run", "finding_id",
+        # --by is a closed two-value origin selector (human|agent), not a
+        # free-form field; --occurrence is a 1-based ordinal among the
+        # staged deferrals sharing a finding id. Both typed, both added
+        # deliberately.
+        "defer": {"title", "why", "by", "from_", "run", "finding_id",
                   "occurrence"},
-        "list-deferrals": {"json"},
         "resolve-deferral": {"ref", "reason"},
-        "fmt": {"check", "write", "paths", "local_only"},
+        "fmt": {"check", "write", "paths"},
         "install-guards": {"pre_commit", "ci"},
     }
 
@@ -612,20 +641,33 @@ class ListConstraintsCLITests(CLITestCase):
 
 
 class DeferCLITests(CLITestCase):
-    def test_invalid_followup_exits_nonzero_naming_legal_values(self):
+    def test_by_is_required(self):
+        # Origin is one of exactly two human-meaningful values and the
+        # engine cannot infer it, so it is never defaulted: a filing that
+        # guessed would put a wrong `by:` label on a real issue.
         self._use_file_store_for_deferrals()
-        code, out, err = _run_cli([
-            "defer", "--title", "t", "--why", "w", "--follow-up", "roadmap",
-        ])
-        self.assertNotEqual(code, 0)
-        self.assertIn("backlog", err)
-        self.assertIn("drop", err)
-        self.assertIn("revisit-when", err)
+        with self.assertRaises(SystemExit):
+            fm.main(["defer", "--title", "t", "--why", "w"])
+
+    def test_by_rejects_an_unknown_origin(self):
+        self._use_file_store_for_deferrals()
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "defer", "--title", "t", "--why", "w", "--by", "robot",
+            ])
+
+    def test_follow_up_flag_is_gone(self):
+        self._use_file_store_for_deferrals()
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "defer", "--title", "t", "--why", "w", "--by", "human",
+                "--follow-up", "backlog",
+            ])
 
     def test_defer_against_file_store(self):
         self._use_file_store_for_deferrals()
         code, out, err = _run_cli([
-            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
+            "defer", "--title", "improve-x", "--why", "polish", "--by", "human",
         ])
         self.assertEqual(code, 0, err)
         path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
@@ -633,6 +675,9 @@ class DeferCLITests(CLITestCase):
             text = f.read()
         records = fm.parse(text, "deferral")
         self.assertEqual(records[0].fields["from"], "user")
+        self.assertEqual(
+            set(records[0].fields), {"title", "why", "from"},
+        )
 
     def test_defer_against_github_store_invokes_gh(self):
         calls = []
@@ -641,87 +686,32 @@ class DeferCLITests(CLITestCase):
             calls.append(args)
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
             return _completed(returncode=0, stdout="https://github.com/o/r/issues/9\n")
 
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
             code, out, err = _run_cli([
                 "defer", "--title", "improve-x", "--why", "polish",
-                "--follow-up", "backlog",
+                "--by", "agent",
             ])
         self.assertEqual(code, 0, err)
-        self.assertTrue(any(a[:2] == ["gh", "issue"] and "create" in a for a in calls))
-
-    def test_list_deferrals_json(self):
-        self._use_file_store_for_deferrals()
-        _run_cli([
-            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
-        ])
-        code, out, err = _run_cli(["list-deferrals", "--json"])
-        self.assertEqual(code, 0, err)
-        data = json.loads(out)
-        self.assertEqual(data[0]["title"], "improve-x")
-
-    def test_list_deferrals_against_github_store_reports_every_bad_issue(self):
-        # Default store (no config.json) is GitHubStore. cmd_list_deferrals
-        # calls store.scan (not .list) so it never needs to know which
-        # store it holds: scan always returns (records, errors) rather
-        # than raising on the first bad body, so the CLI can surface every
-        # bad issue's number itself, same as fmt --check does.
-        good_body = fm.render(fm.Record(type="deferral", fields={
-            "title": "good-one", "why": "w", "from": "user",
-            "follow-up": "backlog",
-        }))
-        payload = json.dumps([
-            {"number": 1, "body": "## bad-one\nnot a valid field line\n"},
-            {"number": 2, "body": good_body},
-            {"number": 3, "body": "## bad-two\nalso not valid\n"},
-        ])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            code, out, err = _run_cli(["list-deferrals"])
-
-        self.assertNotEqual(code, 0)
-        self.assertIn("#1", err)
-        self.assertIn("#3", err)
-
-    def test_github_store_scan_errors_are_prefixed_as_issue_numbers(self):
-        payload = json.dumps([{"number": 12, "body": "## bad\nnope\n"}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            code, out, err = _run_cli(["list-deferrals"])
-        self.assertNotEqual(code, 0)
-        self.assertIn("issue #12:", err)
-
-    def test_file_store_scan_errors_name_the_file_not_a_fake_issue_number(self):
-        # Under FileStore a scan error's ref is a LINE NUMBER, so the old
-        # "#{ref}: ..." prefix rendered "#1: line 1: unparsable ..." — where
-        # "#1" reads as issue 1. The prefix must describe the ref the store
-        # it came from actually uses.
-        self._use_file_store_for_deferrals()
-        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
-        _write(path, "this is not a record line\n")
-        code, out, err = _run_cli(["list-deferrals"])
-        self.assertNotEqual(code, 0)
-        self.assertIn(path, err)
-        self.assertNotIn("#1:", err)
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:agent"])
+        self.assertFalse(
+            [a for a in create if a.startswith("forge:")],
+            "no forge: label survives the label rework: {}".format(create),
+        )
 
     def test_resolve_deferral_against_file_store(self):
         self._use_file_store_for_deferrals()
         _run_cli([
-            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
+            "defer", "--title", "improve-x", "--why", "polish", "--by", "human",
         ])
         code, out, err = _run_cli([
             "resolve-deferral", "--ref", "improve-x", "--reason", "done",
@@ -780,7 +770,7 @@ class DeferRunJsonCLITests(CLITestCase):
         SKIPS the close-out review gate. Pass ``from_=None`` to exercise
         the omitted-flag path deliberately."""
         args = [
-            "defer", "--title", title, "--why", "polish", "--follow-up", "backlog",
+            "defer", "--title", title, "--why", "polish", "--by", "agent",
         ]
         if from_ is not None:
             args += ["--from", from_]
@@ -820,6 +810,9 @@ class DeferRunJsonCLITests(CLITestCase):
         def fake_run(args, **kwargs):
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
             return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
 
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
@@ -1073,6 +1066,9 @@ class DeferRunJsonCLITests(CLITestCase):
         def fake_run(args, **kwargs):
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
             return _completed(returncode=1, stderr="boom")
 
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
@@ -1097,6 +1093,9 @@ class DeferRunJsonCLITests(CLITestCase):
         def fake_run(args, **kwargs):
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
             return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
 
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
@@ -1119,6 +1118,9 @@ class DeferRunJsonCLITests(CLITestCase):
         def fake_run(args, **kwargs):
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
             return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
 
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
@@ -1198,8 +1200,13 @@ class FmtCLITests(CLITestCase):
             code, out, err = _run_cli(["fmt", "--check"])
         self.assertEqual(code, 0, out + err)
 
-    def test_no_path_checks_managed_files_and_open_issues(self):
-        # A drifted managed constraints.md file...
+    def test_no_path_checks_managed_files_and_never_calls_gh(self):
+        # Read-back retrieval is gone: with no PATH argument, fmt covers the
+        # managed FILES and nothing else. The GitHub store is the default
+        # here (no config.json), and fmt must still make no gh call —
+        # re-finding forge's own issues duplicated the GitHub UI, and the
+        # write-time validation in GitHubStore.create is the half that
+        # actually keeps a malformed record off the network.
         constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
         self._write(constraints_path, (
             "## bad id\n"
@@ -1210,47 +1217,11 @@ class FmtCLITests(CLITestCase):
             "**Source:** user\n"
         ))
 
-        # ...and a drifted open forge:deferral issue body (GitHub store is
-        # the default — no config.json).
-        broken_body = "## bad\nthis is not a valid field line\n"
-        payload = json.dumps([{"number": 5, "body": broken_body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+        with self._no_gh_guard():
             code, out, err = _run_cli(["fmt", "--check"])
 
         self.assertNotEqual(code, 0)
         self.assertIn("bad id", out)
-        self.assertIn("#5", out)
-
-    def test_budget_overrunning_but_parsable_issue_body_is_reported(self):
-        record_fields = {
-            "title": "x" * 90,  # over the 80-char budget, still parsable
-            "why": "w", "from": "user", "follow-up": "backlog",
-        }
-        body = "## {}\n**Why:** {}\n**From:** {}\n**Follow-up:** {}\n".format(
-            record_fields["title"], record_fields["why"], record_fields["from"],
-            record_fields["follow-up"],
-        )
-        payload = json.dumps([{"number": 6, "body": body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            code, out, err = _run_cli(["fmt", "--check"])
-
-        self.assertNotEqual(code, 0)
-        self.assertIn("#6", out)
-        self.assertIn("budget", out)
 
 
 def _run_hook(stdin_text, cwd=None, env=None):
@@ -1796,16 +1767,14 @@ class InstallGuardsCLITests(CLITestCase):
         self.assertIn("jobs:", text)
         self.assertIn("fmt --check", text)
         self.assertNotIn("\t", text, "YAML must not contain literal tabs")
-        # The check runs `fmt --check` with no paths, which (with no
-        # config.json, the default) selects GitHubStore and calls `gh` to
-        # read open forge:deferral issues — CI must authenticate that call
-        # or the gate is always red. Explicit read-only permissions rather
-        # than relying on default GITHUB_TOKEN scopes, which some orgs
-        # restrict below read-all.
-        self.assertIn("GH_TOKEN", text)
+        # `fmt --check` reads managed FILES only — read-back retrieval of
+        # open issues is gone — so the workflow needs neither a token nor
+        # issue read access. Granting either would be standing permission
+        # for a call this check can no longer make.
+        self.assertNotIn("GH_TOKEN", text)
+        self.assertNotIn("issues:", text)
         self.assertIn("permissions:", text)
         self.assertIn("contents: read", text)
-        self.assertIn("issues: read", text)
         # No matrix builds, caching, or extra jobs — keep it minimal.
         self.assertNotIn("matrix:", text)
         self.assertNotIn("cache", text.lower())
@@ -1938,7 +1907,9 @@ class ScriptEntrypointIdentityTests(unittest.TestCase):
             "this is not a valid record\n",
         )
 
-        proc = self._run_script(["list-deferrals"])
+        proc = self._run_script([
+            "resolve-deferral", "--ref", "anything", "--reason", "done",
+        ])
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn("Traceback", proc.stderr)
@@ -1950,7 +1921,7 @@ class ScriptEntrypointIdentityTests(unittest.TestCase):
         path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
         _write(path, "this is not a valid record\n")
 
-        proc = self._run_script(["fmt", "--write", "--local-only"])
+        proc = self._run_script(["fmt", "--write"])
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn("Traceback", proc.stderr)
@@ -1969,42 +1940,17 @@ class ScriptEntrypointIdentityTests(unittest.TestCase):
 
 
 class FmtBranchExclusivityTests(CLITestCase):
-    """``fmt``'s three branches — explicit paths, ``--local-only``, and the
-    no-PATH CI branch — are mutually exclusive and exhaustive. ``--local-only``
-    with explicit paths named neither: it silently took the explicit-paths
-    branch. Two scope selectors at once is a user error with no correct
-    reading, so it is rejected by name rather than resolved by accident."""
+    """``fmt`` has exactly two branches now — explicit paths, and no PATH
+    (every managed local file). ``--local-only`` existed only to name the
+    branch that skipped the open-issue check; with read-back retrieval gone
+    the two branches it distinguished are byte-for-byte the same work, so
+    the flag is retired rather than kept as a synonym for the default."""
 
-    def test_local_only_with_explicit_paths_is_rejected(self):
-        path = os.path.join(self.tmp, "constraints.md")
-        record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
-        })
-        _write(path, fm.render(record))
+    def test_local_only_flag_is_gone(self):
+        with self.assertRaises(SystemExit):
+            fm.main(["fmt", "--check", "--local-only"])
 
-        with self._no_gh_guard():
-            code, out, err = _run_cli(["fmt", "--check", "--local-only", path])
-
-        self.assertNotEqual(code, 0)
-        self.assertIn("--local-only", err)
-        self.assertEqual(out, "")
-
-    def test_local_only_write_with_explicit_paths_does_not_write(self):
-        path = os.path.join(self.tmp, "constraints.md")
-        drifted = "## good-id\n**Because:** b\n**Rule:** r\n**Scope:** repo\n" \
-                  "**Added:** 2026-09-05\n**Source:** user\n"
-        _write(path, drifted)
-
-        with self._no_gh_guard():
-            code, _, err = _run_cli(["fmt", "--write", "--local-only", path])
-
-        self.assertNotEqual(code, 0)
-        self.assertIn("--local-only", err)
-        with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), drifted)
-
-    def test_local_only_checks_managed_files_without_gh(self):
+    def test_no_path_checks_managed_files_without_gh(self):
         self._use_file_store_for_deferrals()
         _write(os.path.join(self.tmp, "docs", "forge", "constraints.md"), (
             "## bad id\n"
@@ -2015,15 +1961,15 @@ class FmtBranchExclusivityTests(CLITestCase):
             "**Source:** user\n"
         ))
         with self._no_gh_guard():
-            code, out, err = _run_cli(["fmt", "--check", "--local-only"])
+            code, out, err = _run_cli(["fmt", "--check"])
         self.assertNotEqual(code, 0)
         self.assertIn("bad id", out)
 
-    def test_local_only_never_reaches_gh_under_the_github_store(self):
+    def test_no_path_never_reaches_gh_under_the_github_store(self):
         # No config.json: the GitHub store is selected for deferrals, and
-        # --local-only must still make no gh call at all.
+        # fmt must still make no gh call at all.
         with self._no_gh_guard():
-            code, out, err = _run_cli(["fmt", "--check", "--local-only"])
+            code, out, err = _run_cli(["fmt", "--check"])
         self.assertEqual(code, 0, out + err)
 
 
@@ -2100,8 +2046,6 @@ class SingleLineFieldTests(unittest.TestCase):
             with self.subTest(field=name):
                 fields = _valid_deferral_fields()
                 fields[name] = "a\nb"
-                if name == "follow-up":
-                    fields[name] = "revisit-when:a\nb"
                 record = fm.Record(type="deferral", fields=fields)
                 defects = fm.validate(record)
                 self.assertTrue(
@@ -2144,8 +2088,8 @@ class SingleLineFieldTests(unittest.TestCase):
             ("deferral", _valid_deferral_fields()),
             ("deferral", _valid_deferral_fields(title="## heading-shaped title")),
             ("deferral", _valid_deferral_fields(why="Why: **not** a label.")),
-            ("deferral", dict(_valid_deferral_fields(),
-                              **{"follow-up": "revisit-when: the *audit* lands"})),
+            ("deferral", _valid_deferral_fields(
+                **{"from": "docs/forge/plans/p.md, Task 2"})),
         ]
         for record_type, fields in candidates:
             with self.subTest(fields=fields):
@@ -2199,7 +2143,7 @@ class NewlineArgumentCLITests(CLITestCase):
         with self._no_gh_guard():
             code, out, err = _run_cli([
                 "defer", "--title", "Something", "--why", "one\ntwo",
-                "--follow-up", "backlog",
+                "--by", "human",
             ])
         self.assertEqual(code, 1)
         self.assertIn("why", err)
@@ -2226,11 +2170,8 @@ class MalformedConfigCLITests(CLITestCase):
 
     def test_defer(self):
         self._assert_named([
-            "defer", "--title", "t", "--why", "w", "--follow-up", "backlog",
+            "defer", "--title", "t", "--why", "w", "--by", "human",
         ])
-
-    def test_list_deferrals(self):
-        self._assert_named(["list-deferrals"])
 
     def test_resolve_deferral(self):
         self._assert_named(["resolve-deferral", "--ref", "7", "--reason", "done"])
@@ -2247,7 +2188,7 @@ class MalformedConfigCLITests(CLITestCase):
         store selection grows a config read they regress to a traceback."""
         commands = [
             fm.cmd_add_constraint, fm.cmd_retire_constraint,
-            fm.cmd_list_constraints, fm.cmd_defer, fm.cmd_list_deferrals,
+            fm.cmd_list_constraints, fm.cmd_defer,
             fm.cmd_resolve_deferral,
         ]
         for func in commands:
@@ -2374,7 +2315,7 @@ class EmittedTemplateEndToEndTests(CLITestCase):
         record = fm.parse(bodies[0], "deferral")[0]
         self.assertEqual(record.fields["from"], "docs/forge/plans/p.md, Task 2")
         self.assertNotEqual(record.fields["from"], "user")
-        self.assertEqual(record.fields["follow-up"], "backlog")
+        self.assertNotIn("follow-up", record.fields)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["deferrals"][0]["issue"], "101")
 
@@ -2415,8 +2356,7 @@ class EmittedTemplateEndToEndTests(CLITestCase):
         argv = shlex.split(advertised)
         promised = argv[argv.index("--from") + 1]
         code, out, err = _run_cli([
-            "defer", "--title", "a title", "--why", "a why",
-            "--follow-up", "backlog",
+            "defer", "--title", "a title", "--why", "a why", "--by", "agent",
             "--run", os.path.relpath(path), "--finding-id", "F1",
         ])
         self.assertEqual(code, 0, err)

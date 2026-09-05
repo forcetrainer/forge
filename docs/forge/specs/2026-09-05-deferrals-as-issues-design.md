@@ -34,7 +34,7 @@ below that it alone can satisfy.
 - **Claude** — the orchestrator holds `defer` findings in context as today (dispatch and
   inline alike), presents them at close-out, and files accepted ones by invoking
   `forge_memory.py defer`. It never writes an issue body or a file directly.
-- **Reviewer verdict contract is unchanged.** No `title`/`follow-up` field is added.
+- **Reviewer verdict contract is unchanged.** No `title` field is added.
   A reviewer `summary` (100–200 chars) cannot become an ≤80-char `title` without
   truncation, and truncation is a budget error; authorship therefore happens at the
   close-out gate, where judgment is present.
@@ -44,12 +44,12 @@ below that it alone can satisfy.
 Runs after the final review passes and the full suite is green, before the
 branch-disposition question.
 
-- Every staged deferral is presented with proposed `title` (≤80), `why` (≤300),
-  `from` (plan path + task number, or `user`), `follow-up` (`backlog`).
+- Every staged deferral is presented with proposed `title` (≤80), `why` (≤300) and
+  `from` (plan path + task number, or empty).
 - User may accept, edit, or drop each.
-- Only accepted deferrals are filed.
-- `follow-up` defaults to `backlog` for every runner-generated deferral. No stage
-  guesses `drop` or `revisit-when:<condition>`.
+- Only accepted deferrals are filed, with `--by agent` — the runner stages what an
+  agent found. Kind (`feature`/`defect`/`debt`/`risk`) is a human judgment applied
+  afterward and is never set by the engine.
 - Deferrals are surfaced for review because they can affect the next phase — the gate
   is a decision point, not a notification.
 - An autonomous Codex run ends with deferrals **staged, not filed**. Accepted
@@ -59,13 +59,54 @@ branch-disposition question.
   would lose work. `is_terminal` answers "is anything still writing this file", which
   is the only question filing safety depends on — not whether the run finished clean.
 
+## Labels
+
+Six labels, every one meaningful to a human. The engine applies one of them; the rest
+are human judgment.
+
+- **Kind** — exactly one, required: `feature` | `defect` | `debt` | `risk`.
+  Mutually exclusive and exhaustive by design (Kersten's flow items); the forcing
+  function is the value.
+- **Origin** — exactly one, required: `by:human` | `by:agent`. Who noticed it.
+- **Which phase** is NOT a label. The record's `from:` field already names the plan and
+  the task, which is finer than a phase label and cannot drift from it.
+
+`defer` applies `by:agent` on create when an agent authored the record, `by:human` when
+the user did. Kind is never set by the engine — whether something is a defect or debt is
+a human call the runner cannot make.
+
+Three cases, all expressible:
+
+| case | kind | origin | `from:` |
+|---|---|---|---|
+| human files an issue | one of four | `by:human` | empty |
+| agent finds it mid-phase | one of four | `by:agent` | plan path, Task N |
+| human spots it mid-phase | one of four | `by:human` | plan path, Task N |
+
+**Retired:** `forge:deferral`, `forge:backlog`/`drop`/`revisit`, and the `follow-up`
+field. A deferral is an open issue nobody is working on; `backlog` restates that,
+`drop` means close it, and `revisit-when:<condition>` is a comment. Removing the field
+also removes the closed-set constraint that forced an unbounded `revisit-when:` value
+into a bounded label.
+
+**Validation stays at write time.** `GitHubStore.create` validates before `_gh_ready`,
+so a malformed or over-budget record never reaches the network — that is what keeps
+forge honest about its own output, and it needs no label. Read-back validation of
+already-filed issue bodies is dropped along with `list-deferrals`: both existed only to
+re-find the engine's own records, both duplicate the GitHub UI, and the threat they
+guarded (a human editing a body) does not propagate, because the next record is composed
+from CLI arguments rather than read from the last one.
+
+Conformance of the wider issue list — issues filed by people who have never heard of
+forge, missing or duplicated kind labels — is a Phase 4 concern (`audit-issues`), not
+this phase's.
+
 ## User-initiated deferrals
 
 A deferral the user asks for mid-session ("I want to work on this later") files
 **immediately** through `forge_memory.py defer` with `from: user`. No close-out gate —
 the gate exists to put judgment in front of machine-generated deferrals, and a user
-request already carries it. `follow-up` is whatever the user states, defaulting to
-`backlog`.
+request already carries it. It files with `--by human`.
 
 ## Staging and idempotency
 
@@ -105,9 +146,13 @@ request already carries it. `follow-up` is whatever the user states, defaulting 
 
 Phase 2 is the second consumer of both; settled here rather than deferred again.
 
-- `Record.ref` becomes `field(compare=False, repr=False)`. A ref is storage metadata;
-  excluding it restores the equality and repr semantics `Record` had before Phase 1
-  Task 3, with no loss of data.
+- `Record.ref` is **removed outright**. It was added to carry the issue number of a
+  record read back from GitHub, then excluded from equality and repr so that storage
+  metadata could not change what "the same record" means. With the GitHub read path
+  gone (`GitHubStore.scan` was its only writer), nothing assigns a ref, so there is no
+  metadata left to exclude — and a field nothing can set misleads the next reader.
+  `Record` is its type and its fields. The equality semantics the exclusion protected
+  now hold by construction.
 - `GitHubStore.list`'s `errors` out-parameter is removed. One method must not switch
   between raising and collecting based on whether a caller passed a mutable list.
 - Both behaviors become **uniform across both stores**, so no call site branches on the
@@ -153,8 +198,8 @@ A guided task, not a script.
 - Staged deferral emission includes a runnable `defer` command per entry.
 - Filing records the issue number into `run.json`; a second close-out files nothing.
 - gh-unavailable at filing: loud, staged, commands printed, run not failed.
-- `Record` equality ignores `ref`; two records differing only by `ref` compare equal.
-- `GitHubStore.list` returns `(records, errors)`; no out-parameter remains.
+- `Record` has no `ref` field; two records with equal fields compare equal.
+- `GitHubStore` has no `scan`/`list`; no `gh issue list` call site remains anywhere.
 - Repo-wide grep: no reference to `docs/forge/DEFERRALS.md` as a write target or a
   live read path. A notice stating that it is retired may name it.
 
@@ -170,9 +215,10 @@ A guided task, not a script.
 
 `constraints.md` adoption and the `DECISIONS.md` freeze (Phase 3); `ROADMAP.md`
 retirement, brainstorming's issue reconciliation, and the full `project-memory` skill
-rewrite (Phase 4); spec de-dating (Phase 5). The `--local-only` filename-inference
-fragility and `select_store` constructing an unqueried `GitHubStore` remain deferred —
-neither is touched by this phase.
+rewrite (Phase 4); spec de-dating (Phase 5); `audit-issues` and the issue-taxonomy
+standard (Phase 4). `select_store` constructing an unqueried `GitHubStore` remains
+deferred. (`--local-only` was removed by the label amendment — its filename-inference
+deferral no longer has a subject.)
 
 ## Note
 
@@ -182,3 +228,6 @@ Dated per the current convention. Phase 5 de-dates and migrates it.
 2026-09-05: halted runs may file — is_terminal gates on write safety, not clean completion; acceptance grep permits a retirement notice naming the retired path (Task 4 review, issue #44).
 2026-09-05: the emitted `defer` command is a fill-in template, not a runnable command — `--title`/`--why` are placeholders. It carries `--from` (plan path, plus `, Task N` when the staged entry records one), since an omitted `--from` files as `from: user`, the marker reserved for deferrals that skip this gate; and `--occurrence N` when two staged deferrals share a finding id, so both can be filed and neither is attributed to the other's finding — an ambiguous id without it is refused, never guessed (Phase 2 final review, issue #44).
 2026-09-05: the runner is NOT unchanged — it must stage a task number (nothing downstream can recover it) and persist deferrals across a resume (or staged entries and their issue numbers are erased). Both surfaced by the final review; the original claim that forge-run.py needed no change was wrong (issue #44).
+2026-09-05: `Record.ref` removed rather than merely excluded from equality — dropping the GitHub read path removed its only writer, so the field carried nothing and the `field(compare=False, repr=False)` guard protected nothing (issue #44).
+2026-09-05: label model reworked — six human-meaningful labels (four kinds x two origins), `forge:deferral` and the follow-up field retired, read-back issue validation and `list-deferrals` dropped. `forge:deferral` existed only as a retrieval marker for two features that duplicate the GitHub UI; write-time validation is the half that matters and needs no label (issue #44).
+2026-09-05: swept the spec's own earlier prose against the label amendment — the close-out gate, user-initiated deferrals and Out of scope still described `follow-up` and `--local-only` as live. Anyone following the gate section would have authored a `defer` call carrying a flag that no longer parses and omitting `--by`, which is required (label amendment review, issue #44).

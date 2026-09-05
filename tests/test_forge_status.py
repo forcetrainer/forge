@@ -391,7 +391,11 @@ class RenderStagedDeferralsTests(unittest.TestCase):
             self.assertIn("f1", text)
             self.assertIn(summary, text)
             self.assertIn("forge_memory.py defer", text)
-            self.assertIn("--follow-up backlog", text)
+            # The runner stages agent-found findings, so the emitted
+            # template carries the origin the filing will label the issue
+            # with. `--follow-up` is retired along with the field.
+            self.assertIn("--by agent", text)
+            self.assertNotIn("--follow-up", text)
             self.assertIn("--run {}".format(shlex.quote(run_path)), text)
             self.assertIn("--finding-id {}".format(shlex.quote("f1")), text)
 

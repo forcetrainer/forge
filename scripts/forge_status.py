@@ -355,6 +355,13 @@ def render_staged_deferrals(state, run_json_path):
     one provenance it certainly does not have; ``deferral_provenance``
     supplies the real one from the run itself.
 
+    ``--by agent`` is fixed, not derived: everything this function renders
+    is a finding a REVIEWER raised during the run, so the issue it becomes
+    is one an agent noticed. A deferral a human asked for directly never
+    passes through here — it files immediately, with ``--by human``.
+    The KIND label (feature/defect/debt/risk) is deliberately absent from
+    the template: it is a human judgment, made after the issue exists.
+
     ``--occurrence`` is emitted only for a finding id that more than one
     staged entry shares. Finding ids are reviewer-authored per review and
     never namespaced, so a run's ``deferrals`` list can hold two entries
@@ -386,7 +393,7 @@ def render_staged_deferrals(state, run_json_path):
         else:
             command = (
                 "  forge_memory.py defer --title <title> --why <why> "
-                "--follow-up backlog --from {} --run {} --finding-id {}".format(
+                "--by agent --from {} --run {} --finding-id {}".format(
                     shlex.quote(
                         deferral_provenance(
                             state.get("plan"), entry, run_json_path,

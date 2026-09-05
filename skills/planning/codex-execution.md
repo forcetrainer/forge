@@ -184,7 +184,7 @@ filed it) — a **fill-in-the-blanks** command template, not a ready-to-run
 command:
 
 ```
-forge_memory.py defer --title <title> --why <why> --follow-up backlog \
+forge_memory.py defer --title <title> --why <why> --by agent \
   --from <plan path[, Task N]> --run <run.json> --finding-id <id> [--occurrence N]
 ```
 
@@ -247,8 +247,12 @@ ordinal says which one a command means, so both can be filed and neither is
 attributed to the other's finding. Filing an ambiguous id without it is
 refused, loudly and by name — never resolved by guessing.
 
-`follow-up` defaults to `backlog` for every runner-generated deferral —
-`--status` never emits a template guessing `drop` or `revisit-when:<condition>`.
+`--by agent` is fixed in the template, not derived: everything `--status`
+emits is a finding a reviewer raised during the run, so the issue it becomes
+is one an agent noticed. `--by` is required on every `defer` and is never
+defaulted. The **kind** label (`feature`/`defect`/`debt`/`risk`) is
+deliberately absent — a human applies it in the GitHub UI after the issue
+exists; the runner has no flag for it and never guesses one.
 An autonomous Codex run that reaches a terminal state ends with its
 deferrals **staged, not filed** — that is deliberate; an unreviewed
 auto-deferral must not become a permanent issue.

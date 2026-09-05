@@ -25,22 +25,37 @@ Log when: an approach is chosen during brainstorming, a design decision is locke
 
 Deferrals are **GitHub issues**, not a file. `docs/forge/DEFERRALS.md` is
 retired as a write target and as a live read path — nothing writes it, and
-nothing reads it as the record of deferred work. Record and query deferrals
-through `scripts/forge_memory.py`:
+nothing reads it as the record of deferred work. File deferrals through
+`scripts/forge_memory.py`; **read** them in the GitHub issue list, which is
+what it is for — the CLI files and closes, it never lists issues back:
 
 ```bash
 forge_memory.py defer --title "Skipped retry backoff on the sync client" \
   --why "Single-user, local network; failures are rare and manual retry is fine." \
-  --from "docs/forge/plans/2026-06-10-sync.md, Task 3" --follow-up backlog
-forge_memory.py list-deferrals
+  --from "docs/forge/plans/2026-06-10-sync.md, Task 3" --by agent
+forge_memory.py resolve-deferral --ref 123 --reason "fixed in Phase 4"
 ```
 
-`title` (≤80 chars), `why` (≤300 chars), `from` (plan path plus the stage
-that produced it — `, Task N`, or `, final review` for a finding the
-plan-level final review raised — or `user`), `follow-up` (`backlog` — the issue stays open — or `drop`, or
-`revisit-when:<condition>`; `roadmap` is retired along with `ROADMAP.md`'s
-role as a deferral destination) are the record's fields; budget overrun is a
-hard error, not a truncation.
+`title` (≤80 chars), `why` (≤300 chars), and `from` (plan path plus the
+stage that produced it — `, Task N`, or `, final review` for a finding the
+plan-level final review raised — or `user`) are the record's whole schema;
+budget overrun is a hard error, not a truncation. There is no disposition
+field: a deferral **is** an open issue nobody is working on, so "backlog"
+would only restate that, "drop" means don't file it, and "revisit when X"
+is a comment on the issue.
+
+**Labels.** Six, every one meaningful to a person:
+
+- **Kind** — exactly one, required: `feature` | `defect` | `debt` | `risk`.
+  Set by a **human**, in the GitHub UI. `defer` never applies one and has
+  no flag for it — whether something is a defect or debt is a judgment the
+  engine cannot make, and a guess reads as a judgment somebody made.
+- **Origin** — exactly one, required: `by:human` | `by:agent`. This is
+  `--by`, which is required on every `defer` and never defaulted. The
+  label is created in the repo on first use if it is missing.
+
+Which phase is deliberately **not** a label: `from:` already names the plan
+and the task, which is finer and cannot drift from it.
 
 **Agency rule:** during execution, agents may defer **non-spec scope only**
 — nice-to-haves, refactors, edge polish they judge out of scope. Anything
@@ -61,7 +76,7 @@ Created **only** when brainstorming decomposes work into multiple sub-projects o
 - [planned] Phase 3: Sharing — read-only share links
 ```
 
-Statuses: `planned | in-progress | done | deferred`. Planning marks a phase `in-progress` at kickoff and `done` at completion. Deferrals with `roadmap` follow-up add a `deferred` line.
+Statuses: `planned | in-progress | done | deferred`. Planning marks a phase `in-progress` at kickoff and `done` at completion.
 
 ## Legacy
 

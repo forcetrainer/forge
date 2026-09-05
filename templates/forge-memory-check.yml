@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  issues: read
 
 jobs:
   check:
@@ -17,6 +16,4 @@ jobs:
         with:
           python-version: "3.x"
       - name: forge_memory fmt --check
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/forge_memory.py fmt --check

@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """forge_memory_store — where records created by forge_memory.py live.
 
-Two implementations of one interface (``create``/``list``/``retire``):
+Two implementations of one interface (``create``/``retire``) — the two
+operations a caller makes without knowing which store ``select_store``
+handed it. Reading records back is NOT part of that interface: only
+``FileStore`` can do it, and its one caller (``list-constraints``) is
+hard-wired to ``FileStore`` by ``select_store``, so ``scan``/``list``
+live on ``FileStore`` rather than being promised by a base class that
+``GitHubStore`` could not honour.
 
 - ``FileStore`` — canonical markdown, machine-written only. Used for
   ``constraint`` unconditionally, and for ``deferral`` only when the repo has
   explicitly opted out of GitHub via ``docs/forge/config.json``.
-- ``GitHubStore`` — the default for ``deferral``. ``gh issue create/list/close
-  --json`` under the hood; issue bodies are produced by ``forge_memory.render``
-  — the *same* renderer ``FileStore`` uses — so ``forge_memory.fmt_check``
-  validates open ``forge:deferral`` issues the same way it validates files,
-  and ``GitHubStore.list`` reads them back through ``forge_memory.parse``.
+- ``GitHubStore`` — the default for ``deferral``. ``gh issue create/close``
+  under the hood; issue bodies are produced by ``forge_memory.render``, the
+  *same* renderer ``FileStore`` uses. Write-only: it files and closes, and
+  never reads issues back. Re-finding forge's own records duplicated the
+  GitHub UI, and validating a body already on GitHub guards a threat that
+  does not propagate — the next record is composed from CLI arguments, not
+  read from the last one. ``create`` validates BEFORE ``_gh_ready``, which
+  is the half that matters: a malformed or over-budget record never
+  reaches the network.
 
 The one rule that matters more than any other here: every store failure is
 loud and names its fix. A missing/unauthenticated ``gh``, or a repo with
@@ -36,34 +46,14 @@ class ConfigError(Exception):
 
 
 class Store:
-    def create(self, record):
-        raise NotImplementedError
-
-    def scan(self, type, **filters):
-        """(records, errors): every record this store holds that could be
-        parsed, plus an (ref, message) entry for every one that could not.
-        Never raises on a bad record — the collect-every-defect
-        counterpart to ``list``, and the one method a caller needing that
-        (fmt --check over open issues, list-deferrals) can call without
-        knowing which store it holds."""
-        raise NotImplementedError
-
-    def list(self, type, **filters):
-        """Every record this store holds. A thin wrapper over ``scan``:
-        raises the moment ``scan`` reports even one error, rather than
-        returning a partial result silently."""
+    def create(self, record, by=None):
+        """Store ``record``. ``by`` is the record's ORIGIN (``"human"`` or
+        ``"agent"``) — who noticed it. It is not a schema field: on GitHub
+        it becomes the issue's ``by:`` label, and a backend with no label
+        facility ignores it rather than inventing a field to mirror one."""
         raise NotImplementedError
 
     def retire(self, ref, reason=None):
-        raise NotImplementedError
-
-    def describe_ref(self, ref):
-        """How this store names one ``ref`` from a ``scan`` error or a
-        ``Record.ref``, for a message a human reads. A ref is
-        store-specific — an issue number here, a file line number there —
-        so the store that produced it is the only thing that can label it
-        accurately; a caller printing a bare "#{ref}" rendered a file's
-        line 1 as issue 1."""
         raise NotImplementedError
 
 
@@ -104,7 +94,11 @@ class FileStore(Store):
     def _heading_field(self):
         return forge_memory.SCHEMA[self.type][0].name
 
-    def create(self, record):
+    def create(self, record, by=None):
+        # ``by`` is accepted and dropped: the file backend has no labels,
+        # and the record schema has no origin field to put it in. Choosing
+        # this backend is an explicit opt-out from issues (see
+        # ``select_store``), so it is an opt-out from what issues carry.
         if record.type != self.type:
             raise ValueError(
                 "FileStore at {!r} holds {!r} records, got {!r}".format(
@@ -130,14 +124,19 @@ class FileStore(Store):
         return ref
 
     def scan(self, type, **filters):
-        """(records, errors), same shape as ``GitHubStore.scan``, but
-        all-or-nothing rather than per-record: ``forge_memory.parse``
-        reads the whole file as one atomic pass over shared state (a
-        heading opens a record, a duplicate id or bad line anywhere aborts
-        the whole parse), so there is no independently-parsed good record
-        to salvage the way there is for each of GitHubStore's separately
-        parsed issue bodies — a parse failure here always yields zero
-        records alongside the one error."""
+        """(records, errors): every record in the file that parsed, plus an
+        ``(ref, message)`` entry for what did not, ``ref`` being the line
+        number. Never raises on a bad file — the collect-every-defect
+        counterpart to ``list``, which is its only caller (``FileStore.list``
+        below; ``GitHubStore`` has no read path at all, which is why neither
+        method is promised by ``Store``).
+
+        All-or-nothing rather than per-record: ``forge_memory.parse`` reads
+        the whole file as one atomic pass over shared state (a heading opens
+        a record, a duplicate id or bad line anywhere aborts the whole
+        parse), so there is no independently-parsed good record to salvage —
+        a parse failure here always yields zero records alongside the one
+        error."""
         if type != self.type:
             raise ValueError(
                 "FileStore at {!r} holds {!r} records, got {!r}".format(
@@ -157,13 +156,6 @@ class FileStore(Store):
             _, message = errors[0]
             raise forge_memory.SchemaError(message)
         return records
-
-    def describe_ref(self, ref):
-        """The file. ``FileStore``'s refs are line numbers, and every
-        message they accompany comes from ``forge_memory.parse``, which
-        already names the line — what the reader is missing is which file
-        it is in."""
-        return self.path
 
     def retire(self, ref, reason=None):
         heading = self._heading_field()
@@ -210,45 +202,25 @@ def _raise_for_gh_failure(proc):
     raise StoreUnavailable("gh command failed: {}".format(stderr or proc.returncode))
 
 
-def _follow_up_label(value):
-    """The ``follow-up`` field value -> its label in the closed set above.
-    ``revisit-when:<condition>`` has unbounded cardinality, so the condition
-    itself is never a label — it lives in the rendered body, which is where
-    ``list`` reads it back from. Returns ``None`` for a value outside the
-    schema's enum, which ``validate`` has already rejected by the time
-    ``create`` gets here."""
-    if value in ("backlog", "drop"):
-        return GitHubStore.FOLLOW_UP_LABELS[value]
-    if value.startswith("revisit-when:"):
-        return GitHubStore.FOLLOW_UP_LABELS["revisit"]
-    return None
-
-
 class GitHubStore(Store):
-    """``gh issue create/list/close --json`` backend for ``deferral``
-    records. Issue bodies are ``forge_memory.render`` output — the same
-    renderer ``FileStore`` uses — and are read back through
-    ``forge_memory.parse``."""
+    """``gh issue create/close`` backend for ``deferral`` records. Issue
+    bodies are ``forge_memory.render`` output — the same renderer
+    ``FileStore`` uses. Write-only: nothing here reads an issue back.
 
-    LABEL = "forge:deferral"
+    Labels: exactly one origin label per filed issue. The KIND labels
+    (``feature``/``defect``/``debt``/``risk``) are never applied here —
+    whether something is a defect or debt is a human call this engine
+    cannot make, and a guessed kind label is worse than an absent one
+    because it reads as a judgment somebody made."""
 
-    # A fixed, closed label set. `gh issue create` rejects a label the repo
-    # does not have, and nothing but this store ever creates one — so the
-    # labels it uses must be few enough to create up front, which rules out
-    # labelling with the raw follow-up value (`revisit-when:<condition>` is
-    # unbounded and could never pre-exist).
-    FOLLOW_UP_LABELS = {
-        "backlog": "forge:backlog",
-        "drop": "forge:drop",
-        "revisit": "forge:revisit",
+    ORIGIN_LABELS = {
+        "human": "by:human",
+        "agent": "by:agent",
     }
 
-    _LABEL_DESCRIPTIONS = {
-        LABEL: "Work deferred through forge_memory.py defer",
-        FOLLOW_UP_LABELS["backlog"]: "Deferred: stays open in the backlog",
-        FOLLOW_UP_LABELS["drop"]: "Deferred: dropped unless it comes back",
-        FOLLOW_UP_LABELS["revisit"]:
-            "Deferred: revisit when the condition in the body is met",
+    _ORIGIN_DESCRIPTIONS = {
+        "by:human": "Noticed by a person",
+        "by:agent": "Noticed by an agent",
     }
 
     def __init__(self, repo_root):
@@ -259,112 +231,138 @@ class GitHubStore(Store):
             ["gh"] + args, cwd=self.repo_root, capture_output=True, text=True,
         )
 
-    def _ensure_labels(self, labels):
-        """Create each label if missing, before the issue that needs it.
-        ``--force`` makes this idempotent (it updates an existing label
-        instead of erroring), so a repo that already has them is a no-op.
-        A failure here is loud and names the one-time manual fix — never a
-        silent slide to an unlabelled issue or to the file store."""
-        for name in labels:
-            proc = self._run([
-                "label", "create", name,
-                "--description", self._LABEL_DESCRIPTIONS[name],
-                "--force",
-            ])
-            if proc.returncode != 0:
-                # A repo with Issues disabled fails here first, on the
-                # label rather than the issue; it is still that failure and
-                # still names that fix, not a misleading label message.
-                if _issues_disabled(proc):
-                    _raise_for_gh_failure(proc)
-                stderr = (proc.stderr or "").strip()
-                raise StoreUnavailable(
-                    "could not ensure the label {0!r} exists, which "
-                    "`gh issue create` requires (gh said: {1}). Create it "
-                    "once with `gh label create {0}` — or have someone with "
-                    "write access to this repo do it — then re-run.".format(
-                        name, stderr or proc.returncode,
-                    )
-                )
+    # How many labels to read when checking whether an origin label
+    # exists. `gh label list` defaults to 30, which a repo can exceed. A
+    # repo with more labels than this is not a silent wrong answer: the
+    # label reads as absent, the create is attempted, and gh refuses it —
+    # loudly, through the named message below.
+    _LABEL_LIST_LIMIT = 1000
 
-    def create(self, record):
+    def _label_exists(self, name):
+        """Whether the repo already has the label ``name``, answered from
+        ``gh label list --json name`` — STRUCTURED output.
+
+        Never from the text of a gh error. Deciding "this label already
+        exists" by matching English prose in stderr would turn a reworded
+        or localised gh message into a filing that fails on a label the
+        repo already has, and that failure would look exactly like a
+        permissions problem. The question here has an exact answer
+        available, so it is asked exactly.
+
+        Costs one extra `gh` call per filing. Filing happens at a close-out
+        gate, a handful of times per run at most, so the call is cheap
+        where it lands — and it buys the alternative's avoidance: `gh label
+        create --force` needs no query but rewrites an existing label's
+        colour and description on every single filing, overwriting whatever
+        a human chose (and, with no `--color` passed, re-randomising it).
+
+        Any failure to ASK the question is loud: an unreadable answer is
+        never read as "absent", which would attempt a create every time."""
+        proc = self._run([
+            "label", "list", "--json", "name",
+            "--limit", str(self._LABEL_LIST_LIMIT),
+        ])
+        if proc.returncode != 0:
+            # A repo with Issues disabled fails here first, on the label
+            # query rather than the issue; it is still that failure and
+            # still names that fix, not a misleading label message.
+            if _issues_disabled(proc):
+                _raise_for_gh_failure(proc)
+            raise StoreUnavailable(
+                "could not check whether the label {0!r} exists, which "
+                "every filed deferral must carry (gh said: {1}). Re-run "
+                "once `gh label list` works in this repo.".format(
+                    name, (proc.stderr or "").strip() or proc.returncode,
+                )
+            )
+        try:
+            data = json.loads(proc.stdout or "[]")
+            names = {item["name"] for item in data}
+        except (ValueError, TypeError, KeyError) as e:
+            raise StoreUnavailable(
+                "could not read the label list while checking for {0!r}, "
+                "which every filed deferral must carry ({1}). Refusing to "
+                "assume the label is absent — that would try to create it "
+                "on every filing.".format(name, e)
+            )
+        return name in names
+
+    def _ensure_label(self, name):
+        """Create ``name`` if the repo does not already have it, before the
+        issue that needs it.
+
+        Create-if-missing rather than fail-loud, because of the fresh-repo
+        case: ``gh issue create`` rejects a label the repo does not have,
+        nothing but this store ever creates these two, and the first
+        ``defer`` in a repo runs at a close-out gate — after every task and
+        the final review have passed. Failing there, on a label the user
+        has never heard of, would strand a reviewed deferral behind a
+        manual `gh label create` for a name only this code knows. The set
+        is closed and tiny (two values), so creating on demand cannot grow
+        unbounded the way labelling with a free value would.
+
+        The accepted consequence: when the label is ABSENT, filing needs
+        permission to create a repository label, not just to open an issue.
+        Someone with issue-write but not label-write cannot file until the
+        label exists, so the failure below says exactly that — it names the
+        label, says plainly that it could not be created, and gives the
+        one-time command someone with write access runs. It is never a
+        silent slide to an unlabelled issue or to the file store."""
+        if self._label_exists(name):
+            return
+        proc = self._run([
+            "label", "create", name,
+            "--description", self._ORIGIN_DESCRIPTIONS[name],
+        ])
+        if proc.returncode == 0:
+            return
+        if _issues_disabled(proc):
+            _raise_for_gh_failure(proc)
+        raise StoreUnavailable(
+            "could not create the label {0!r}, which every filed deferral "
+            "must carry and which this repository does not have yet (gh "
+            "said: {1}). Filing a deferral needs permission to create a "
+            "repository label the first time an origin is used — issue "
+            "write access alone is not enough. Run `gh label create {0}` "
+            "once, or ask someone with write access to this repo to, then "
+            "re-run.".format(name, (proc.stderr or "").strip() or proc.returncode)
+        )
+
+    def create(self, record, by=None):
         # Validated here, not only in the CLI: FileStore.create validates,
         # and the file store is "a second drawer, not a degraded path" —
         # the symmetry has to hold in both directions, or a non-CLI caller
-        # pushes an over-budget body that only CI would catch.
+        # pushes an over-budget body that nothing would catch. Nothing
+        # catches it later any more: read-back validation of filed bodies
+        # is gone, so this is the only gate between a malformed record and
+        # the network. It runs before ``_gh_ready`` deliberately.
         defects = forge_memory.validate(record)
         if defects:
             raise forge_memory.SchemaError(
                 "refusing to store an invalid record: {}".format("; ".join(defects))
             )
+        label = self.ORIGIN_LABELS.get(by)
+        if label is None:
+            raise forge_memory.SchemaError(
+                "refusing to file a deferral with no origin: pass by="
+                "'human' or 'agent' (got {!r}). Every issue this engine "
+                "files carries exactly one origin label, and the engine "
+                "cannot infer which — a guess would label a real issue "
+                "wrongly.".format(by)
+            )
         _gh_ready(self.repo_root)
         body = forge_memory.render(record)
         title = record.fields.get("title", "")
-        labels = [self.LABEL]
-        follow_up_label = _follow_up_label(record.fields.get("follow-up", ""))
-        if follow_up_label:
-            labels.append(follow_up_label)
-        self._ensure_labels(labels)
-        args = ["issue", "create", "--title", title, "--body", body]
-        for label in labels:
-            args += ["--label", label]
-        proc = self._run(args)
+        self._ensure_label(label)
+        proc = self._run([
+            "issue", "create", "--title", title, "--body", body,
+            "--label", label,
+        ])
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         number = url.rstrip("/").rsplit("/", 1)[-1]
         return number
-
-    def describe_ref(self, ref):
-        return "issue #{}".format(ref)
-
-    def scan(self, type, state="all", **filters):
-        """Returns ``(records, errors)`` — the same shape ``FileStore.scan``
-        returns. Every issue's body is parsed back through
-        ``forge_memory.parse``, each returned ``Record`` carrying its issue
-        number as ``.ref`` (the public way a caller — ``fmt``'s open-issue
-        check included — recovers which issue a record came from; this is
-        the only ``gh issue list`` call site in the codebase).
-
-        An unparsable body never aborts the call: it appends an
-        ``(issue_number, message)`` pair to the returned ``errors`` instead,
-        so one bad issue never hides another. The records that DO parse are
-        still returned (and still subject to ``forge_memory.validate`` by
-        the caller, the same as a good record from a bad file would be)."""
-        _gh_ready(self.repo_root)
-        proc = self._run([
-            "issue", "list", "--label", self.LABEL, "--state", state,
-            "--json", "number,title,body",
-        ])
-        if proc.returncode != 0:
-            _raise_for_gh_failure(proc)
-        data = json.loads(proc.stdout or "[]")
-        records = []
-        errors = []
-        for item in data:
-            ref = str(item.get("number"))
-            try:
-                parsed = forge_memory.parse(item.get("body", ""), type)
-            except forge_memory.SchemaError as e:
-                errors.append((ref, str(e)))
-                continue
-            for r in parsed:
-                r.ref = ref
-                records.append(r)
-        return [r for r in records if _matches(r, filters)], errors
-
-    def list(self, type, state="all", **filters):
-        """Thin wrapper over ``scan``: raises the moment it reports any
-        error — one parse path, not two — exactly ``FileStore.list``'s
-        contract, so a caller holding either store gets the same behavior
-        from ``list``."""
-        records, errors = self.scan(type, state=state, **filters)
-        if errors:
-            ref, message = errors[0]
-            raise forge_memory.SchemaError(
-                "issue #{}: {}".format(ref, message)
-            )
-        return records
 
     def retire(self, ref, reason=None):
         _gh_ready(self.repo_root)

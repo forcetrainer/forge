@@ -19,15 +19,13 @@ import forge_memory  # noqa: E402
 import forge_memory_store as fms  # noqa: E402
 
 
-def _deferral(title="fix-the-thing", why="Needed later.", frm="user",
-              follow_up="backlog"):
+def _deferral(title="fix-the-thing", why="Needed later.", frm="user"):
     return forge_memory.Record(
         type="deferral",
         fields={
             "title": title,
             "why": why,
             "from": frm,
-            "follow-up": follow_up,
         },
     )
 
@@ -261,7 +259,7 @@ class GitHubStoreTests(unittest.TestCase):
         store = fms.GitHubStore(self.tmp)
         with mock.patch.object(fms.shutil, "which", return_value=None):
             with self.assertRaises(fms.StoreUnavailable) as cm:
-                store.create(_deferral())
+                store.create(_deferral(), by="agent")
         msg = str(cm.exception)
         self.assertIn("gh", msg)
         self.assertIn("install", msg.lower())
@@ -274,7 +272,7 @@ class GitHubStoreTests(unittest.TestCase):
              mock.patch.object(fms.subprocess, "run") as run:
             run.return_value = _completed(returncode=1, stderr="not logged in")
             with self.assertRaises(fms.StoreUnavailable) as cm:
-                store.create(_deferral())
+                store.create(_deferral(), by="agent")
         self.assertIn("gh auth login", str(cm.exception))
 
     def test_issues_disabled_raises_naming_fix(self):
@@ -291,110 +289,218 @@ class GitHubStoreTests(unittest.TestCase):
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
             with self.assertRaises(fms.StoreUnavailable) as cm:
-                store.create(_deferral())
+                store.create(_deferral(), by="agent")
         msg = str(cm.exception).lower()
         self.assertIn("issues", msg)
         self.assertIn("enable", msg)
 
-    def test_create_invokes_gh_issue_create_with_body_and_labels(self):
-        store = fms.GitHubStore(self.tmp)
-        record = _deferral(title="fix-the-thing", follow_up="revisit-when:q4-audit")
-        calls = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            ref = store.create(record)
-
-        self.assertEqual(ref, "42")
-        create_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "create" in a)
-        self.assertIn(forge_memory.render(record), create_call)
-        self.assertIn(fms.GitHubStore.LABEL, create_call)
-        # The follow-up label comes from a fixed, closed set. The raw
-        # `revisit-when:<condition>` value has unbounded cardinality and can
-        # never pre-exist as a label — its full text lives in the rendered
-        # body, where the parser reads it back from.
-        self.assertIn(fms.GitHubStore.FOLLOW_UP_LABELS["revisit"], create_call)
-        self.assertNotIn("revisit-when:q4-audit", create_call)
-        self.assertIn("revisit-when:q4-audit", forge_memory.render(record))
-
     def _fake_gh(self, calls, create_stdout="https://github.com/o/r/issues/42\n",
-                 label_returncode=0, label_stderr=""):
+                 existing_labels=(), label_create_returncode=0,
+                 label_create_stderr="", label_list_returncode=0,
+                 label_list_stdout=None, label_list_stderr=""):
+        """A stubbed gh. ``existing_labels`` is what `gh label list --json
+        name` reports — the structured answer the store asks for, never an
+        error string it has to read."""
         def fake_run(args, **kwargs):
             calls.append(args)
             if args[:2] == ["gh", "auth"]:
                 return _completed(returncode=0, stdout="Logged in")
-            if args[:2] == ["gh", "label"]:
-                return _completed(returncode=label_returncode, stderr=label_stderr)
+            if args[:3] == ["gh", "label", "list"]:
+                stdout = label_list_stdout
+                if stdout is None:
+                    stdout = json.dumps([{"name": n} for n in existing_labels])
+                return _completed(
+                    returncode=label_list_returncode, stdout=stdout,
+                    stderr=label_list_stderr,
+                )
+            if args[:3] == ["gh", "label", "create"]:
+                return _completed(
+                    returncode=label_create_returncode,
+                    stderr=label_create_stderr,
+                )
             return _completed(returncode=0, stdout=create_stdout)
         return fake_run
 
-    def test_create_ensures_every_label_it_uses_exists(self):
-        # Nothing else creates these labels, and `gh issue create` rejects an
-        # unknown one — so the default deferral path failed on first use.
+    def test_create_applies_exactly_one_origin_label_and_no_forge_label(self):
+        # The label model is six human-meaningful labels: four kinds
+        # (feature/defect/debt/risk) and two origins (by:human/by:agent).
+        # The engine applies the origin and nothing else — kind is a human
+        # judgment the runner cannot make, and `forge:deferral` existed only
+        # as a retrieval marker for read-back features that are now gone.
         store = fms.GitHubStore(self.tmp)
         calls = []
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run",
                                side_effect=self._fake_gh(calls)):
-            store.create(_deferral(follow_up="drop"))
+            ref = store.create(_deferral(), by="agent")
 
-        label_calls = [a for a in calls if a[:3] == ["gh", "label", "create"]]
-        created = {a[3] for a in label_calls}
-        self.assertIn(fms.GitHubStore.LABEL, created)
-        self.assertIn(fms.GitHubStore.FOLLOW_UP_LABELS["drop"], created)
-        # Idempotent: creating an existing label must not fail the run.
-        for call in label_calls:
-            self.assertIn("--force", call)
-        create_call = next(a for a in calls if a[:2] == ["gh", "issue"])
-        for call in label_calls:
-            self.assertLess(calls.index(call), calls.index(create_call))
+        self.assertEqual(ref, "42")
+        create = next(a for a in calls if a[:2] == ["gh", "issue"] and "create" in a)
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:agent"])
+        self.assertFalse([a for a in create if a.startswith("forge:")], create)
+        self.assertIn(forge_memory.render(_deferral()), create)
 
-    def test_label_set_is_closed_and_bounded(self):
-        self.assertEqual(
-            sorted(fms.GitHubStore.FOLLOW_UP_LABELS),
-            ["backlog", "drop", "revisit"],
-        )
-        for value, expected in (
-            ("backlog", fms.GitHubStore.FOLLOW_UP_LABELS["backlog"]),
-            ("drop", fms.GitHubStore.FOLLOW_UP_LABELS["drop"]),
-            ("revisit-when:anything at all", fms.GitHubStore.FOLLOW_UP_LABELS["revisit"]),
-        ):
-            self.assertEqual(fms._follow_up_label(value), expected)
-
-    def test_label_creation_failure_names_the_fix(self):
+    def test_create_applies_by_human_when_the_user_authored_it(self):
         store = fms.GitHubStore(self.tmp)
         calls = []
-        fake = self._fake_gh(calls, label_returncode=1,
-                             label_stderr="HTTP 403: Resource not accessible")
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(calls)):
+            store.create(_deferral(), by="human")
+        create = next(a for a in calls if a[:2] == ["gh", "issue"] and "create" in a)
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:human"])
+
+    def test_create_without_an_origin_is_refused_before_gh(self):
+        # Origin is required and unguessable. Defaulting it would put a
+        # wrong `by:` label on a real issue, which is worse than refusing.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(calls)):
+            for bad in (None, "robot", ""):
+                with self.subTest(by=bad):
+                    with self.assertRaises(forge_memory.SchemaError) as cm:
+                        store.create(_deferral(), by=bad)
+                    self.assertIn("human", str(cm.exception))
+                    self.assertIn("agent", str(cm.exception))
+        self.assertFalse(calls, "an unlabellable record must never reach gh")
+
+    def test_origin_label_set_is_exactly_two(self):
+        self.assertEqual(
+            fms.GitHubStore.ORIGIN_LABELS,
+            {"human": "by:human", "agent": "by:agent"},
+        )
+
+    def test_create_creates_a_missing_origin_label_before_the_issue(self):
+        # Nothing else creates these labels and `gh issue create` rejects an
+        # unknown one, so the first filing in a fresh repo would fail on a
+        # label the user never heard of — at the close-out gate, after every
+        # task has passed. Create the missing one, before the issue.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(
+                                   calls, existing_labels=["bug", "by:human"])):
+            store.create(_deferral(), by="agent")
+
+        label_calls = [a for a in calls if a[:3] == ["gh", "label", "create"]]
+        self.assertEqual([a[3] for a in label_calls], ["by:agent"])
+        issue_call = next(a for a in calls if a[:2] == ["gh", "issue"])
+        self.assertLess(calls.index(label_calls[0]), calls.index(issue_call))
+        self.assertNotIn("--force", label_calls[0])
+
+    def test_an_existing_label_is_detected_by_query_not_by_error_text(self):
+        # Existence is answered by `gh label list --json name` — structured
+        # output — so nothing depends on the wording of a gh error message.
+        # The stub below fails any `label create` with a message that says
+        # nothing about existing; the store must never reach it.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(
+            calls, existing_labels=["by:agent", "debt"],
+            label_create_returncode=1,
+            label_create_stderr="ceci n'est pas un message en anglais",
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake):
+            ref = store.create(_deferral(), by="agent")
+
+        self.assertEqual(ref, "42")
+        self.assertFalse(
+            [a for a in calls if a[:3] == ["gh", "label", "create"]],
+            "an existing label must not be re-created or updated",
+        )
+        list_call = next(a for a in calls if a[:3] == ["gh", "label", "list"])
+        self.assertIn("--json", list_call)
+        self.assertIn("name", list_call)
+        self.assertTrue([a for a in calls if a[:2] == ["gh", "issue"]])
+
+    def test_existence_is_never_decided_by_matching_gh_prose(self):
+        # Scoped to GitHubStore: FileStore's duplicate-id message says
+        # "already exists" legitimately, about its own file.
+        source = inspect.getsource(fms.GitHubStore)
+        self.assertNotIn("already exists", source)
+
+    def test_label_creation_failure_says_so_and_names_the_label(self):
+        # F6: create-if-missing makes label-write permission a precondition
+        # for filing when the label is absent. Someone with issue-write but
+        # not label-write must be told exactly that, and what to ask for.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(calls, label_create_returncode=1,
+                             label_create_stderr="HTTP 403: Resource not accessible")
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run", side_effect=fake):
             with self.assertRaises(fms.StoreUnavailable) as cm:
-                store.create(_deferral())
+                store.create(_deferral(), by="agent")
         msg = str(cm.exception)
-        self.assertIn(fms.GitHubStore.LABEL, msg)
-        self.assertIn("gh label create", msg)
+        self.assertIn("could not create the label", msg)
+        self.assertIn("by:agent", msg)
+        self.assertIn("gh label create by:agent", msg)
+        self.assertIn("permission", msg.lower())
         self.assertFalse(
             [a for a in calls if a[:2] == ["gh", "issue"]],
-            "must not attempt the issue without its labels",
+            "must not attempt the issue without its label",
         )
+
+    def test_label_query_failure_is_loud_and_names_the_label(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(calls, label_list_returncode=1,
+                             label_list_stderr="HTTP 500")
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                store.create(_deferral(), by="agent")
+        msg = str(cm.exception)
+        self.assertIn("by:agent", msg)
+        self.assertFalse([a for a in calls if a[:2] == ["gh", "issue"]])
+        self.assertFalse([a for a in calls if a[:3] == ["gh", "label", "create"]])
+
+    def test_unreadable_label_query_output_is_loud_not_assumed_absent(self):
+        # Unparsable JSON must not be read as "no labels" — that would
+        # attempt a create on every filing.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(calls, label_list_stdout="not json at all")
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                store.create(_deferral(), by="agent")
+        self.assertIn("by:agent", str(cm.exception))
+        self.assertFalse([a for a in calls if a[:2] == ["gh", "issue"]])
+
+    def test_issues_disabled_during_the_label_step_names_that_fix(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(
+            calls, label_list_returncode=1,
+            label_list_stderr="GraphQL: Issues has been disabled in this repository",
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                store.create(_deferral(), by="agent")
+        msg = str(cm.exception).lower()
+        self.assertIn("issues", msg)
+        self.assertIn("enable", msg)
 
     def test_create_validates_like_the_file_store(self):
         # FileStore.create validates; GitHubStore.create must too, or a
-        # non-CLI caller can push an over-budget record into an issue body
-        # that only CI would catch.
+        # non-CLI caller can push an over-budget record into an issue body.
+        # This is the half of validation that survives the read-back drop:
+        # it stops a malformed record reaching the network.
         store = fms.GitHubStore(self.tmp)
         calls = []
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run",
                                side_effect=self._fake_gh(calls)):
             with self.assertRaises(forge_memory.SchemaError) as cm:
-                store.create(_deferral(why="x" * 301))
+                store.create(_deferral(why="x" * 301), by="agent")
         msg = str(cm.exception)
         self.assertIn("why", msg)
         self.assertIn("300", msg)
@@ -407,183 +513,26 @@ class GitHubStoreTests(unittest.TestCase):
              mock.patch.object(fms.subprocess, "run",
                                side_effect=self._fake_gh(calls)):
             with self.assertRaises(forge_memory.SchemaError):
-                store.create(_deferral(why="one\ntwo"))
+                store.create(_deferral(why="one\ntwo"), by="agent")
         self.assertFalse(calls)
 
-    def test_list_parses_issue_bodies_through_shared_parse(self):
-        store = fms.GitHubStore(self.tmp)
-        record = _deferral(title="parsed-item")
-        body = forge_memory.render(record)
-        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": body}])
+    def test_github_store_has_no_read_back_path(self):
+        # Read-back retrieval is dropped: both features it served
+        # (`list-deferrals` and fmt's open-issue check) only re-found the
+        # engine's own records and duplicated the GitHub UI.
+        for name in ("scan", "list", "describe_ref"):
+            with self.subTest(method=name):
+                self.assertFalse(
+                    name in fms.GitHubStore.__dict__,
+                    "GitHubStore.{} must not exist".format(name),
+                )
 
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records = store.list("deferral")
-
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].fields["title"], "parsed-item")
-
-    def test_scan_reports_a_hand_edited_issue_body_as_an_error(self):
-        # A hand-edited body that no longer matches the canonical render/parse
-        # grammar must be caught the same way fmt_check catches a malformed
-        # file: it comes back from scan as an error entry naming the issue
-        # number, rather than being silently ignored — and never stops the
-        # rest of the issues from being read (checked more thoroughly below).
-        store = fms.GitHubStore(self.tmp)
-        broken_body = "## parsed-item\nthis is not a valid field line\n"
-        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": broken_body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records, errors = store.scan("deferral")
-
-        self.assertEqual(records, [])
-        self.assertEqual(len(errors), 1)
-        ref, msg = errors[0]
-        self.assertEqual(ref, "7")
-        self.assertTrue(msg)
-
-    def test_list_raises_on_what_scan_would_report_as_an_error(self):
-        # `list` is a thin wrapper over `scan`: the same hand-edited body
-        # scan reports as an error entry above makes `list` raise instead —
-        # exactly the FileStore.list contract, so a caller holding either
-        # store gets the same behavior from `list`.
-        store = fms.GitHubStore(self.tmp)
-        broken_body = "## parsed-item\nthis is not a valid field line\n"
-        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": broken_body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            with self.assertRaises(forge_memory.SchemaError):
-                store.list("deferral")
-
-    def test_list_output_validates_like_fmt_check(self):
-        # A budget-overrunning field survives parse but is still caught by
-        # forge_memory.validate over the parsed record — the same defect
-        # fmt_check would report for a file-backed record.
-        store = fms.GitHubStore(self.tmp)
-        record = _deferral(title="x" * 90)  # exceeds the 80-char title budget
-        body = "## {}\n**Why:** {}\n**From:** {}\n**Follow-up:** {}\n".format(
-            record.fields["title"], record.fields["why"], record.fields["from"],
-            record.fields["follow-up"],
-        )
-        payload = json.dumps([{"number": 8, "title": "x", "body": body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records = store.list("deferral")
-
-        defects = forge_memory.validate(records[0])
-        self.assertTrue(any("budget" in d for d in defects))
-
-    def test_list_preserves_issue_number_as_ref(self):
-        store = fms.GitHubStore(self.tmp)
-        body = forge_memory.render(_deferral(title="parsed-item"))
-        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": body}])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records = store.list("deferral")
-
-        self.assertEqual(records[0].ref, "7")
-
-    def test_list_state_defaults_to_all(self):
-        store = fms.GitHubStore(self.tmp)
-        calls = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout="[]")
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            store.list("deferral")
-
-        list_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "list" in a)
-        self.assertIn("all", list_call)
-
-    def test_list_accepts_a_state_filter(self):
-        store = fms.GitHubStore(self.tmp)
-        calls = []
-
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout="[]")
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            store.list("deferral", state="open")
-
-        list_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "list" in a)
-        self.assertIn("open", list_call)
-        self.assertNotIn("all", list_call)
-
-    def test_list_and_scan_never_take_a_mutable_errors_out_parameter(self):
-        # Neither method has an `errors=` out-parameter to opt into a
-        # second contract — a grep-level assertion that it is gone for
-        # good, not just unused by the callers left in this codebase.
-        for method in (fms.GitHubStore.list, fms.GitHubStore.scan):
-            sig = inspect.signature(method)
-            self.assertNotIn("errors", sig.parameters)
-
-    def test_scan_collects_every_bad_issue_without_raising(self):
-        # Two independently unparsable bodies plus one good one: `scan`
-        # never raises on a bad body — every one comes back as an entry
-        # in the `errors` list (issue number, message), mirroring the
-        # "report every defect, never just the first" rule the rest of
-        # forge_memory follows. Good records still come back, each still
-        # carrying its ref.
-        store = fms.GitHubStore(self.tmp)
-        good_body = forge_memory.render(_deferral(title="good-one"))
-        payload = json.dumps([
-            {"number": 1, "body": "## bad-one\nnot a valid field line\n"},
-            {"number": 2, "body": good_body},
-            {"number": 3, "body": "## bad-two\nalso not valid\n"},
-        ])
-
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records, errors = store.scan("deferral")
-
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].fields["title"], "good-one")
-        self.assertEqual(records[0].ref, "2")
-        refs_with_errors = {ref for ref, _ in errors}
-        self.assertEqual(refs_with_errors, {"1", "3"})
+    def test_no_gh_issue_list_call_site_remains(self):
+        for module in (fms, forge_memory):
+            with self.subTest(module=module.__name__):
+                source = inspect.getsource(module)
+                self.assertNotIn('"issue", "list"', source)
+                self.assertNotIn("gh issue list", source)
 
     def test_retire_closes_issue_with_reason_as_comment(self):
         store = fms.GitHubStore(self.tmp)
@@ -606,55 +555,62 @@ class GitHubStoreTests(unittest.TestCase):
 
 
 class StoreInterfaceUniformityTests(unittest.TestCase):
-    """FileStore and GitHubStore both implement scan/list with the same
-    shape — a caller holding either store never needs to know which one
-    it has: FileStore is "a second drawer, not a degraded path" (Phase 1
-    spec), and an isinstance check to learn a return shape is exactly the
-    substitutability guarantee the Store interface exists to provide."""
+    """``Store`` declares the operations that are genuinely polymorphic —
+    ``create`` and ``retire``, the two a caller makes without knowing which
+    store ``select_store`` handed it. Reading records back is not one of
+    them any more: ``GitHubStore`` has no read path, and the only remaining
+    read caller (``list-constraints``) is hard-wired to ``FileStore`` by
+    ``select_store``. A base method exactly one subclass implements
+    abstracts nothing and promises a caller something the other subclass
+    cannot keep, so ``scan``/``list`` live on ``FileStore``."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forge-memory-uniform-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def test_scan_and_list_shapes_match_across_both_stores(self):
+    def test_file_store_scan_and_list_shapes_are_unchanged(self):
         file_store = fms.FileStore(os.path.join(self.tmp, "deferrals.md"))
         file_store.create(_deferral(title="a-deferral"))
 
-        gh_store = fms.GitHubStore(self.tmp)
-        body = forge_memory.render(_deferral(title="a-deferral"))
-        payload = json.dumps([{"number": 1, "body": body}])
+        records, errors = file_store.scan("deferral")
+        self.assertIsInstance(records, list)
+        self.assertIsInstance(errors, list)
 
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
+        listed = file_store.list("deferral")
+        self.assertIsInstance(listed, list)
+        self.assertEqual(listed[0].fields["title"], "a-deferral")
 
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            gh_scan_result = gh_store.scan("deferral")
-            gh_list_result = gh_store.list("deferral")
+    def test_base_interface_is_create_and_retire_only(self):
+        for name in ("create", "retire"):
+            with self.subTest(method=name):
+                self.assertIn(name, fms.Store.__dict__)
+        for name in ("scan", "list"):
+            with self.subTest(method=name):
+                self.assertNotIn(
+                    name, fms.Store.__dict__,
+                    "Store must not declare {} — only FileStore implements "
+                    "it, so the base promised what GitHubStore cannot "
+                    "keep".format(name),
+                )
+                self.assertIn(name, fms.FileStore.__dict__)
 
-        file_scan_result = file_store.scan("deferral")
-        file_list_result = file_store.list("deferral")
+    def test_module_header_describes_the_interface_it_has(self):
+        header = fms.__doc__
+        self.assertIn("create", header)
+        self.assertIn("retire", header)
+        self.assertNotIn("``create``/``list``/``retire``", header)
 
-        for scan_result in (file_scan_result, gh_scan_result):
-            self.assertIsInstance(scan_result, tuple)
-            self.assertEqual(len(scan_result), 2)
-            records, errors = scan_result
-            self.assertIsInstance(records, list)
-            self.assertIsInstance(errors, list)
+    def test_scan_docstring_names_a_real_caller(self):
+        # It used to name `list-constraints`, which calls `list`, and which
+        # select_store answers with FileStore unconditionally — so the
+        # claim was wrong in both halves.
+        doc = fms.FileStore.scan.__doc__ or ""
+        self.assertNotIn("list-constraints", doc)
 
-        for list_result in (file_list_result, gh_list_result):
-            self.assertIsInstance(list_result, list)
-            self.assertEqual(len(list_result), 1)
-            self.assertEqual(list_result[0].fields["title"], "a-deferral")
-
-    def test_no_call_site_branches_on_githubstore_to_learn_a_return_shape(self):
-        # The one legitimate isinstance(..., GitHubStore) check left in the
-        # codebase decides WHETHER to check open issues at all (cmd_fmt) —
-        # a policy decision, not a workaround for two different return
-        # shapes from the same method name. Anywhere else, scan/list must
-        # be called without knowing which store answers.
+    def test_no_call_site_branches_on_githubstore(self):
+        # cmd_fmt's isinstance check existed to decide whether to read open
+        # issues. With that branch gone, forge_memory has no reason left to
+        # know which store it holds.
         forge_memory_path = os.path.join(SCRIPTS_DIR, "forge_memory.py")
         with open(forge_memory_path, encoding="utf-8") as f:
             lines = f.readlines()
@@ -663,10 +619,9 @@ class StoreInterfaceUniformityTests(unittest.TestCase):
             if "isinstance(" in line and "GitHubStore" in line
         ]
         self.assertEqual(
-            len(branch_lines), 1,
-            "expected exactly one isinstance(..., GitHubStore) check (the "
-            "cmd_fmt open-issues policy decision), found at lines "
-            "{}".format(branch_lines),
+            len(branch_lines), 0,
+            "no isinstance(..., GitHubStore) check should remain, found at "
+            "lines {}".format(branch_lines),
         )
 
 

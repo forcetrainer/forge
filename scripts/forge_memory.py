@@ -18,8 +18,11 @@ Two record types share one engine:
 - ``constraint`` — always file-backed at ``docs/forge/constraints.md``, read
   at session start; must be local and free of network calls.
 - ``deferral`` — GitHub issue by default; file-backed only by explicit
-  opt-in. ``roadmap`` is retired as a follow-up value along with
-  ``ROADMAP.md``; ``backlog`` means the issue stays open.
+  opt-in. A deferral IS an open issue nobody is working on, so the record
+  carries no disposition field: ``title``, ``why``, ``from``. Who noticed
+  it is a GitHub label (``by:human``/``by:agent``), not a record field,
+  and what KIND of work it is (feature/defect/debt/risk) is a human
+  judgment this engine never makes.
 
 ``render`` is the single source of record text; ``parse`` is its exact
 inverse — ``render(parse(render(r))) == render(r)`` for both types. A file a
@@ -90,7 +93,6 @@ SCHEMA: dict[str, list[FieldSpec]] = {
         FieldSpec("title", 80, True, None),
         FieldSpec("why", 300, True, None),
         FieldSpec("from", None, True, None),
-        FieldSpec("follow-up", None, True, "follow-up"),
     ],
 }
 
@@ -113,17 +115,13 @@ class SchemaError(Exception):
 
 @dataclass
 class Record:
+    # A record is its type and its fields — there is no store-assigned
+    # metadata on it. A ``ref`` field once carried the issue number of a
+    # record read back from GitHub, which is why it was excluded from
+    # equality and repr; the GitHub read path is gone, so nothing assigns
+    # a ref and there is no metadata to keep out of equality.
     type: str
     fields: dict[str, str] = field(default_factory=dict)
-    # Store-assigned external reference (e.g. a GitHub issue number) for a
-    # record read back from a store that has one; ``None`` for a record
-    # not yet stored, or read from a store (like FileStore) where the
-    # heading field already serves as the ref. Orthogonal to SCHEMA/fields
-    # — render/parse/validate never look at it. It is storage metadata, not
-    # part of the record's data: excluded from equality and repr so two
-    # records with identical fields but different refs compare equal, the
-    # same as before this field existed.
-    ref: str | None = field(default=None, compare=False, repr=False)
 
 
 # Every field in every record type is a single rendered line: the heading, or
@@ -135,7 +133,6 @@ class Record:
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-_FOLLOWUP_RE = re.compile(r"^(backlog|drop|revisit-when:.+)$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _HEADING_RE = re.compile(r"^## (.+)$")
@@ -154,7 +151,7 @@ def _schema_for(record_type):
 
 
 def _label(field_name):
-    """Field name -> rendered label. ``follow-up`` -> ``Follow-up``, ``id``
+    """Field name -> rendered label. ``because`` -> ``Because``, ``id``
     -> ``Id``. Used identically by ``render`` and ``parse`` so the two stay
     exact inverses of each other."""
     return field_name[0].upper() + field_name[1:]
@@ -163,8 +160,7 @@ def _label(field_name):
 def validate(record):
     """Every defect in ``record`` against its type's SCHEMA, in one pass —
     never just the first. Checks required/non-empty, per-field character
-    budgets, and each field's ``form`` (kebab-case id, ISO date, the
-    deferral follow-up enum)."""
+    budgets, and each field's ``form`` (kebab-case id, ISO date)."""
     fields = _schema_for(record.type)
     defects = []
     for spec in fields:
@@ -202,13 +198,6 @@ def validate(record):
                     "single hyphens, no leading/trailing hyphen): {!r}".format(
                         spec.name, value,
                     )
-                )
-        elif spec.form == "follow-up":
-            if not _FOLLOWUP_RE.match(value):
-                defects.append(
-                    "field '{}' must be 'backlog', 'drop', or "
-                    "'revisit-when:<condition>' (not {!r}) — 'roadmap' is "
-                    "retired with ROADMAP.md".format(spec.name, value)
                 )
         elif spec.form == "iso-date":
             if not _ISO_DATE_RE.match(value):
@@ -682,7 +671,6 @@ def cmd_defer(args, repo_root):
         "title": args.title,
         "why": args.why,
         "from": provenance,
-        "follow-up": args.follow_up,
     })
 
     defects = validate(record)
@@ -692,7 +680,13 @@ def cmd_defer(args, repo_root):
 
     try:
         store = fms.select_store(repo_root, "deferral")
-        ref = store.create(record)
+        # ``by`` is not a record field: who noticed a deferral is an
+        # ISSUE LABEL (``by:human``/``by:agent``), so it travels beside
+        # the record rather than inside it. The file backend has no label
+        # facility and drops it — that backend is an explicit opt-out from
+        # issues, and inventing a schema field to mirror a GitHub
+        # affordance would put the two stores' records out of sync.
+        ref = store.create(record, by=args.by)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -701,8 +695,9 @@ def cmd_defer(args, repo_root):
         # ``issue`` is always a string: GitHubStore returns a numeric
         # string, FileStore returns the record's title — a key that is
         # sometimes an int and sometimes an arbitrary string is a trap for
-        # a caller (list-deferrals' idempotency check) that only needs to
-        # know "is this key present", not what type it holds.
+        # a caller (the close-out gate's idempotency check, and
+        # ``forge_status.render_staged_deferrals``) that only needs to know
+        # "is this key present", not what type it holds.
         run_entry["issue"] = str(ref)
         try:
             _atomic_write_json(args.run, run_data)
@@ -731,32 +726,6 @@ def cmd_defer(args, repo_root):
     return 0
 
 
-def cmd_list_deferrals(args, repo_root):
-    # ``scan`` — never ``list`` — because this must report every bad
-    # record in one pass (not stop at the first) without caring which
-    # store it holds: FileStore and GitHubStore both implement ``scan``
-    # with the same (records, errors) shape, so no isinstance check on
-    # the store is needed here to know what comes back.
-    try:
-        store = fms.select_store(repo_root, "deferral")
-        records, errors = store.scan("deferral")
-    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
-        print(str(e), file=sys.stderr)
-        return 1
-    if errors:
-        # ``ref`` means different things per store — an issue number for
-        # GitHubStore, a LINE NUMBER for FileStore — so a bare "#{ref}"
-        # prefix rendered a file's line 1 as "#1", which reads as issue 1.
-        # The store names its own refs.
-        _print_lines(
-            ["{}: {}".format(store.describe_ref(ref), msg) for ref, msg in errors],
-            sys.stderr,
-        )
-        return 1
-    _print_records(records, args.json)
-    return 0
-
-
 def cmd_resolve_deferral(args, repo_root):
     try:
         store = fms.select_store(repo_root, "deferral")
@@ -767,54 +736,26 @@ def cmd_resolve_deferral(args, repo_root):
     return 0
 
 
-def _issue_fmt_defects(store):
-    """Every open deferral issue's body checked through the single public
-    ``GitHubStore.scan`` interface — no private-name access into
-    ``forge_memory_store``, and no second ``gh issue list`` call site.
-    ``scan`` never raises on an unparsable body — it returns
-    ``(records, errors)``, so one bad issue never stops the rest of the
-    issues from being checked; every record ``scan`` does return is then
-    run through ``validate`` here, the same as a file's records are in
-    ``fmt_check``, so a parsable-but-budget-overrunning body is reported
-    too, not only an unparsable one — each defect names its issue number,
-    either from ``errors`` directly or via the record's ``.ref``."""
-    records, parse_errors = store.scan("deferral", state="open")
-    defects = [
-        "{}: {}".format(store.describe_ref(ref), msg) for ref, msg in parse_errors
-    ]
-    for record in records:
-        for msg in validate(record):
-            defects.append(
-                "{}: deferral {!r}: {}".format(
-                    store.describe_ref(record.ref),
-                    record.fields.get("title", "?"), msg,
-                )
-            )
-    return defects
-
-
 def cmd_fmt(args, repo_root):
-    # Three branches, mutually exclusive and exhaustive: explicit paths,
-    # --local-only, and the no-PATH CI branch. --local-only and explicit
-    # paths are both scope selectors, so passing both names no coherent
-    # scope — argparse cannot express "this flag conflicts with a
-    # positional", so it is rejected here by name rather than resolved by
-    # accident. (It used to fall through to the explicit-paths branch,
-    # silently ignoring the flag.)
-    if args.paths and args.local_only:
-        print(
-            "fmt: --local-only and explicit PATH arguments are mutually "
-            "exclusive — --local-only *is* a path selection (the managed "
-            "local files). Pass PATHs to check exactly those files, or "
-            "--local-only with no PATH.",
-            file=sys.stderr,
-        )
-        return 1
+    """Two branches: explicit paths, or no PATH (every managed local file).
 
+    There is no third, network-touching branch and no flag to opt out of
+    one. ``fmt`` reads managed FILES; it never reads back the issues this
+    engine filed. Re-finding forge's own records duplicated the GitHub UI,
+    and the threat read-back validation guarded — a human editing an issue
+    body — does not propagate, because the next record is composed from
+    CLI arguments rather than read from the last one. The validation that
+    matters runs at WRITE time in ``GitHubStore.create``, before anything
+    reaches the network.
+
+    That is also why ``--local-only`` is gone rather than kept as a
+    synonym for the default: it existed to name the branch that skipped
+    the open-issue check, and with that check gone the two branches it
+    distinguished do byte-for-byte identical work. A flag whose presence
+    and absence mean the same thing is a claim the code no longer backs.
+    """
     if args.paths:
-        # Explicit paths restrict fmt to exactly those files; gh is never
-        # called in this branch, regardless of which deferral store is
-        # configured.
+        # Explicit paths restrict fmt to exactly those files.
         if args.check:
             try:
                 defects = fmt_check(args.paths)
@@ -830,55 +771,25 @@ def cmd_fmt(args, repo_root):
             return 1
         return 0
 
-    if args.local_only:
-        # For a local guard (a pre-commit hook) that must never touch the
-        # network: managed local files only, no GitHub issue check, no
-        # `gh` invocation — unlike the no-PATH branch below, which is
-        # spec'd for CI and does check open forge:deferral issues.
-        try:
-            managed = fms.managed_paths(repo_root)
-        except fms.ConfigError as e:
-            print(str(e), file=sys.stderr)
-            return 1
-        if args.check:
-            defects = fmt_check(managed)
-            _print_lines(defects, sys.stdout)
-            return 1 if defects else 0
-        try:
-            fmt_write(managed)
-        except SchemaError as e:
-            print(str(e), file=sys.stderr)
-            return 1
-        return 0
-
-    # No PATH argument: cover every managed file, plus (only when the
-    # GitHub store is selected for deferrals) every open forge:deferral
-    # issue body.
+    # No PATH argument: every managed local file. Never calls gh —
+    # ``managed_paths`` only CONSTRUCTS a store to learn which files are
+    # managed, so this is safe offline (the pre-commit hook runs it).
     try:
         managed = fms.managed_paths(repo_root)
-        deferral_store = fms.select_store(repo_root, "deferral")
     except fms.ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
 
-    all_defects = []
     if args.check:
-        all_defects.extend(fmt_check(managed))
-    elif managed:
-        try:
-            fmt_write(managed)
-        except SchemaError as e:
-            all_defects.append(str(e))
-
-    if isinstance(deferral_store, fms.GitHubStore):
-        try:
-            all_defects.extend(_issue_fmt_defects(deferral_store))
-        except fms.StoreUnavailable as e:
-            print(str(e), file=sys.stderr)
-            return 1
-
-    _print_lines(all_defects, sys.stdout)
-    return 1 if all_defects else 0
+        defects = fmt_check(managed)
+        _print_lines(defects, sys.stdout)
+        return 1 if defects else 0
+    try:
+        fmt_write(managed)
+    except SchemaError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
 
 
 _PRE_COMMIT_MARKER = (
@@ -889,7 +800,7 @@ _PRE_COMMIT_MARKER = (
 _PRE_COMMIT_HOOK_TEMPLATE = """#!/bin/sh
 {marker}
 # Do not hand-edit — re-run `install-guards --pre-commit` to update this hook.
-exec python3 "{script}" fmt --check --local-only
+exec python3 "{script}" fmt --check
 """.format(marker=_PRE_COMMIT_MARKER, script=os.path.abspath(__file__))
 
 _CI_TEMPLATE_PATH = os.path.join(
@@ -1046,7 +957,15 @@ def build_parser():
     p = sub.add_parser("defer")
     p.add_argument("--title", required=True)
     p.add_argument("--why", required=True)
-    p.add_argument("--follow-up", required=True, dest="follow_up")
+    p.add_argument(
+        "--by", required=True, choices=("human", "agent"),
+        help="Who noticed this: applied to the filed issue as the "
+             "'by:human' or 'by:agent' origin label. Required and never "
+             "defaulted — the engine cannot infer it, and a guess would "
+             "put a wrong label on a real issue. The KIND label "
+             "(feature/defect/debt/risk) is never set here: that is a "
+             "human judgment, made in the GitHub UI.",
+    )
     p.add_argument("--from", dest="from_")
     p.add_argument(
         "--run", dest="run",
@@ -1072,10 +991,6 @@ def build_parser():
     )
     p.set_defaults(func=cmd_defer)
 
-    p = sub.add_parser("list-deferrals")
-    p.add_argument("--json", action="store_true")
-    p.set_defaults(func=cmd_list_deferrals)
-
     p = sub.add_parser("resolve-deferral")
     p.add_argument("--ref", required=True)
     p.add_argument("--reason", required=True)
@@ -1085,13 +1000,6 @@ def build_parser():
     fg = p.add_mutually_exclusive_group(required=True)
     fg.add_argument("--check", action="store_true")
     fg.add_argument("--write", action="store_true")
-    p.add_argument(
-        "--local-only", action="store_true", dest="local_only",
-        help="With no PATH: restrict to managed local files (constraints.md, "
-             "and deferrals.md if file-backed) and never select the GitHub "
-             "store or invoke gh. For a local guard (e.g. a pre-commit hook) "
-             "that must work offline.",
-    )
     p.add_argument("paths", nargs="*", metavar="PATH")
     p.set_defaults(func=cmd_fmt)
 
