@@ -96,7 +96,18 @@ SCHEMA: dict[str, list[FieldSpec]] = {
 
 class SchemaError(Exception):
     """A parse or format operation failed loud. Message names the cause —
-    the offending line, field, or record — never a guess at intent."""
+    the offending line, field, or record — never a guess at intent.
+
+    ``line``, when set, is the 1-based line number ``parse`` failed at,
+    carried as structured data so a caller (``FileStore.scan``) can read
+    it directly instead of scraping it back out of the message text —
+    which would silently break the moment a message was reworded. The
+    message itself keeps naming the line for humans; ``line`` is only
+    where that data comes from for code."""
+
+    def __init__(self, message, line=None):
+        super().__init__(message)
+        self.line = line
 
 
 @dataclass
@@ -107,8 +118,11 @@ class Record:
     # record read back from a store that has one; ``None`` for a record
     # not yet stored, or read from a store (like FileStore) where the
     # heading field already serves as the ref. Orthogonal to SCHEMA/fields
-    # — render/parse/validate never look at it.
-    ref: str | None = None
+    # — render/parse/validate never look at it. It is storage metadata, not
+    # part of the record's data: excluded from equality and repr so two
+    # records with identical fields but different refs compare equal, the
+    # same as before this field existed.
+    ref: str | None = field(default=None, compare=False, repr=False)
 
 
 # Every field in every record type is a single rendered line: the heading, or
@@ -251,7 +265,8 @@ def parse(text, type):
                     "line {}: duplicate {} {!r} (first seen at line {})".format(
                         lineno, heading_field.name, heading_value,
                         seen_headings[heading_value],
-                    )
+                    ),
+                    line=lineno,
                 )
             seen_headings[heading_value] = lineno
             current = Record(type=type, fields={heading_field.name: heading_value})
@@ -265,20 +280,23 @@ def parse(text, type):
                 raise SchemaError(
                     "line {}: unknown field '{}' for record type {!r}".format(
                         lineno, label, type,
-                    )
+                    ),
+                    line=lineno,
                 )
             if name in current.fields:
                 raise SchemaError(
                     "line {}: duplicate field '{}' in this record".format(
                         lineno, name,
-                    )
+                    ),
+                    line=lineno,
                 )
             current.fields[name] = value
             continue
 
         raise SchemaError(
             "line {}: unparsable — expected '## <{}>' or '**Label:** value', "
-            "got {!r}".format(lineno, heading_field.name, line)
+            "got {!r}".format(lineno, heading_field.name, line),
+            line=lineno,
         )
 
     flush()
@@ -488,11 +506,22 @@ def cmd_defer(args, repo_root):
 
 
 def cmd_list_deferrals(args, repo_root):
+    # ``scan`` — never ``list`` — because this must report every bad
+    # record in one pass (not stop at the first) without caring which
+    # store it holds: FileStore and GitHubStore both implement ``scan``
+    # with the same (records, errors) shape, so no isinstance check on
+    # the store is needed here to know what comes back.
     try:
         store = fms.select_store(repo_root, "deferral")
-        records = store.list("deferral")
+        records, errors = store.scan("deferral")
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
+        return 1
+    if errors:
+        _print_lines(
+            ["#{}: {}".format(ref, msg) for ref, msg in errors],
+            sys.stderr,
+        )
         return 1
     _print_records(records, args.json)
     return 0
@@ -510,17 +539,16 @@ def cmd_resolve_deferral(args, repo_root):
 
 def _issue_fmt_defects(store):
     """Every open deferral issue's body checked through the single public
-    ``GitHubStore.list`` interface — no private-name access into
+    ``GitHubStore.scan`` interface — no private-name access into
     ``forge_memory_store``, and no second ``gh issue list`` call site.
-    Passing ``errors=[]`` opts ``list`` into collect-all-defects mode so
-    an unparsable body never stops the rest of the issues from being
-    checked; every record ``list`` does return is then run through
-    ``validate`` here, the same as a file's records are in ``fmt_check``,
-    so a parsable-but-budget-overrunning body is reported too, not only an
-    unparsable one — each defect names its issue number via the record's
-    ``.ref``."""
-    parse_errors = []
-    records = store.list("deferral", state="open", errors=parse_errors)
+    ``scan`` never raises on an unparsable body — it returns
+    ``(records, errors)``, so one bad issue never stops the rest of the
+    issues from being checked; every record ``scan`` does return is then
+    run through ``validate`` here, the same as a file's records are in
+    ``fmt_check``, so a parsable-but-budget-overrunning body is reported
+    too, not only an unparsable one — each defect names its issue number,
+    either from ``errors`` directly or via the record's ``.ref``."""
+    records, parse_errors = store.scan("deferral", state="open")
     defects = [
         "issue #{}: {}".format(ref, msg) for ref, msg in parse_errors
     ]

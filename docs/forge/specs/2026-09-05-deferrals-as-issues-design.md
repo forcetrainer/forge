@@ -76,9 +76,19 @@ Phase 2 is the second consumer of both; settled here rather than deferred again.
 - `Record.ref` becomes `field(compare=False, repr=False)`. A ref is storage metadata;
   excluding it restores the equality and repr semantics `Record` had before Phase 1
   Task 3, with no loss of data.
-- `GitHubStore.list`'s `errors` out-parameter is replaced by a `(records, errors)`
-  return. One method must not switch between raising and collecting based on whether a
-  caller passed a mutable list.
+- `GitHubStore.list`'s `errors` out-parameter is removed. One method must not switch
+  between raising and collecting based on whether a caller passed a mutable list.
+- Both behaviors become **uniform across both stores**, so no call site branches on the
+  concrete store class:
+  - `scan(type, **filters) -> (records, errors)` — collects every unparsable record,
+    errors carrying the record's ref (issue number, or file line).
+  - `list(type, **filters) -> [Record]` — raises when `scan` reports any error.
+  A divergent return shape between `FileStore` and `GitHubStore` would break the
+  substitutability the `Store` interface exists for, and contradict Phase 1's
+  "a second drawer, not a degraded path".
+- `FileStore.list` keeps raising. `FileStore.create` depends on it when checking id
+  uniqueness — collecting instead would let a duplicate id through against a
+  partially-parsed file.
 
 ## Documentation and skill changes
 
@@ -135,3 +145,5 @@ neither is touched by this phase.
 ## Note
 
 Dated per the current convention. Phase 5 de-dates and migrates it.
+
+2026-09-05: D1's fix made uniform across both stores (scan/list) — a GitHubStore-only tuple return forced isinstance branching at call sites and contradicted the Phase 1 Stores contract (Task 1 review, issue #44).

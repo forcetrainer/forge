@@ -107,6 +107,60 @@ class FileStoreTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].fields["rule"], "Never call the network.")
 
+    def test_scan_returns_records_and_empty_errors_when_file_parses(self):
+        store = fms.FileStore(self.path)
+        store.create(_deferral(title="first-item"))
+        records, errors = store.scan("deferral")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].fields["title"], "first-item")
+
+    def test_scan_reports_an_unparsable_file_as_an_error_naming_its_line(self):
+        # scan never raises: an unparsable file yields no records and one
+        # (ref, message) error entry, its ref the line number named in the
+        # parse failure — the file equivalent of a GitHub issue number.
+        _write = open(self.path, "w", encoding="utf-8")
+        _write.write("## alpha\nthis is not a valid field line\n")
+        _write.close()
+        store = fms.FileStore(self.path)
+        records, errors = store.scan("deferral")
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        ref, msg = errors[0]
+        self.assertEqual(ref, "2")
+        self.assertIn("line 2", msg)
+
+    def test_scan_ref_comes_from_the_structured_line_attribute_not_the_message(self):
+        # Proof this isn't scraped back out of the message text: reword the
+        # message forge_memory.parse would raise (no "line N:" prefix at
+        # all) while still setting the structured `.line` attribute, and
+        # confirm FileStore.scan's ref still comes through correctly. A
+        # regex over the message text would yield None here.
+        store = fms.FileStore(self.path)
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("anything, since parse is stubbed below\n")
+
+        def fake_parse(text, record_type):
+            raise forge_memory.SchemaError(
+                "totally reworded message with no digits nearby", line=5,
+            )
+
+        with mock.patch.object(forge_memory, "parse", side_effect=fake_parse):
+            records, errors = store.scan("deferral")
+
+        self.assertEqual(records, [])
+        ref, msg = errors[0]
+        self.assertEqual(ref, "5")
+        self.assertEqual(msg, "totally reworded message with no digits nearby")
+
+    def test_list_raises_on_what_scan_reports_as_an_error(self):
+        _write = open(self.path, "w", encoding="utf-8")
+        _write.write("## alpha\nthis is not a valid field line\n")
+        _write.close()
+        store = fms.FileStore(self.path)
+        with self.assertRaises(forge_memory.SchemaError):
+            store.list("deferral")
+
 
 class SelectStoreTests(unittest.TestCase):
     def setUp(self):
@@ -374,10 +428,36 @@ class GitHubStoreTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].fields["title"], "parsed-item")
 
-    def test_hand_edited_issue_body_out_of_canonical_form_is_reported(self):
+    def test_scan_reports_a_hand_edited_issue_body_as_an_error(self):
         # A hand-edited body that no longer matches the canonical render/parse
         # grammar must be caught the same way fmt_check catches a malformed
-        # file: SchemaError propagates rather than being silently ignored.
+        # file: it comes back from scan as an error entry naming the issue
+        # number, rather than being silently ignored — and never stops the
+        # rest of the issues from being read (checked more thoroughly below).
+        store = fms.GitHubStore(self.tmp)
+        broken_body = "## parsed-item\nthis is not a valid field line\n"
+        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": broken_body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            records, errors = store.scan("deferral")
+
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        ref, msg = errors[0]
+        self.assertEqual(ref, "7")
+        self.assertTrue(msg)
+
+    def test_list_raises_on_what_scan_would_report_as_an_error(self):
+        # `list` is a thin wrapper over `scan`: the same hand-edited body
+        # scan reports as an error entry above makes `list` raise instead —
+        # exactly the FileStore.list contract, so a caller holding either
+        # store gets the same behavior from `list`.
         store = fms.GitHubStore(self.tmp)
         broken_body = "## parsed-item\nthis is not a valid field line\n"
         payload = json.dumps([{"number": 7, "title": "parsed-item", "body": broken_body}])
@@ -467,31 +547,21 @@ class GitHubStoreTests(unittest.TestCase):
         self.assertIn("open", list_call)
         self.assertNotIn("all", list_call)
 
-    def test_list_default_still_raises_on_first_unparsable_body(self):
-        # Unchanged default behavior (errors=None): the same case
-        # test_hand_edited_issue_body_out_of_canonical_form_is_reported
-        # covers above, re-asserted here to anchor the "collect" mode's
-        # contrast below.
-        store = fms.GitHubStore(self.tmp)
-        broken_body = "## bad\nnot a valid field line\n"
-        payload = json.dumps([{"number": 9, "body": broken_body}])
+    def test_list_and_scan_never_take_a_mutable_errors_out_parameter(self):
+        # Neither method has an `errors=` out-parameter to opt into a
+        # second contract — a grep-level assertion that it is gone for
+        # good, not just unused by the callers left in this codebase.
+        for method in (fms.GitHubStore.list, fms.GitHubStore.scan):
+            sig = inspect.signature(method)
+            self.assertNotIn("errors", sig.parameters)
 
-        def fake_run(args, **kwargs):
-            if args[:2] == ["gh", "auth"]:
-                return _completed(returncode=0, stdout="Logged in")
-            return _completed(returncode=0, stdout=payload)
-
-        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
-             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            with self.assertRaises(forge_memory.SchemaError):
-                store.list("deferral")
-
-    def test_list_errors_param_collects_all_bad_issues_without_raising(self):
-        # Two independently unparsable bodies plus one good one: passing
-        # an `errors` list opts into collect-all-defects mode instead of
-        # raising on the first, mirroring the "report every defect, never
-        # just the first" rule the rest of forge_memory follows. Good
-        # records still come back, each still carrying its ref.
+    def test_scan_collects_every_bad_issue_without_raising(self):
+        # Two independently unparsable bodies plus one good one: `scan`
+        # never raises on a bad body — every one comes back as an entry
+        # in the `errors` list (issue number, message), mirroring the
+        # "report every defect, never just the first" rule the rest of
+        # forge_memory follows. Good records still come back, each still
+        # carrying its ref.
         store = fms.GitHubStore(self.tmp)
         good_body = forge_memory.render(_deferral(title="good-one"))
         payload = json.dumps([
@@ -505,10 +575,9 @@ class GitHubStoreTests(unittest.TestCase):
                 return _completed(returncode=0, stdout="Logged in")
             return _completed(returncode=0, stdout=payload)
 
-        errors = []
         with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
              mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
-            records = store.list("deferral", errors=errors)
+            records, errors = store.scan("deferral")
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].fields["title"], "good-one")
@@ -534,6 +603,71 @@ class GitHubStoreTests(unittest.TestCase):
         self.assertIn("42", close_call)
         self.assertIn("--comment", close_call)
         self.assertIn("superseded by task 9", close_call)
+
+
+class StoreInterfaceUniformityTests(unittest.TestCase):
+    """FileStore and GitHubStore both implement scan/list with the same
+    shape — a caller holding either store never needs to know which one
+    it has: FileStore is "a second drawer, not a degraded path" (Phase 1
+    spec), and an isinstance check to learn a return shape is exactly the
+    substitutability guarantee the Store interface exists to provide."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-memory-uniform-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_scan_and_list_shapes_match_across_both_stores(self):
+        file_store = fms.FileStore(os.path.join(self.tmp, "deferrals.md"))
+        file_store.create(_deferral(title="a-deferral"))
+
+        gh_store = fms.GitHubStore(self.tmp)
+        body = forge_memory.render(_deferral(title="a-deferral"))
+        payload = json.dumps([{"number": 1, "body": body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            gh_scan_result = gh_store.scan("deferral")
+            gh_list_result = gh_store.list("deferral")
+
+        file_scan_result = file_store.scan("deferral")
+        file_list_result = file_store.list("deferral")
+
+        for scan_result in (file_scan_result, gh_scan_result):
+            self.assertIsInstance(scan_result, tuple)
+            self.assertEqual(len(scan_result), 2)
+            records, errors = scan_result
+            self.assertIsInstance(records, list)
+            self.assertIsInstance(errors, list)
+
+        for list_result in (file_list_result, gh_list_result):
+            self.assertIsInstance(list_result, list)
+            self.assertEqual(len(list_result), 1)
+            self.assertEqual(list_result[0].fields["title"], "a-deferral")
+
+    def test_no_call_site_branches_on_githubstore_to_learn_a_return_shape(self):
+        # The one legitimate isinstance(..., GitHubStore) check left in the
+        # codebase decides WHETHER to check open issues at all (cmd_fmt) —
+        # a policy decision, not a workaround for two different return
+        # shapes from the same method name. Anywhere else, scan/list must
+        # be called without knowing which store answers.
+        forge_memory_path = os.path.join(SCRIPTS_DIR, "forge_memory.py")
+        with open(forge_memory_path, encoding="utf-8") as f:
+            lines = f.readlines()
+        branch_lines = [
+            lineno for lineno, line in enumerate(lines, start=1)
+            if "isinstance(" in line and "GitHubStore" in line
+        ]
+        self.assertEqual(
+            len(branch_lines), 1,
+            "expected exactly one isinstance(..., GitHubStore) check (the "
+            "cmd_fmt open-issues policy decision), found at lines "
+            "{}".format(branch_lines),
+        )
 
 
 class RenderAllSharedHelperTests(unittest.TestCase):

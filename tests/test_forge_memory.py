@@ -229,6 +229,101 @@ class RenderParseRoundTripTests(unittest.TestCase):
         self.assertIn("duplicate", str(ctx.exception).lower())
 
 
+class SchemaErrorLineAttributeTests(unittest.TestCase):
+    """The line number ``parse`` fails at travels as structured data on the
+    raised ``SchemaError`` (a ``.line`` attribute), not by scraping it back
+    out of the message text — a caller (FileStore.scan) that read it via
+    regex would silently get ``None`` the moment a message was reworded,
+    with no test anywhere catching it. Message text still reads
+    "line N: ..." for humans; only where the DATA comes from changes."""
+
+    def test_unrecognized_line_carries_its_line_number(self):
+        text = (
+            "## no-eval-in-hooks\n"
+            "This line is just prose, not a recognized field.\n"
+        )
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse(text, "constraint")
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_duplicate_heading_carries_its_line_number(self):
+        text = (
+            "## dup\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+            "\n"
+            "## dup\n"
+            "**Rule:** r2\n"
+            "**Because:** b2\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-06\n"
+            "**Source:** user\n"
+        )
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse(text, "constraint")
+        self.assertEqual(ctx.exception.line, 8)
+
+    def test_unknown_field_label_carries_its_line_number(self):
+        text = (
+            "## some-id\n"
+            "**Bogus:** value\n"
+        )
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse(text, "constraint")
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_duplicate_field_carries_its_line_number(self):
+        text = (
+            "## some-id\n"
+            "**Rule:** r\n"
+            "**Rule:** r2\n"
+        )
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse(text, "constraint")
+        self.assertEqual(ctx.exception.line, 3)
+
+    def test_schema_error_with_no_line_defaults_to_none(self):
+        # Not every SchemaError comes from parse() — e.g. an unknown
+        # record type — and those never claim a line number.
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse("## x\n", "not-a-real-type")
+        self.assertIsNone(ctx.exception.line)
+
+
+class RecordRefTests(unittest.TestCase):
+    """``ref`` is store-assigned metadata (e.g. a GitHub issue number), not
+    part of the record's data — two records with identical fields but
+    different refs are the same record from ``render``/``parse``/
+    ``validate``'s point of view, so equality and repr must ignore it."""
+
+    def test_equal_fields_different_ref_compare_equal(self):
+        fields = _valid_deferral_fields()
+        a = fm.Record(type="deferral", fields=dict(fields), ref="1")
+        b = fm.Record(type="deferral", fields=dict(fields), ref="2")
+        self.assertEqual(a, b)
+
+    def test_repr_omits_ref(self):
+        record = fm.Record(type="deferral", fields=_valid_deferral_fields(), ref="7")
+        self.assertNotIn("7", repr(record))
+        self.assertNotIn("ref", repr(record))
+
+    def test_ref_is_settable_and_readable_and_untouched_by_render_parse_validate(self):
+        record = fm.Record(type="deferral", fields=_valid_deferral_fields())
+        record.ref = "42"
+        self.assertEqual(record.ref, "42")
+
+        text = fm.render(record)
+        self.assertNotIn("42", text)
+
+        reparsed = fm.parse(text, "deferral")[0]
+        self.assertIsNone(reparsed.ref)
+
+        self.assertEqual(fm.validate(record), [])
+
+
 class FmtTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forge-memory-")
@@ -558,6 +653,35 @@ class DeferCLITests(CLITestCase):
         self.assertEqual(code, 0, err)
         data = json.loads(out)
         self.assertEqual(data[0]["title"], "improve-x")
+
+    def test_list_deferrals_against_github_store_reports_every_bad_issue(self):
+        # Default store (no config.json) is GitHubStore. cmd_list_deferrals
+        # calls store.scan (not .list) so it never needs to know which
+        # store it holds: scan always returns (records, errors) rather
+        # than raising on the first bad body, so the CLI can surface every
+        # bad issue's number itself, same as fmt --check does.
+        good_body = fm.render(fm.Record(type="deferral", fields={
+            "title": "good-one", "why": "w", "from": "user",
+            "follow-up": "backlog",
+        }))
+        payload = json.dumps([
+            {"number": 1, "body": "## bad-one\nnot a valid field line\n"},
+            {"number": 2, "body": good_body},
+            {"number": 3, "body": "## bad-two\nalso not valid\n"},
+        ])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(["list-deferrals"])
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("#1", err)
+        self.assertIn("#3", err)
 
     def test_resolve_deferral_against_file_store(self):
         self._use_file_store_for_deferrals()

@@ -39,7 +39,19 @@ class Store:
     def create(self, record):
         raise NotImplementedError
 
+    def scan(self, type, **filters):
+        """(records, errors): every record this store holds that could be
+        parsed, plus an (ref, message) entry for every one that could not.
+        Never raises on a bad record — the collect-every-defect
+        counterpart to ``list``, and the one method a caller needing that
+        (fmt --check over open issues, list-deferrals) can call without
+        knowing which store it holds."""
+        raise NotImplementedError
+
     def list(self, type, **filters):
+        """Every record this store holds. A thin wrapper over ``scan``:
+        raises the moment ``scan`` reports even one error, rather than
+        returning a partial result silently."""
         raise NotImplementedError
 
     def retire(self, ref, reason=None):
@@ -108,14 +120,34 @@ class FileStore(Store):
         self._write(records)
         return ref
 
-    def list(self, type, **filters):
+    def scan(self, type, **filters):
+        """(records, errors), same shape as ``GitHubStore.scan``, but
+        all-or-nothing rather than per-record: ``forge_memory.parse``
+        reads the whole file as one atomic pass over shared state (a
+        heading opens a record, a duplicate id or bad line anywhere aborts
+        the whole parse), so there is no independently-parsed good record
+        to salvage the way there is for each of GitHubStore's separately
+        parsed issue bodies — a parse failure here always yields zero
+        records alongside the one error."""
         if type != self.type:
             raise ValueError(
                 "FileStore at {!r} holds {!r} records, got {!r}".format(
                     self.path, self.type, type,
                 )
             )
-        return [r for r in self._read() if _matches(r, filters)]
+        try:
+            records = self._read()
+        except forge_memory.SchemaError as e:
+            ref = str(e.line) if e.line is not None else None
+            return [], [(ref, str(e))]
+        return [r for r in records if _matches(r, filters)], []
+
+    def list(self, type, **filters):
+        records, errors = self.scan(type, **filters)
+        if errors:
+            _, message = errors[0]
+            raise forge_memory.SchemaError(message)
+        return records
 
     def retire(self, ref, reason=None):
         heading = self._heading_field()
@@ -267,21 +299,19 @@ class GitHubStore(Store):
         number = url.rstrip("/").rsplit("/", 1)[-1]
         return number
 
-    def list(self, type, state="all", errors=None, **filters):
-        """Every issue's body parsed back through ``forge_memory.parse``,
-        each returned ``Record`` carrying its issue number as ``.ref`` (the
-        public way a caller — ``fmt``'s open-issue check included —
-        recovers which issue a record came from; this is the only
-        ``gh issue list`` call site in the codebase).
+    def scan(self, type, state="all", **filters):
+        """Returns ``(records, errors)`` — the same shape ``FileStore.scan``
+        returns. Every issue's body is parsed back through
+        ``forge_memory.parse``, each returned ``Record`` carrying its issue
+        number as ``.ref`` (the public way a caller — ``fmt``'s open-issue
+        check included — recovers which issue a record came from; this is
+        the only ``gh issue list`` call site in the codebase).
 
-        Default (``errors=None``): fails loud on the first unparsable
-        body, naming the issue, same as every other store failure here.
-        Passing a list as ``errors`` opts into collect-all-defects mode
-        instead — every unparsable body appends an ``(issue_number,
-        message)`` pair to it rather than aborting, so one bad issue never
-        hides another, and the records that DO parse are still returned
-        (and still subject to ``forge_memory.validate`` by the caller, the
-        same as a good record from a bad file would be)."""
+        An unparsable body never aborts the call: it appends an
+        ``(issue_number, message)`` pair to the returned ``errors`` instead,
+        so one bad issue never hides another. The records that DO parse are
+        still returned (and still subject to ``forge_memory.validate`` by
+        the caller, the same as a good record from a bad file would be)."""
         _gh_ready(self.repo_root)
         proc = self._run([
             "issue", "list", "--label", self.LABEL, "--state", state,
@@ -291,21 +321,31 @@ class GitHubStore(Store):
             _raise_for_gh_failure(proc)
         data = json.loads(proc.stdout or "[]")
         records = []
+        errors = []
         for item in data:
             ref = str(item.get("number"))
             try:
                 parsed = forge_memory.parse(item.get("body", ""), type)
             except forge_memory.SchemaError as e:
-                if errors is None:
-                    raise forge_memory.SchemaError(
-                        "issue #{}: {}".format(ref, e)
-                    )
                 errors.append((ref, str(e)))
                 continue
             for r in parsed:
                 r.ref = ref
                 records.append(r)
-        return [r for r in records if _matches(r, filters)]
+        return [r for r in records if _matches(r, filters)], errors
+
+    def list(self, type, state="all", **filters):
+        """Thin wrapper over ``scan``: raises the moment it reports any
+        error — one parse path, not two — exactly ``FileStore.list``'s
+        contract, so a caller holding either store gets the same behavior
+        from ``list``."""
+        records, errors = self.scan(type, state=state, **filters)
+        if errors:
+            ref, message = errors[0]
+            raise forge_memory.SchemaError(
+                "issue #{}: {}".format(ref, message)
+            )
+        return records
 
     def retire(self, ref, reason=None):
         _gh_ready(self.repo_root)

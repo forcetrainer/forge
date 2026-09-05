@@ -24,19 +24,23 @@
 class Record:
     ref: str | None = field(default=None, compare=False, repr=False)
 
-class GitHubStore(Store):
-    def list(self, type, state="all", **filters) -> tuple[list[Record], list[tuple[str, str]]]
-        # returns (records, errors); errors are (issue_number, message) pairs
-        # no `errors` out-parameter; nothing is mutated in place
+class Store:
+    def scan(self, type, **filters) -> tuple[list[Record], list[tuple[str, str]]]
+        # collects; errors are (ref, message) pairs — ref is an issue number or file line
+    def list(self, type, **filters) -> list[Record]
+        # raises when scan reports any error
+# Both implemented by FileStore and GitHubStore. No call site branches on store class.
+# GitHubStore.scan additionally accepts state="all".
 ```
 
 **Tests:**
 - Two records with identical fields and different `ref` compare equal; `repr` omits `ref`.
 - `ref` still round-trips as data — set, read back, unaffected by render/parse/validate.
-- `list` returns a two-tuple; the second element is empty when every body parses.
+- `scan` returns a two-tuple on BOTH stores; the second element is empty when every record parses.
 - Two unparsable bodies among three issues return both errors and the one good record.
-- Errors carry the issue number, not just a message.
-- No caller passes or receives a mutable `errors` argument — grep-level assertion that the parameter is gone.
+- Errors carry the issue number (GitHubStore) or the line (FileStore), not just a message.
+- `list` raises on both stores when `scan` reports an error, preserving `FileStore.create`'s id-uniqueness guard.
+- No caller passes or receives a mutable `errors` argument, and no caller branches on `isinstance(store, GitHubStore)` — grep-level assertions for both.
 - `fmt --check` over open issues still reports every bad issue, naming issue numbers.
 
 **Acceptance:** `python3 -m pytest tests/test_forge_memory.py tests/test_forge_memory_store.py -q` passes; full suite passes.
