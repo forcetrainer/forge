@@ -348,6 +348,7 @@ class SubcommandSurfaceTests(CLITestCase):
         self.assertEqual(set(sub_action.choices), {
             "add-constraint", "retire-constraint", "list-constraints",
             "defer", "list-deferrals", "resolve-deferral", "fmt",
+            "install-guards",
         })
 
     # This is an ALLOW-list, not a denylist, and must stay one: a denylist
@@ -367,7 +368,8 @@ class SubcommandSurfaceTests(CLITestCase):
         "defer": {"title", "why", "follow_up", "from_"},
         "list-deferrals": {"json"},
         "resolve-deferral": {"ref", "reason"},
-        "fmt": {"check", "write", "paths"},
+        "fmt": {"check", "write", "paths", "local_only"},
+        "install-guards": {"pre_commit", "ci"},
     }
 
     def test_no_subcommand_accepts_a_free_form_body_argument(self):
@@ -994,6 +996,210 @@ class MatchesManagedFallbackTests(unittest.TestCase):
         self.assertFalse(
             self.mod["matches_managed"](self.resolved, self.managed, self.marker_dir)
         )
+
+
+class InstallGuardsCLITests(CLITestCase):
+    """``install-guards`` is the only path that ever writes a git hook or a
+    CI workflow into a repo — always human-initiated, never called by any
+    other forge stage (session-start, guard-memory-writes, forge_lint.py)."""
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(
+            ["git", "init", "--quiet"], cwd=self.tmp, check=True,
+            capture_output=True,
+        )
+        self.hook_path = os.path.join(self.tmp, ".git", "hooks", "pre-commit")
+        self.workflow_path = os.path.join(
+            self.tmp, ".github", "workflows", "forge-memory-check.yml",
+        )
+
+    def test_no_flag_exits_nonzero_and_installs_nothing(self):
+        code, out, err = _run_cli(["install-guards"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("--pre-commit", err + out)
+        self.assertFalse(os.path.exists(self.hook_path))
+        self.assertFalse(os.path.exists(self.workflow_path))
+
+    def test_pre_commit_writes_executable_hook(self):
+        code, out, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(os.path.exists(self.hook_path))
+        self.assertTrue(os.access(self.hook_path, os.X_OK))
+
+    def test_pre_commit_hook_runs_fmt_check(self):
+        # File store for deferrals so the hook never shells out to gh.
+        self._use_file_store_for_deferrals()
+        code, out, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, out + err)
+
+        constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        _write(constraints_path, (
+            "## bad id\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+        ))
+        proc = subprocess.run([self.hook_path], cwd=self.tmp, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        _write(constraints_path, fm.render(record))
+        proc = subprocess.run([self.hook_path], cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_pre_commit_hook_never_invokes_gh(self):
+        # Deliberately leave the default deferral store (GitHub, no
+        # config.json) selected, and prove at the process level — the same
+        # way Task 5's zero-spawn test pins down a network-shaped call
+        # site — that the installed hook never reaches for `gh`, even
+        # though `fmt --check` with no restriction would. A stub `gh` put
+        # first on PATH records whether it was ever invoked; the hook must
+        # get the right exit code on both a drifted and a canonical
+        # constraints.md without ever touching the stub.
+        code, _, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, err)
+
+        stub_dir = os.path.join(self.tmp, "stub-bin")
+        os.makedirs(stub_dir)
+        marker = os.path.join(self.tmp, "gh-was-called")
+        gh_stub = os.path.join(stub_dir, "gh")
+        _write(gh_stub, "#!/bin/sh\ntouch \"{}\"\nexit 1\n".format(marker))
+        os.chmod(gh_stub, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")
+
+        constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        _write(constraints_path, (
+            "## bad id\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+        ))
+        proc = subprocess.run(
+            [self.hook_path], cwd=self.tmp, capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(
+            os.path.exists(marker),
+            "the pre-commit hook must never invoke gh",
+        )
+
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        _write(constraints_path, fm.render(record))
+        proc = subprocess.run(
+            [self.hook_path], cwd=self.tmp, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_pre_commit_hook_works_offline_with_no_remote_and_no_gh(self):
+        # self.tmp is `git init`-ed with no remote configured (see setUp).
+        # Confirm that, and additionally strip `gh` (and everything else)
+        # off PATH except the directory holding the real python3, so the
+        # hook cannot find a `gh` binary at all — it must still work.
+        remotes = subprocess.run(
+            ["git", "remote"], cwd=self.tmp, capture_output=True, text=True,
+        )
+        self.assertEqual(remotes.stdout.strip(), "")
+
+        env = dict(os.environ)
+        env["PATH"] = os.path.dirname(os.path.realpath(sys.executable))
+
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        _write(constraints_path, fm.render(record))
+
+        code, _, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, err)
+        proc = subprocess.run(
+            [self.hook_path], cwd=self.tmp, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_pre_commit_refuses_to_clobber_foreign_hook(self):
+        os.makedirs(os.path.dirname(self.hook_path), exist_ok=True)
+        _write(self.hook_path, "#!/bin/sh\necho not forge\n")
+        code, out, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertNotEqual(code, 0)
+        with open(self.hook_path, encoding="utf-8") as f:
+            self.assertIn("not forge", f.read())
+
+    def test_pre_commit_reinstall_over_own_hook_is_idempotent(self):
+        code, _, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, err)
+        with open(self.hook_path, encoding="utf-8") as f:
+            first = f.read()
+        code, _, err = _run_cli(["install-guards", "--pre-commit"])
+        self.assertEqual(code, 0, err)
+        with open(self.hook_path, encoding="utf-8") as f:
+            second = f.read()
+        self.assertEqual(first, second)
+
+    def test_ci_writes_workflow_and_creates_directory(self):
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, ".github")))
+        code, out, err = _run_cli(["install-guards", "--ci"])
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(os.path.exists(self.workflow_path))
+
+    def test_ci_rerun_is_idempotent(self):
+        _run_cli(["install-guards", "--ci"])
+        with open(self.workflow_path, encoding="utf-8") as f:
+            first = f.read()
+        code, _, err = _run_cli(["install-guards", "--ci"])
+        self.assertEqual(code, 0, err)
+        with open(self.workflow_path, encoding="utf-8") as f:
+            second = f.read()
+        self.assertEqual(first, second)
+
+    def test_ci_workflow_source_runs_fmt_check(self):
+        template_path = os.path.join(REPO_ROOT, "templates", "forge-memory-check.yml")
+        with open(template_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertTrue(text.startswith("name:"))
+        self.assertIn("jobs:", text)
+        self.assertIn("fmt --check", text)
+        self.assertNotIn("\t", text, "YAML must not contain literal tabs")
+        # The check runs `fmt --check` with no paths, which (with no
+        # config.json, the default) selects GitHubStore and calls `gh` to
+        # read open forge:deferral issues — CI must authenticate that call
+        # or the gate is always red. Explicit read-only permissions rather
+        # than relying on default GITHUB_TOKEN scopes, which some orgs
+        # restrict below read-all.
+        self.assertIn("GH_TOKEN", text)
+        self.assertIn("permissions:", text)
+        self.assertIn("contents: read", text)
+        self.assertIn("issues: read", text)
+        # No matrix builds, caching, or extra jobs — keep it minimal.
+        self.assertNotIn("matrix:", text)
+        self.assertNotIn("cache", text.lower())
+
+    def test_install_guards_not_invoked_by_any_other_forge_stage(self):
+        other_sources = [
+            os.path.join(REPO_ROOT, "hooks", "session-start"),
+            os.path.join(REPO_ROOT, "hooks", "guard-memory-writes"),
+            os.path.join(REPO_ROOT, "scripts", "forge_lint.py"),
+        ]
+        for path in other_sources:
+            with open(path, encoding="utf-8") as f:
+                self.assertNotIn(
+                    "install-guards", f.read(),
+                    "{} must never invoke install-guards — installation is "
+                    "always human-initiated".format(path),
+                )
 
 
 class HooksJsonTests(unittest.TestCase):

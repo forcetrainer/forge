@@ -483,6 +483,30 @@ def _issue_fmt_defects(store):
     return defects
 
 
+def _local_managed_paths(repo_root):
+    """Managed local files only, resolved the same way as ``fmt``'s no-PATH
+    branch and ``forge_lint.check_memory_files``: ``docs/forge/
+    constraints.md`` when present, plus ``docs/forge/deferrals.md`` only
+    when config selects the file store for deferrals. ``select_store``
+    itself never calls ``gh`` — it only constructs a ``GitHubStore``
+    object, it doesn't invoke it — so this is safe to call even when the
+    GitHub store is selected; the point is that the *caller* then never
+    calls ``.list()``/``.create()`` on it. For a local guard (a pre-commit
+    hook) that must work offline, with no network, no `gh` invocation, and
+    no dependence on a configured git remote."""
+    paths = []
+    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
+    if os.path.exists(constraints_path):
+        paths.append(constraints_path)
+
+    deferral_store = fms.select_store(repo_root, "deferral")
+    if isinstance(deferral_store, fms.FileStore):
+        if os.path.exists(deferral_store.path):
+            paths.append(deferral_store.path)
+
+    return paths
+
+
 def cmd_fmt(args, repo_root):
     if args.paths:
         # Explicit paths restrict fmt to exactly those files; gh is never
@@ -494,6 +518,27 @@ def cmd_fmt(args, repo_root):
             return 1 if defects else 0
         try:
             fmt_write(args.paths)
+        except SchemaError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        return 0
+
+    if args.local_only:
+        # For a local guard (a pre-commit hook) that must never touch the
+        # network: managed local files only, no GitHub issue check, no
+        # `gh` invocation — unlike the no-PATH branch below, which is
+        # spec'd for CI and does check open forge:deferral issues.
+        try:
+            managed = _local_managed_paths(repo_root)
+        except fms.ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if args.check:
+            defects = fmt_check(managed)
+            _print_lines(defects, sys.stdout)
+            return 1 if defects else 0
+        try:
+            fmt_write(managed)
         except SchemaError as e:
             print(str(e), file=sys.stderr)
             return 1
@@ -535,6 +580,106 @@ def cmd_fmt(args, repo_root):
 
     _print_lines(all_defects, sys.stdout)
     return 1 if all_defects else 0
+
+
+_PRE_COMMIT_MARKER = (
+    "# forge-memory-guard: installed by scripts/forge_memory.py "
+    "install-guards --pre-commit"
+)
+
+_PRE_COMMIT_HOOK_TEMPLATE = """#!/bin/sh
+{marker}
+# Do not hand-edit — re-run `install-guards --pre-commit` to update this hook.
+exec python3 "{script}" fmt --check --local-only
+""".format(marker=_PRE_COMMIT_MARKER, script=os.path.abspath(__file__))
+
+_CI_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "templates",
+    "forge-memory-check.yml",
+)
+_CI_TEMPLATE_PATH = os.path.normpath(_CI_TEMPLATE_PATH)
+
+
+def _install_pre_commit_hook(repo_root):
+    """Write ``.git/hooks/pre-commit`` running ``fmt --check`` on managed
+    paths. Refuses to clobber a pre-commit hook it did not install itself —
+    detected by ``_PRE_COMMIT_MARKER``, a line only this installer writes —
+    but re-running over its own previously installed hook is idempotent."""
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.isdir(git_dir):
+        raise SchemaError(
+            "install-guards --pre-commit: no .git directory at {!r} — run "
+            "this from the root of a git repository.".format(repo_root)
+        )
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hook_path = os.path.join(hooks_dir, "pre-commit")
+
+    if os.path.exists(hook_path):
+        with open(hook_path, encoding="utf-8") as f:
+            existing = f.read()
+        if _PRE_COMMIT_MARKER not in existing:
+            raise SchemaError(
+                "install-guards --pre-commit: {!r} already exists and was "
+                "not installed by forge_memory.py — refusing to overwrite "
+                "it. Remove or back up the existing hook, then "
+                "re-run.".format(hook_path)
+            )
+
+    with open(hook_path, "w", encoding="utf-8") as f:
+        f.write(_PRE_COMMIT_HOOK_TEMPLATE)
+    os.chmod(
+        hook_path,
+        os.stat(hook_path).st_mode | 0o111,
+    )
+
+
+def _install_ci_workflow(repo_root):
+    """Copy ``templates/forge-memory-check.yml`` into
+    ``.github/workflows/``, creating the directory if absent. Idempotent —
+    re-running writes the same template content again."""
+    if not os.path.exists(_CI_TEMPLATE_PATH):
+        raise SchemaError(
+            "install-guards --ci: template not found at {!r}.".format(
+                _CI_TEMPLATE_PATH,
+            )
+        )
+    with open(_CI_TEMPLATE_PATH, encoding="utf-8") as f:
+        content = f.read()
+
+    workflows_dir = os.path.join(repo_root, ".github", "workflows")
+    os.makedirs(workflows_dir, exist_ok=True)
+    dest = os.path.join(workflows_dir, "forge-memory-check.yml")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def cmd_install_guards(args, repo_root):
+    if not args.pre_commit and not args.ci:
+        print(
+            "install-guards: pass --pre-commit and/or --ci — installing "
+            "nothing is not a valid choice. Installation is always an "
+            "explicit, human-initiated act; no forge stage runs this on "
+            "its own.",
+            file=sys.stderr,
+        )
+        return 1
+
+    ok = True
+    if args.pre_commit:
+        try:
+            _install_pre_commit_hook(repo_root)
+        except SchemaError as e:
+            print(str(e), file=sys.stderr)
+            ok = False
+    if args.ci:
+        try:
+            _install_ci_workflow(repo_root)
+        except SchemaError as e:
+            print(str(e), file=sys.stderr)
+            ok = False
+    return 0 if ok else 1
 
 
 def build_parser():
@@ -580,8 +725,20 @@ def build_parser():
     fg = p.add_mutually_exclusive_group(required=True)
     fg.add_argument("--check", action="store_true")
     fg.add_argument("--write", action="store_true")
+    p.add_argument(
+        "--local-only", action="store_true", dest="local_only",
+        help="With no PATH: restrict to managed local files (constraints.md, "
+             "and deferrals.md if file-backed) and never select the GitHub "
+             "store or invoke gh. For a local guard (e.g. a pre-commit hook) "
+             "that must work offline.",
+    )
     p.add_argument("paths", nargs="*", metavar="PATH")
     p.set_defaults(func=cmd_fmt)
+
+    p = sub.add_parser("install-guards")
+    p.add_argument("--pre-commit", action="store_true", dest="pre_commit")
+    p.add_argument("--ci", action="store_true")
+    p.set_defaults(func=cmd_install_guards)
 
     return parser
 
