@@ -6,8 +6,8 @@ to stop and ask a human about. It's the same model on both harnesses; only the
 *substrate* that enforces it differs (see [Per-harness](#per-harness--same-model-different-substrate)).
 
 The precise contract lives in the [scope-autonomy spec](specs/2026-07-16-phase7-scope-autonomy-design.md);
-the *why* behind each choice is in [DECISIONS.md](DECISIONS.md). This page is the
-readable explanation.
+the *why* behind each choice is in that spec's changelog and in the PR that made
+the change. This page is the readable explanation.
 
 ## The cycle
 
@@ -59,15 +59,16 @@ commit discipline exists to prevent. So the rule is fix-what-you-broke-against-
 the-contract, and nothing else.
 
 This also answers "harmless vs. harmful deferral." A harmless deferral is an
-improvement — it goes to `DEFERRALS.md` and the run continues. A *harmful* one —
+improvement — it is staged as a deferral and the run continues. A *harmful* one —
 a real contract-breaking bug that's **pre-existing** (our change surfaced it, or
 depends on it) — is the one cell that must never be silently deferred *or*
 silently fixed (fixing it expands scope past the task). That's a genuine human
 decision, so it **halts**, carrying a drafted repair task for the human to
 approve.
 
-Deferred findings are aggregated into the run summary; the orchestrator writes
-them to `DEFERRALS.md` at completion. The runner never edits that file mid-loop.
+Deferred findings are aggregated into the run summary and staged in `run.json`.
+The runner files nothing: at the close-out gate the user reviews each staged
+deferral and the accepted ones become GitHub issues via `forge_memory.py defer`.
 
 ## Convergence — when to stop trying
 
@@ -150,8 +151,7 @@ have — it *can* own a cross-cutting finding — but today the Claude path stil
 the simpler cap-and-escalate model; the disposition matrix and convergence
 machinery are Codex-only.
 
-**The convergence.** These are two halves of one target (tracked in
-[DEFERRALS.md](DEFERRALS.md)):
+**The convergence.** These are two halves of one target:
 
 - **Codex → more autonomous** — the disposition matrix + convergence + doc-sync.
   *(Phase 7, done.)*

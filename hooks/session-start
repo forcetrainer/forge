@@ -90,8 +90,10 @@ try:
     if records:
         lines = ["Constraints for this session (must not be broken):"]
         for record in records:
+            cid = record.fields.get("id", "")
             rule = record.fields.get("rule", "")
             scope = record.fields.get("scope", "")
+            because = record.fields.get("because", "")
             # `scope` is required and never empty; a non-"repo" scope is
             # shown alongside its rule so an agent working outside that
             # scope doesn't over-apply it, and one working inside it
@@ -99,10 +101,21 @@ try:
             # common case and adds nothing a bare rule doesn't already
             # say, so it is left off to keep this (session-every-time)
             # context short.
+            head = cid
             if scope and scope != "repo":
-                lines.append("- [{}] {}".format(scope, rule))
-            else:
-                lines.append("- " + rule)
+                head = "{} [{}]".format(cid, scope)
+            # `id` and `because` are emitted for the reasons the fields
+            # exist. `because` is what stops an agent that does not
+            # understand a rule from routing around it while technically
+            # complying -- dropping it at the one moment the agent reads
+            # the rule leaves only the letter of it. `id` is what lets a
+            # "(constraint: parsers-fail-loud)" citation in the code
+            # resolve back to a rule. `source` is deliberately left out:
+            # it is a follow-it-when-you-need-it pointer, not read-time
+            # material worth carrying in every single session. The soft
+            # cap is what keeps this affordable -- at the cap this block is
+            # a few KB, which is the budget smallness buys.
+            lines.append("- {}: {} — because: {}".format(head, rule, because))
         context = flow + "\n\n" + "\n".join(lines)
 except Exception:
     pass

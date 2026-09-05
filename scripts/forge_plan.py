@@ -2,8 +2,8 @@
 
 Parses every ``### Task N:`` block into a ``Task`` (reusing extract-brief's
 heading grammar), orders tasks by dependency, and parses ``--effort N=LEVEL``
-overrides. All parse failures raise loudly naming the cause (DECISIONS
-2026-07-11).
+overrides. All parse failures raise loudly naming the cause (constraint:
+parsers-fail-loud).
 """
 import re
 

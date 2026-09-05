@@ -38,10 +38,9 @@ local and free.
 |---|---|---|
 | `id` | ≤40 chars, kebab-case, unique in file | user |
 | `rule` | ≤200 chars, one sentence, imperative | user |
+| `scope` | ≤80 chars, path glob or subsystem; CLI defaults to `repo` | user |
 | `because` | ≤300 chars | user |
-| `scope` | path glob or subsystem name; default `repo` | user |
-| `added` | ISO-8601 date | machine |
-| `source` | issue / PR / spec ref | machine, from `--issue` / `--spec` |
+| `source` | ≤120 chars — issue, PR, spec path, or archive entry | user, `--source` |
 
 - Slug ids, not sequential. Sequential ids + removal semantics reissue a retired
   number to an unrelated rule, invalidating citations in git history.
@@ -199,3 +198,4 @@ the rest of `docs/forge/specs/`.
 
 2026-09-05: added `install-guards` to the CLI surface — layers 2 and 3 required an
 explicit installation path that the original CLI list omitted (planning, issue #43).
+2026-09-05: constraint record amended by Phase 3 — `added` removed (it supported retirement deliberation, and a constraint that stops being true is deleted rather than annotated, so there is none); `source` is user-supplied and required via `--source`, replacing the machine-set `--issue`/`--spec`, which could not express a PR and let a required field be satisfied by the placeholder `user`; `scope` and `source` gained budgets; `update-constraint` added (issue #45).

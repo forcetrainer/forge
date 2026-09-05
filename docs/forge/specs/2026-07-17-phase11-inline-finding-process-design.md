@@ -1,7 +1,7 @@
 # Phase 11 — Fix the inline finding-process — Design
 
 **Status:** approved (2026-07-17)
-**Roadmap:** Phase 11 (cross-harness). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../DECISIONS.md) (Phase 8 decomposition; inline self-review).
+**Roadmap:** Phase 11 (cross-harness). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../archive/DECISIONS.md) (Phase 8 decomposition; inline self-review).
 **Constraint:** own spec per the no-mixed-implementations rule — never amend the Codex-runner spec or the Phase 7 scope-autonomy spec.
 **Builds on:** [Phase 10 spec](2026-07-17-phase10-codex-inline-design.md) (established the symmetric-but-flawed inline pair) and the [Phase 7 scope-autonomy spec](2026-07-16-phase7-scope-autonomy-design.md) (the disposition canon this phase imports).
 
@@ -9,13 +9,13 @@
 
 After Phase 10, Claude inline and Codex inline are **symmetric** — and symmetrically **flawed**. Both run the orchestrator's self-review as a "lightweight consistency pass" that **silently resolves every finding it raises**, including decision-grade ones (`SKILL.md` inline bullet; `codex-execution.md` inline branch). This is over-resolution: the autonomous-fixer failure mode Phase 7 named — over-fixing is diff over-scoping wearing a new hat. On the dispatch path the Phase 7 disposition matrix already stops this on the runner; the inline path has no such gate, so a finding about **pre-existing, contract-breaking** code gets swept into the fix silently, with no human ever seeing the scope decision.
 
-The inline path is where this is *least* backstopped: inline has no fresh-context reviewer (by design — [DECISIONS 2026-07-17](../DECISIONS.md)), so the self-review is the only check on rationalized judgment calls, and right now it rationalizes them all away.
+The inline path is where this is *least* backstopped: inline has no fresh-context reviewer (by design — [DECISIONS 2026-07-17](../archive/DECISIONS.md)), so the self-review is the only check on rationalized judgment calls, and right now it rationalizes them all away.
 
 ## Decision
 
 Correct the finding-handling **once in the shared home** — `SKILL.md`'s inline bullet — so the fix reaches both harnesses by construction (Phase 10 made them symmetric; this improves the symmetric pair once). Replace inline over-resolution with the **Phase 7 disposition canon**: classify every self-review finding on the two axes, act by quadrant, and **surface the halt-grade quadrant to the user** instead of silently fixing it. Inline runs in-session, so the "human gate" is the conversation itself — no notify machinery.
 
-**Inline stays self-reviewed.** This phase does **not** add a fresh-context reviewer — that is a dispatch-only concern ([DECISIONS 2026-07-17](../DECISIONS.md)). TDD + acceptance commands remain the objective load-bearing check; what changes is *how the self-review disposes of what it finds*.
+**Inline stays self-reviewed.** This phase does **not** add a fresh-context reviewer — that is a dispatch-only concern ([DECISIONS 2026-07-17](../archive/DECISIONS.md)). TDD + acceptance commands remain the objective load-bearing check; what changes is *how the self-review disposes of what it finds*.
 
 Prose/skill-only phase: **no script changes.** The runner's Phase 7 matrix and convergence loop are the dispatch implementation and are untouched; inline adopts the same *canon* as authored prose the session follows.
 
@@ -70,7 +70,7 @@ Inline is session-driven prose. `scripts/forge-run.py` (and the whole runner sur
 
 ## Non-goals
 
-- **A fresh-context reviewer on inline** — explicitly rejected ([DECISIONS 2026-07-17](../DECISIONS.md)); this gates the self-review, it does not add a reviewer.
+- **A fresh-context reviewer on inline** — explicitly rejected ([DECISIONS 2026-07-17](../archive/DECISIONS.md)); this gates the self-review, it does not add a reviewer.
 - **The whole Phase 7 canon (matrix + convergence) on the Claude dispatch path** — deferred; no phase owns it yet ([DEFERRALS 2026-07-17](../DEFERRALS.md)), candidate for a rethought Phase 12 (Claude dispatch → Codex-runner parity).
 - **Claude dispatch commit-per-task + clean-tree precondition** — Phase 12 (Half A).
 - **Tier-recalibration effort drift** (agent frontmatter) and stale "escalation reviewer" prose — Phase 12.

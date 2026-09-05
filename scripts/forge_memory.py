@@ -30,9 +30,9 @@ human hand-edited and that still parses is normalized back to canonical form
 on the next ``fmt_write`` (structural drift has no stable state to
 accumulate in); one that does not parse, or that parses but overruns a
 budget, fails loud, naming the offending line or field — no guessing, no
-silent fallback (DECISIONS.md 2026-07-11: scripts that parse project-memory
-text accept exactly one documented form and raise at the first deviation,
-naming the real cause). ``validate`` and ``fmt_check`` report **every**
+silent fallback (constraint: parsers-fail-loud — scripts that parse
+project-memory text accept exactly one documented form and raise at the
+first deviation, naming the real cause). ``validate`` and ``fmt_check`` report **every**
 defect they find in one pass, never just the first — the same rule
 ``forge_lint.py`` follows for plan/spec grammar.
 
@@ -131,7 +131,6 @@ class Record:
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _HEADING_RE = re.compile(r"^## (.+)$")
 _FIELD_RE = re.compile(r"^\*\*([^:*]+):\*\* (.*)$")
@@ -158,7 +157,7 @@ def _label(field_name):
 def validate(record):
     """Every defect in ``record`` against its type's SCHEMA, in one pass —
     never just the first. Checks required/non-empty, per-field character
-    budgets, and each field's ``form`` (kebab-case id, ISO date)."""
+    budgets, and each field's ``form`` (currently only ``kebab-id``)."""
     fields = _schema_for(record.type)
     defects = []
     for spec in fields:
@@ -196,12 +195,6 @@ def validate(record):
                     "single hyphens, no leading/trailing hyphen): {!r}".format(
                         spec.name, value,
                     )
-                )
-        elif spec.form == "iso-date":
-            if not _ISO_DATE_RE.match(value):
-                defects.append(
-                    "field '{}' must be an ISO-8601 date (YYYY-MM-DD), "
-                    "not {!r}".format(spec.name, value)
                 )
 
     return defects
@@ -410,16 +403,23 @@ def _record_to_dict(record):
 _CONSTRAINT_SOFT_CAP = 12
 
 
-def _constraint_cap_notice(count):
+def _constraint_cap_notice(records):
+    """The over-cap note, or ``None``. It LISTS the current ids rather than
+    only counting them: "consider whether one of these has stopped being
+    true" is not an actionable ask against a number. You decide what to
+    retire by reading which rules are actually in the file, and a note that
+    makes you run ``list-constraints`` to find out is a note nobody acts
+    on."""
+    count = len(records)
     if count <= _CONSTRAINT_SOFT_CAP:
         return None
+    ids = ", ".join(r.fields.get("id", "?") for r in records)
     return (
         "note: constraints.md now holds {} constraints, past the soft cap "
         "of {}. This is not refused, but a file this long stops being one "
         "you re-read at every session start — consider whether one of "
-        "these has stopped being true and retiring it.".format(
-            count, _CONSTRAINT_SOFT_CAP,
-        )
+        "these has stopped being true and retiring it.\ncurrent set: "
+        "{}".format(count, _CONSTRAINT_SOFT_CAP, ids)
     )
 
 
@@ -448,12 +448,12 @@ def cmd_add_constraint(args, repo_root):
     try:
         store = fms.select_store(repo_root, "constraint")
         store.create(record)
-        count = len(store.list("constraint"))
+        current = store.list("constraint")
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
 
-    notice = _constraint_cap_notice(count)
+    notice = _constraint_cap_notice(current)
     if notice is not None:
         print(notice)
     return 0
@@ -1016,10 +1016,15 @@ def build_parser():
     p.add_argument("--scope", default="repo")
     p.add_argument(
         "--source", required=True,
-        help="Where this rule comes from — an issue, PR, or spec path. "
-             "Read-time material: a constraint written in one phase may be "
-             "applied in another and need this to be understood. Required, "
-             "with no default — a placeholder value would point nowhere.",
+        help="Where this rule comes from — an issue, a PR, a spec path, or "
+             "an archive entry ('docs/forge/archive/DECISIONS.md <date>') "
+             "for a rule that predates the constraints file. An archive "
+             "entry is historical provenance, NOT a live authority: it says "
+             "where the rule was first written down, and the archive itself "
+             "is explicitly non-authoritative. Read-time material: a "
+             "constraint written in one phase may be applied in another and "
+             "need this to be understood. Required, with no default — a "
+             "placeholder value would point nowhere.",
     )
     p.set_defaults(func=cmd_add_constraint)
 

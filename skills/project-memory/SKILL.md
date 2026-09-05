@@ -15,11 +15,11 @@ A decision — "we chose X over Y because Z" — is **not** a constraint. Ration
 
 The file is authored **only** through `scripts/forge_memory.py`'s `add-constraint` / `update-constraint` / `retire-constraint` / `list-constraints` subcommands — direct edits are denied by a PreToolUse hook. Every subcommand builds a record from typed flags; there is no free-form body argument.
 
-Fields, all required unless noted: `id` (kebab-case, ≤40 chars), `rule` (≤200 chars, imperative), `scope` (≤80 chars, defaults to `repo`), `because` (≤300 chars), `source` (≤120 chars — an issue, PR, or spec path this rule comes from). Budget overrun is a hard error, never a truncation.
+Fields, all required unless noted: `id` (kebab-case, ≤40 chars), `rule` (≤200 chars, imperative), `scope` (≤80 chars, defaults to `repo`), `because` (≤300 chars), `source` (≤120 chars — an issue, a PR, a spec path, or, for a rule that predates this file, an archive entry such as `docs/forge/archive/DECISIONS.md 2026-07-11`. An archive entry is **historical provenance, not a live authority** — it says where the rule was first written down; the archive is explicitly non-authoritative and takes no new entries). Budget overrun is a hard error, never a truncation.
 
-**Creation and update always require user approval.** Agents may propose a constraint at an approval gate; no forge stage writes one unattended.
+**Operator rule — not enforced by anything:** creation and update require user approval. Nothing in the system checks this; the deny hook above blocks a direct file edit and points the agent straight at the CLI, which is ungated. Agents may propose a constraint at an approval gate; no forge stage writes one unattended.
 
-There is a soft cap of 12 constraints: crossing it prints a notice and never refuses — the value of the file comes from staying short enough to re-read every session.
+There is a soft cap of 12 constraints: crossing it prints a notice listing the current ids and never refuses — the value of the file comes from staying short enough to re-read every session.
 
 `hooks/session-start` reads `constraints.md` and supplies its rules as session context automatically — no skill needs to read the file itself to surface it to the user.
 

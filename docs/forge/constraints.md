@@ -17,7 +17,7 @@
 **Rule:** A task's discovery review runs on a fresh agent; only verification laps may resume it.
 **Scope:** repo
 **Because:** Independence is the entire justification for a separate reviewer — a resumed discovery review inherits the worker's framing and stops being a second opinion. Verification re-checks named findings, so continuity costs nothing there.
-**Source:** docs/forge/archive/DECISIONS.md 2026-07-16
+**Source:** docs/forge/specs/2026-08-21-review-continuity-design.md
 ## inline-never-for-speed
 **Rule:** Never choose inline execution for wall-clock. It is a task-shape decision, and inline gives up the independent review gate.
 **Scope:** repo
@@ -32,7 +32,7 @@
 **Rule:** A change that alters what a spec asserts amends that spec; never add a superseding one.
 **Scope:** docs/forge/specs/
 **Because:** Two specs describing the same system disagree the moment one changes, and nothing says which is current. Amending in place is also what forces you to read what you are contradicting.
-**Source:** docs/forge/archive/DECISIONS.md 2026-07-02
+**Source:** docs/forge/specs/2026-07-02-phase1-pipeline-skill-edits-design.md
 ## stdlib-only
 **Rule:** Scripts use the Python 3 standard library only; no third-party dependency enters the plugin.
 **Scope:** scripts/

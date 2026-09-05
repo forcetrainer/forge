@@ -832,7 +832,11 @@ class ConstraintSoftCapTests(CLITestCase):
             self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), "")
 
-    def test_thirteenth_succeeds_with_a_notice_naming_the_count(self):
+    def test_thirteenth_succeeds_with_a_notice_listing_the_current_set(self):
+        # The spec's soft cap says the note "lists the current set", not just
+        # the count. A bare count is not actionable: deciding whether a rule
+        # has stopped being true means looking at WHICH rules are there, and
+        # a reader who has to run list-constraints to find out will not.
         for n in range(12):
             self._add("c{}".format(n))
         code, out, err = _run_cli([
@@ -841,6 +845,8 @@ class ConstraintSoftCapTests(CLITestCase):
         ])
         self.assertEqual(code, 0, err)
         self.assertIn("13", out)
+        for n in range(13):
+            self.assertIn("c{}".format(n), out)
 
         path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
         with open(path, encoding="utf-8") as f:
@@ -2983,6 +2989,31 @@ class SessionStartHookTests(unittest.TestCase):
         context = self._get_context(out)
         self.assertIn("Never call eval on untrusted input.", context)
         self.assertIn("hooks/", context)
+
+    def test_id_and_because_are_emitted_but_source_is_not(self):
+        # `because` is why the field exists at all: an agent that does not
+        # understand a rule routes around it while technically complying.
+        # `id` is what lets a "(constraint: <id>)" citation in the code
+        # resolve back to a rule. Both are read-time material at exactly
+        # this moment. `source` is a follow-it-when-you-need-it pointer,
+        # not something worth carrying in every session's context.
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            id="parsers-fail-loud",
+            rule="Parsers raise on malformed input, naming the cause.",
+            because="A tolerant parser turns a syntax error into a wrong answer.",
+            source="docs/forge/specs/UNIQUE-SOURCE-MARKER.md",
+        ))
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("parsers-fail-loud", context)
+        self.assertIn(
+            "A tolerant parser turns a syntax error into a wrong answer.",
+            context,
+        )
+        self.assertNotIn("UNIQUE-SOURCE-MARKER", context)
 
     def test_repo_scope_is_not_shown_redundantly(self):
         forge_dir = self._mkforge()
