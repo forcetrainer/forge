@@ -2690,5 +2690,313 @@ class StatusVocabularyCopyTests(unittest.TestCase):
             )
 
 
+SESSION_START_HOOK = os.path.join(REPO_ROOT, "hooks", "session-start")
+
+
+def _run_session_start_hook(cwd, env=None):
+    """Invoke hooks/session-start as a real subprocess. Returns
+    (returncode, stdout, stderr)."""
+    proc = subprocess.run(
+        [SESSION_START_HOOK], input="", cwd=cwd, capture_output=True,
+        text=True, env=env,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+class SessionStartHookTests(unittest.TestCase):
+    # A substring check on the literal "DECISIONS" cannot see semantics: it
+    # passes just as happily on lowercase prose that still instructs an
+    # agent to "log new decisions". These match on the instruction itself,
+    # case-insensitively, regardless of how it is spelled or capitalized.
+    _LOG_A_DECISION_RE = re.compile(
+        r"log\w*[^.]{0,30}decisions?", re.IGNORECASE | re.DOTALL,
+    )
+    _DEFERRAL_VIA_SKILL_RE = re.compile(
+        r"deferral[^.]{0,60}project-memory|project-memory[^.]{0,60}deferral",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    FLOW_SENTENCE = (
+        "This project uses the forge flow: brainstorm -> spec "
+        "(docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, "
+        "with user approval gates between stages."
+    )
+    ROADMAP_SENTENCE = (
+        "Check docs/forge/ROADMAP.md for the current phase, if it exists."
+    )
+    LEGACY_FLOW_SENTENCE = (
+        "This project uses the forge flow via the legacy docs/theforge/ "
+        "(or .theforge/) signal directory: brainstorm -> spec -> plan -> "
+        "TDD execution, with user approval gates between stages."
+    )
+    LEGACY_ROADMAP_SENTENCE = (
+        "Check its ROADMAP.md for the current phase, if it exists."
+    )
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = self._tmpdir.name
+        self.addCleanup(self._tmpdir.cleanup)
+
+    def _mkforge(self, legacy=False):
+        base = "theforge" if legacy else "forge"
+        os.makedirs(os.path.join(self.tmp, "docs", base), exist_ok=True)
+        return os.path.join(self.tmp, "docs", base)
+
+    def _get_context(self, stdout):
+        payload = json.loads(stdout)
+        return payload["hookSpecificOutput"]["additionalContext"]
+
+    def _assert_no_decision_or_skill_deferral_instruction(self, context):
+        match = self._LOG_A_DECISION_RE.search(context)
+        self.assertIsNone(
+            match, "context still instructs logging a decision: {!r}".format(
+                match.group(0) if match else None
+            )
+        )
+        match = self._DEFERRAL_VIA_SKILL_RE.search(context)
+        self.assertIsNone(
+            match,
+            "context still names the project-memory skill as where "
+            "deferrals are recorded: {!r}".format(
+                match.group(0) if match else None
+            )
+        )
+
+    def test_no_forge_signal_emits_nothing(self):
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "")
+
+    def test_no_constraints_file_emits_flow_context_only(self):
+        self._mkforge()
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("forge flow", context)
+        self._assert_no_decision_or_skill_deferral_instruction(context)
+
+    def test_flow_and_roadmap_sentences_survive_unchanged(self):
+        self._mkforge()
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn(self.FLOW_SENTENCE, context)
+        self.assertIn(self.ROADMAP_SENTENCE, context)
+
+    def test_legacy_flow_and_roadmap_sentences_survive_unchanged(self):
+        self._mkforge(legacy=True)
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn(self.LEGACY_FLOW_SENTENCE, context)
+        self.assertIn(self.LEGACY_ROADMAP_SENTENCE, context)
+
+    def test_constraints_present_includes_each_rule(self):
+        forge_dir = self._mkforge()
+        record1 = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            id="rule-one", rule="Never call eval on untrusted input.",
+        ))
+        record2 = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            id="rule-two", rule="Always validate before writing.",
+        ))
+        _write(
+            os.path.join(forge_dir, "constraints.md"),
+            fm.render(record1) + "\n" + fm.render(record2),
+        )
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("Never call eval on untrusted input.", context)
+        self.assertIn("Always validate before writing.", context)
+        self._assert_no_decision_or_skill_deferral_instruction(context)
+
+    def test_never_mentions_decisions_even_with_constraints(self):
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields())
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertNotIn("DECISIONS", out)
+        self._assert_no_decision_or_skill_deferral_instruction(context)
+
+    def test_unparsable_constraints_file_does_not_break_hook(self):
+        forge_dir = self._mkforge()
+        _write(
+            os.path.join(forge_dir, "constraints.md"),
+            "this is not a valid constraint record at all\n\x00\x01 binary junk",
+        )
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("forge flow", context)
+
+    def test_empty_constraints_file_emits_flow_context_only(self):
+        forge_dir = self._mkforge()
+        _write(os.path.join(forge_dir, "constraints.md"), "")
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("forge flow", context)
+
+    def test_legacy_theforge_path_behaves_the_same(self):
+        forge_dir = self._mkforge(legacy=True)
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            rule="Legacy rule text.",
+        ))
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("Legacy rule text.", context)
+        self._assert_no_decision_or_skill_deferral_instruction(context)
+
+    def test_output_is_valid_json_with_quote_backslash_newline_tab_in_rule(self):
+        forge_dir = self._mkforge()
+        tricky_rule = 'Quote " and backslash \\ and tab\tend, plus a "escaped" case.'
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            rule=tricky_rule,
+        ))
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)  # raises if invalid JSON
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(tricky_rule, context)
+
+    def test_makes_no_gh_call_and_no_network_call(self):
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields())
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+
+        bindir = os.path.join(self.tmp, "_fakebin")
+        os.makedirs(bindir, exist_ok=True)
+        marker = os.path.join(self.tmp, "gh-was-called")
+        for name in ("gh", "curl", "wget"):
+            fake = os.path.join(bindir, name)
+            _write(fake, "#!/usr/bin/env bash\ntouch \"{}\"\nexit 1\n".format(marker))
+            os.chmod(fake, 0o755)
+
+        real_python3 = shutil.which("python3")
+        real_bash = shutil.which("bash")
+        real_dirs = os.pathsep.join(sorted({
+            os.path.dirname(real_python3), os.path.dirname(real_bash),
+            "/bin", "/usr/bin",
+        }))
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + real_dirs
+
+        code, out, err = _run_session_start_hook(cwd=self.tmp, env=env)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_python3_stub_exit0_garbage_stdout_falls_back_to_flow_json(self):
+        # A wrapped or shimmed python3 on PATH could exit 0 while writing
+        # something other than JSON to stdout (a banner, a deprecation
+        # notice, anything). The hook must not trust python3's exit code
+        # alone and print that verbatim -- it must validate the captured
+        # output is actually parseable JSON before emitting it, and fall
+        # back to the plain-printf flow-only path (which never invokes
+        # python3) when it is not.
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields())
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+
+        bindir = os.path.join(self.tmp, "_fakebin")
+        os.makedirs(bindir, exist_ok=True)
+        fake_python3 = os.path.join(bindir, "python3")
+        _write(
+            fake_python3,
+            "#!/usr/bin/env bash\n"
+            "echo 'not valid json, just some banner text'\n"
+            "exit 0\n",
+        )
+        os.chmod(fake_python3, 0o755)
+
+        real_bash = shutil.which("bash")
+        real_dirs = os.pathsep.join(sorted({
+            os.path.dirname(real_bash), "/bin", "/usr/bin",
+        }))
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + real_dirs
+
+        code, out, err = _run_session_start_hook(cwd=self.tmp, env=env)
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)  # raises if the hook emitted the garbage
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(self.FLOW_SENTENCE, context)
+        self.assertNotIn("banner", context)
+
+    def test_constraint_extraction_goes_through_forge_memory_not_regex(self):
+        # Proves the hook parses constraints.md via forge_memory.parse
+        # rather than regex-matching the rendered "**Rule:**" line shape:
+        # the constraints file below contains no "**Rule:**" text at all,
+        # and the stub forge_memory.py's parse() ignores the file's real
+        # content entirely, returning one hardcoded record instead. A
+        # regex over rendered prose would find nothing here; only an
+        # actual `import forge_memory` + `fm.parse(...)` call can surface
+        # the stub's canned text. If someone reintroduces regex parsing,
+        # this test stops seeing the stub's output and fails.
+        fake_root = os.path.join(self.tmp, "_fakeplugin")
+        os.makedirs(os.path.join(fake_root, "hooks"), exist_ok=True)
+        os.makedirs(os.path.join(fake_root, "scripts"), exist_ok=True)
+        with open(SESSION_START_HOOK, encoding="utf-8") as f:
+            hook_source = f.read()
+        fake_hook = os.path.join(fake_root, "hooks", "session-start")
+        _write(fake_hook, hook_source)
+        os.chmod(fake_hook, 0o755)
+
+        stub = (
+            "class _Rec:\n"
+            "    def __init__(self, fields):\n"
+            "        self.fields = fields\n"
+            "\n"
+            "def parse(text, type):\n"
+            "    return [_Rec({'rule': 'STUB_RULE_FROM_FORGE_MEMORY', "
+            "'scope': 'repo'})]\n"
+        )
+        _write(os.path.join(fake_root, "scripts", "forge_memory.py"), stub)
+
+        forge_dir = self._mkforge()
+        _write(
+            os.path.join(forge_dir, "constraints.md"),
+            "totally unstructured text with no ** markers whatsoever\n",
+        )
+
+        proc = subprocess.run(
+            [fake_hook], input="", cwd=self.tmp, capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        context = self._get_context(proc.stdout)
+        self.assertIn("STUB_RULE_FROM_FORGE_MEMORY", context)
+
+    def test_non_repo_scope_is_shown_alongside_the_rule(self):
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            rule="Never call eval on untrusted input.", scope="hooks/",
+        ))
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("Never call eval on untrusted input.", context)
+        self.assertIn("hooks/", context)
+
+    def test_repo_scope_is_not_shown_redundantly(self):
+        forge_dir = self._mkforge()
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            rule="Never call eval on untrusted input.", scope="repo",
+        ))
+        _write(os.path.join(forge_dir, "constraints.md"), fm.render(record))
+        code, out, err = _run_session_start_hook(cwd=self.tmp)
+        self.assertEqual(code, 0, err)
+        context = self._get_context(out)
+        self.assertIn("Never call eval on untrusted input.", context)
+        self.assertNotIn("repo]", context)
+        self.assertNotIn("[repo", context)
+
+
 if __name__ == "__main__":
     unittest.main()
