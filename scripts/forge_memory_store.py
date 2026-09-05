@@ -46,16 +46,6 @@ class Store:
         raise NotImplementedError
 
 
-def _render_all(records):
-    """Canonical whole-file text for ``records``: each rendered by
-    ``forge_memory.render``, separated by exactly one blank line — the same
-    shape ``forge_memory.fmt_write`` produces, built here from the reused
-    ``render`` rather than a second serializer."""
-    if not records:
-        return ""
-    return "\n".join(forge_memory.render(r).rstrip("\n") for r in records) + "\n"
-
-
 def _matches(record, filters):
     return all(record.fields.get(k) == v for k, v in filters.items())
 
@@ -84,7 +74,11 @@ class FileStore(Store):
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            f.write(_render_all(records))
+            # ``forge_memory``'s serializer, not a second copy of it: a file
+            # this store writes and a file ``fmt --write`` rewrites must be
+            # byte-identical, and one definition is the only way to keep
+            # them so.
+            f.write(forge_memory._render_all(records))
 
     def _heading_field(self):
         return forge_memory.SCHEMA[self.type][0].name
@@ -152,15 +146,34 @@ def _gh_ready(cwd):
         )
 
 
+def _issues_disabled(proc):
+    stderr = (proc.stderr or "").lower()
+    return "issue" in stderr and "disabled" in stderr
+
+
 def _raise_for_gh_failure(proc):
     stderr = (proc.stderr or "").strip()
-    if "issue" in stderr.lower() and "disabled" in stderr.lower():
+    if _issues_disabled(proc):
         raise StoreUnavailable(
             "Issues are disabled for this repository. Enable Issues in the "
             "repo settings (Settings > General > Features) and re-run. "
             "(gh said: {})".format(stderr)
         )
     raise StoreUnavailable("gh command failed: {}".format(stderr or proc.returncode))
+
+
+def _follow_up_label(value):
+    """The ``follow-up`` field value -> its label in the closed set above.
+    ``revisit-when:<condition>`` has unbounded cardinality, so the condition
+    itself is never a label — it lives in the rendered body, which is where
+    ``list`` reads it back from. Returns ``None`` for a value outside the
+    schema's enum, which ``validate`` has already rejected by the time
+    ``create`` gets here."""
+    if value in ("backlog", "drop"):
+        return GitHubStore.FOLLOW_UP_LABELS[value]
+    if value.startswith("revisit-when:"):
+        return GitHubStore.FOLLOW_UP_LABELS["revisit"]
+    return None
 
 
 class GitHubStore(Store):
@@ -171,6 +184,25 @@ class GitHubStore(Store):
 
     LABEL = "forge:deferral"
 
+    # A fixed, closed label set. `gh issue create` rejects a label the repo
+    # does not have, and nothing but this store ever creates one — so the
+    # labels it uses must be few enough to create up front, which rules out
+    # labelling with the raw follow-up value (`revisit-when:<condition>` is
+    # unbounded and could never pre-exist).
+    FOLLOW_UP_LABELS = {
+        "backlog": "forge:backlog",
+        "drop": "forge:drop",
+        "revisit": "forge:revisit",
+    }
+
+    _LABEL_DESCRIPTIONS = {
+        LABEL: "Work deferred through forge_memory.py defer",
+        FOLLOW_UP_LABELS["backlog"]: "Deferred: stays open in the backlog",
+        FOLLOW_UP_LABELS["drop"]: "Deferred: dropped unless it comes back",
+        FOLLOW_UP_LABELS["revisit"]:
+            "Deferred: revisit when the condition in the body is met",
+    }
+
     def __init__(self, repo_root):
         self.repo_root = repo_root
 
@@ -179,15 +211,55 @@ class GitHubStore(Store):
             ["gh"] + args, cwd=self.repo_root, capture_output=True, text=True,
         )
 
+    def _ensure_labels(self, labels):
+        """Create each label if missing, before the issue that needs it.
+        ``--force`` makes this idempotent (it updates an existing label
+        instead of erroring), so a repo that already has them is a no-op.
+        A failure here is loud and names the one-time manual fix — never a
+        silent slide to an unlabelled issue or to the file store."""
+        for name in labels:
+            proc = self._run([
+                "label", "create", name,
+                "--description", self._LABEL_DESCRIPTIONS[name],
+                "--force",
+            ])
+            if proc.returncode != 0:
+                # A repo with Issues disabled fails here first, on the
+                # label rather than the issue; it is still that failure and
+                # still names that fix, not a misleading label message.
+                if _issues_disabled(proc):
+                    _raise_for_gh_failure(proc)
+                stderr = (proc.stderr or "").strip()
+                raise StoreUnavailable(
+                    "could not ensure the label {0!r} exists, which "
+                    "`gh issue create` requires (gh said: {1}). Create it "
+                    "once with `gh label create {0}` — or have someone with "
+                    "write access to this repo do it — then re-run.".format(
+                        name, stderr or proc.returncode,
+                    )
+                )
+
     def create(self, record):
+        # Validated here, not only in the CLI: FileStore.create validates,
+        # and the file store is "a second drawer, not a degraded path" —
+        # the symmetry has to hold in both directions, or a non-CLI caller
+        # pushes an over-budget body that only CI would catch.
+        defects = forge_memory.validate(record)
+        if defects:
+            raise forge_memory.SchemaError(
+                "refusing to store an invalid record: {}".format("; ".join(defects))
+            )
         _gh_ready(self.repo_root)
         body = forge_memory.render(record)
         title = record.fields.get("title", "")
-        follow_up = record.fields.get("follow-up")
-        args = ["issue", "create", "--title", title, "--body", body,
-                "--label", self.LABEL]
-        if follow_up:
-            args += ["--label", follow_up]
+        labels = [self.LABEL]
+        follow_up_label = _follow_up_label(record.fields.get("follow-up", ""))
+        if follow_up_label:
+            labels.append(follow_up_label)
+        self._ensure_labels(labels)
+        args = ["issue", "create", "--title", title, "--body", body]
+        for label in labels:
+            args += ["--label", label]
         proc = self._run(args)
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)

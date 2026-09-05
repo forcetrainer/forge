@@ -1150,13 +1150,62 @@ class InstallGuardsCLITests(CLITestCase):
             second = f.read()
         self.assertEqual(first, second)
 
+    def _make_engine_repo(self):
+        """Make ``self.tmp`` look like the repo the CI workflow can actually
+        run in: one where ``scripts/forge_memory.py`` *is* this engine, which
+        is the exact precondition the workflow's repo-relative command needs.
+        A symlink, so ``samefile`` sees one file, not a stale copy."""
+        scripts_dir = os.path.join(self.tmp, "scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        os.symlink(
+            os.path.join(SCRIPTS_DIR, "forge_memory.py"),
+            os.path.join(scripts_dir, "forge_memory.py"),
+        )
+
+    def test_ci_refuses_in_a_repo_without_the_engine(self):
+        # A downstream repo has no scripts/forge_memory.py, so the workflow's
+        # `python3 scripts/forge_memory.py fmt --check` could only ever fail
+        # "No such file". Refuse loudly and name the fix rather than install
+        # a workflow that is red on its first run.
+        code, out, err = _run_cli(["install-guards", "--ci"])
+        self.assertEqual(code, 1, out + err)
+        msg = out + err
+        self.assertIn("scripts/forge_memory.py", msg)
+        self.assertIn("--pre-commit", msg)
+        self.assertFalse(os.path.exists(self.workflow_path))
+
+    def test_ci_refusal_does_not_block_pre_commit_in_the_same_run(self):
+        code, out, err = _run_cli(["install-guards", "--pre-commit", "--ci"])
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(os.path.exists(self.hook_path))
+        self.assertFalse(os.path.exists(self.workflow_path))
+
     def test_ci_writes_workflow_and_creates_directory(self):
+        self._make_engine_repo()
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, ".github")))
         code, out, err = _run_cli(["install-guards", "--ci"])
         self.assertEqual(code, 0, out + err)
         self.assertTrue(os.path.exists(self.workflow_path))
 
+    def test_ci_installed_workflow_command_resolves_in_that_repo(self):
+        self._make_engine_repo()
+        code, out, err = _run_cli(["install-guards", "--ci"])
+        self.assertEqual(code, 0, out + err)
+        with open(self.workflow_path, encoding="utf-8") as f:
+            workflow = f.read()
+        run_line = next(
+            line for line in workflow.splitlines()
+            if "python3" in line and "fmt --check" in line
+        )
+        script_rel = run_line.split("python3", 1)[1].split()[0]
+        self.assertTrue(
+            os.path.exists(os.path.join(self.tmp, script_rel)),
+            "workflow runs {!r}, which does not exist in the repo it was "
+            "installed into".format(script_rel),
+        )
+
     def test_ci_rerun_is_idempotent(self):
+        self._make_engine_repo()
         _run_cli(["install-guards", "--ci"])
         with open(self.workflow_path, encoding="utf-8") as f:
             first = f.read()
@@ -1188,19 +1237,51 @@ class InstallGuardsCLITests(CLITestCase):
         self.assertNotIn("matrix:", text)
         self.assertNotIn("cache", text.lower())
 
+    _OTHER_FORGE_SOURCES = (
+        os.path.join(REPO_ROOT, "hooks", "session-start"),
+        os.path.join(REPO_ROOT, "hooks", "guard-memory-writes"),
+        os.path.join(REPO_ROOT, "scripts", "forge_lint.py"),
+    )
+
+    # A line that mentions a subcommand *and* one of these is shelling out to
+    # it; a mention with none of them nearby is advice text (the layer-1 deny
+    # message names `add-constraint` on purpose) or a comment.
+    _INVOCATION_MARKERS = (
+        "subprocess", "Popen", "os.system", "check_call", "check_output",
+        "sys.executable", "os.exec", "python3", "sh -c", "$(",
+    )
+
     def test_install_guards_not_invoked_by_any_other_forge_stage(self):
-        other_sources = [
-            os.path.join(REPO_ROOT, "hooks", "session-start"),
-            os.path.join(REPO_ROOT, "hooks", "guard-memory-writes"),
-            os.path.join(REPO_ROOT, "scripts", "forge_lint.py"),
-        ]
-        for path in other_sources:
+        for path in self._OTHER_FORGE_SOURCES:
             with open(path, encoding="utf-8") as f:
                 self.assertNotIn(
                     "install-guards", f.read(),
                     "{} must never invoke install-guards — installation is "
                     "always human-initiated".format(path),
                 )
+
+    def test_no_forge_stage_writes_a_constraint_unattended(self):
+        """Spec, constraint records: "Creation requires user approval. Agents
+        may propose at an approval gate; no forge stage writes a constraint
+        unattended." Same source scan as install-guards, over the two
+        subcommands that mutate ``constraints.md``."""
+        for path in self._OTHER_FORGE_SOURCES:
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            for lineno, line in enumerate(lines):
+                for subcommand in ("add-constraint", "retire-constraint"):
+                    if subcommand not in line:
+                        continue
+                    window = "\n".join(lines[max(0, lineno - 3):lineno + 4])
+                    for marker in self._INVOCATION_MARKERS:
+                        self.assertNotIn(
+                            marker, window,
+                            "{}:{} looks like it invokes {} ({!r} nearby) — no "
+                            "forge stage may write a constraint unattended; a "
+                            "stage may only name the command as advice".format(
+                                path, lineno + 1, subcommand, marker,
+                            ),
+                        )
 
 
 class HooksJsonTests(unittest.TestCase):
@@ -1416,6 +1497,224 @@ class ManagedPathsSharedHelperTests(unittest.TestCase):
     def test_managed_paths_omits_absent_files(self):
         self.assertEqual(fms.managed_paths(self.tmp), [])
 
+
+
+class SingleLineFieldTests(unittest.TestCase):
+    """A newline (or any other control character) in a field value renders a
+    record whose own parser cannot read it back: the CLI would exit 0, write
+    the file, and every later add/list/retire/fmt on that file would fail
+    "unparsable" — with layer 1 denying the direct edit needed to repair it.
+    ``validate`` rejects it as a budget-class error naming the field, so the
+    CLI can never emit a record ``parse`` chokes on."""
+
+    def _defects_with(self, record_type, fields_fn, field_name, value):
+        record = fm.Record(type=record_type, fields=fields_fn(**{field_name: value}))
+        return fm.validate(record)
+
+    def test_newline_rejected_in_every_constraint_field(self):
+        for name in [spec.name for spec in fm.SCHEMA["constraint"]]:
+            with self.subTest(field=name):
+                defects = self._defects_with(
+                    "constraint", _valid_constraint_fields, name, "a\nb",
+                )
+                self.assertTrue(
+                    any(name in d and "single line" in d for d in defects),
+                    "no single-line defect naming {!r}: {}".format(name, defects),
+                )
+
+    def test_newline_rejected_in_every_deferral_field(self):
+        for name in [spec.name for spec in fm.SCHEMA["deferral"]]:
+            with self.subTest(field=name):
+                fields = _valid_deferral_fields()
+                fields[name] = "a\nb"
+                if name == "follow-up":
+                    fields[name] = "revisit-when:a\nb"
+                record = fm.Record(type="deferral", fields=fields)
+                defects = fm.validate(record)
+                self.assertTrue(
+                    any(name in d and "single line" in d for d in defects),
+                    "no single-line defect naming {!r}: {}".format(name, defects),
+                )
+
+    def test_carriage_return_and_tab_rejected(self):
+        for value in ("a\rb", "a\tb", "a\x00b", "a\x1bb"):
+            with self.subTest(value=value):
+                defects = self._defects_with(
+                    "constraint", _valid_constraint_fields, "rule", value,
+                )
+                self.assertTrue(
+                    any("rule" in d and "single line" in d for d in defects),
+                    defects,
+                )
+
+    def test_ordinary_punctuation_still_accepted(self):
+        # The check is control characters only — colons, asterisks, markdown
+        # and unicode in a value are all legal and must not be rejected.
+        defects = self._defects_with(
+            "constraint", _valid_constraint_fields, "rule",
+            "Never use **eval**: not even for “safe” input — ever.",
+        )
+        self.assertEqual(defects, [])
+
+    def test_every_validated_record_round_trips_through_parse(self):
+        """Property: whatever ``validate`` accepts, ``render`` writes and
+        ``parse`` reads back unchanged. This is the invariant F1 broke."""
+        candidates = [
+            ("constraint", _valid_constraint_fields()),
+            ("constraint", _valid_constraint_fields(
+                rule="Never use **eval**: ## not a heading, either.")),
+            ("constraint", _valid_constraint_fields(
+                because="Because: **Rule:** looks like a field label.")),
+            ("constraint", _valid_constraint_fields(scope="")),
+            ("constraint", _valid_constraint_fields(scope="  spaced  ")),
+            ("constraint", _valid_constraint_fields(rule="x" * 200)),
+            ("deferral", _valid_deferral_fields()),
+            ("deferral", _valid_deferral_fields(title="## heading-shaped title")),
+            ("deferral", _valid_deferral_fields(why="Why: **not** a label.")),
+            ("deferral", dict(_valid_deferral_fields(),
+                              **{"follow-up": "revisit-when: the *audit* lands"})),
+        ]
+        for record_type, fields in candidates:
+            with self.subTest(fields=fields):
+                record = fm.Record(type=record_type, fields=fields)
+                self.assertEqual(
+                    fm.validate(record), [],
+                    "candidate must be valid for the property to apply",
+                )
+                text = fm.render(record)
+                parsed = fm.parse(text, record_type)
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(fm.render(parsed[0]), text)
+
+
+class NewlineArgumentCLITests(CLITestCase):
+    """The CLI must never write a record its own parser cannot read: a
+    newline in any text argument is rejected before the store is touched,
+    leaving no file behind to brick."""
+
+    def test_add_constraint_with_newline_in_rule_is_rejected(self):
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "multi-line",
+            "--rule", "first line\nsecond line",
+            "--because", "Because.",
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("rule", err)
+        self.assertIn("single line", err)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.tmp, "docs", "forge", "constraints.md")),
+            "a rejected record must not have been written",
+        )
+
+    def test_add_constraint_newline_in_because_leaves_file_parsable(self):
+        code, _, _ = _run_cli([
+            "add-constraint", "--id", "good-one", "--rule", "A rule.",
+            "--because", "A reason.",
+        ])
+        self.assertEqual(code, 0)
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "bad-one", "--rule", "A rule.",
+            "--because", "line one\nline two",
+        ])
+        self.assertEqual(code, 1)
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        code, out, err = _run_cli(["fmt", "--check", path])
+        self.assertEqual(code, 0, out + err)
+
+    def test_defer_with_newline_in_why_is_rejected_before_gh(self):
+        self._use_file_store_for_deferrals()
+        with self._no_gh_guard():
+            code, out, err = _run_cli([
+                "defer", "--title", "Something", "--why", "one\ntwo",
+                "--follow-up", "backlog",
+            ])
+        self.assertEqual(code, 1)
+        self.assertIn("why", err)
+        self.assertIn("single line", err)
+
+
+class MalformedConfigCLITests(CLITestCase):
+    """A malformed ``docs/forge/config.json`` is a named error, never a raw
+    traceback: ``select_store`` sits inside the same try/except as the store
+    call it feeds — in every command, not only the ones that read config
+    today."""
+
+    def setUp(self):
+        super().setUp()
+        _write(os.path.join(self.tmp, "docs", "forge", "config.json"), "{not json")
+
+    def _assert_named(self, argv):
+        try:
+            code, out, err = _run_cli(argv)
+        except Exception as e:  # noqa: BLE001 — a traceback escaping is the bug
+            self.fail("{} raised {!r} instead of failing loud".format(argv, e))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("config.json", err)
+
+    def test_defer(self):
+        self._assert_named([
+            "defer", "--title", "t", "--why", "w", "--follow-up", "backlog",
+        ])
+
+    def test_list_deferrals(self):
+        self._assert_named(["list-deferrals"])
+
+    def test_resolve_deferral(self):
+        self._assert_named(["resolve-deferral", "--ref", "7", "--reason", "done"])
+
+    def test_fmt_still_names_the_file(self):
+        code, out, err = _run_cli(["fmt", "--check"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("config.json", err)
+
+    def test_every_command_selects_its_store_inside_the_try(self):
+        """Constraint commands are hardwired to the file store today, so a
+        malformed config cannot reach them — but the ConfigError-catching
+        try/except must still enclose their ``select_store`` call, or the day
+        store selection grows a config read they regress to a traceback."""
+        commands = [
+            fm.cmd_add_constraint, fm.cmd_retire_constraint,
+            fm.cmd_list_constraints, fm.cmd_defer, fm.cmd_list_deferrals,
+            fm.cmd_resolve_deferral,
+        ]
+        for func in commands:
+            with self.subTest(command=func.__name__):
+                lines = inspect.getsource(func).splitlines()
+                select = next(
+                    i for i, line in enumerate(lines) if "select_store" in line
+                )
+                preceding = [line.strip() for line in lines[:select]]
+                self.assertIn(
+                    "try:", preceding,
+                    "{}: select_store is outside the try/except that catches "
+                    "ConfigError".format(func.__name__),
+                )
+                self.assertIn(
+                    "fms.ConfigError",
+                    "\n".join(lines[select:]),
+                )
+
+
+class MissingPathFmtTests(CLITestCase):
+    """``fmt`` on a path that does not exist names the missing file, the same
+    way every other bad input here does — not an uncaught FileNotFoundError."""
+
+    def test_check_missing_path_names_it(self):
+        missing = os.path.join(self.tmp, "docs", "forge", "nope-constraints.md")
+        code, out, err = _run_cli(["fmt", "--check", missing])
+        self.assertEqual(code, 1)
+        self.assertIn("nope-constraints.md", out + err)
+
+    def test_write_missing_path_names_it(self):
+        missing = os.path.join(self.tmp, "docs", "forge", "nope-deferrals.md")
+        code, out, err = _run_cli(["fmt", "--write", missing])
+        self.assertEqual(code, 1)
+        self.assertIn("nope-deferrals.md", out + err)
+
+    def test_fmt_check_raises_schemaerror_directly(self):
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.fmt_check([os.path.join(self.tmp, "gone-constraints.md")])
+        self.assertIn("gone-constraints.md", str(ctx.exception))
 
 
 if __name__ == "__main__":

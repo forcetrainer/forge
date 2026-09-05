@@ -111,6 +111,14 @@ class Record:
     ref: str | None = None
 
 
+# Every field in every record type is a single rendered line: the heading, or
+# one ``**Label:** value``. A newline or other control character in a value
+# therefore produces text ``render`` writes and ``parse`` cannot read back —
+# the file is bricked for every later add/list/retire/fmt, and layer 1 denies
+# the direct edit needed to repair it. So this is a validate-time defect,
+# reported in the same pass and the same class as a budget overrun.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _FOLLOWUP_RE = re.compile(r"^(backlog|drop|revisit-when:.+)$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -152,6 +160,18 @@ def validate(record):
                     "field '{}' is required but missing or empty".format(spec.name)
                 )
             continue
+
+        control = _CONTROL_RE.search(value)
+        if control:
+            defects.append(
+                "field '{}' must be a single line: it contains the control "
+                "character {!r} at position {} — {} renders as one line and "
+                "parse would not read it back: {!r}".format(
+                    spec.name, control.group(0), control.start(),
+                    "the heading" if spec is fields[0] else "each field",
+                    value,
+                )
+            )
 
         if spec.budget is not None and len(value) > spec.budget:
             defects.append(
@@ -286,6 +306,20 @@ def _infer_type(path):
     )
 
 
+def _read_managed_file(path):
+    """Text of ``path``, or a named ``SchemaError`` if it does not exist. A
+    typo'd path is bad input like any other here — never an uncaught
+    FileNotFoundError."""
+    if not os.path.exists(path):
+        raise SchemaError(
+            "{}: no such file — fmt takes paths to existing project-memory "
+            "files (a 'constraint' or 'deferral' basename under "
+            "docs/forge/).".format(path)
+        )
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def fmt_check(paths):
     """Every defect across ``paths`` in one pass, never just the first:
     unparsable files (one message, naming the line), then every
@@ -293,8 +327,7 @@ def fmt_check(paths):
     defects = []
     for path in paths:
         record_type = _infer_type(path)
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
+        text = _read_managed_file(path)
 
         try:
             records = parse(text, record_type)
@@ -322,8 +355,7 @@ def fmt_write(paths):
     already-canonical content produces byte-identical output."""
     for path in paths:
         record_type = _infer_type(path)
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
+        text = _read_managed_file(path)
 
         records = parse(text, record_type)
 
@@ -398,8 +430,8 @@ def cmd_add_constraint(args, repo_root):
         _print_lines(defects, sys.stderr)
         return 1
 
-    store = fms.select_store(repo_root, "constraint")
     try:
+        store = fms.select_store(repo_root, "constraint")
         store.create(record)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -408,8 +440,8 @@ def cmd_add_constraint(args, repo_root):
 
 
 def cmd_retire_constraint(args, repo_root):
-    store = fms.select_store(repo_root, "constraint")
     try:
+        store = fms.select_store(repo_root, "constraint")
         store.retire(args.id)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -418,8 +450,8 @@ def cmd_retire_constraint(args, repo_root):
 
 
 def cmd_list_constraints(args, repo_root):
-    store = fms.select_store(repo_root, "constraint")
     try:
+        store = fms.select_store(repo_root, "constraint")
         records = store.list("constraint")
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -446,8 +478,8 @@ def cmd_defer(args, repo_root):
         _print_lines(defects, sys.stderr)
         return 1
 
-    store = fms.select_store(repo_root, "deferral")
     try:
+        store = fms.select_store(repo_root, "deferral")
         store.create(record)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -456,8 +488,8 @@ def cmd_defer(args, repo_root):
 
 
 def cmd_list_deferrals(args, repo_root):
-    store = fms.select_store(repo_root, "deferral")
     try:
+        store = fms.select_store(repo_root, "deferral")
         records = store.list("deferral")
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -467,8 +499,8 @@ def cmd_list_deferrals(args, repo_root):
 
 
 def cmd_resolve_deferral(args, repo_root):
-    store = fms.select_store(repo_root, "deferral")
     try:
+        store = fms.select_store(repo_root, "deferral")
         store.retire(args.ref, reason=args.reason)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
@@ -643,10 +675,49 @@ def _install_pre_commit_hook(repo_root):
     )
 
 
+def _repo_runs_this_engine(repo_root):
+    """True when ``repo_root``'s own ``scripts/forge_memory.py`` *is* this
+    module — the exact precondition the CI workflow's repo-relative command
+    needs. ``samefile`` rather than a name or remote-URL check: a stale copy
+    at that path is not this engine and would not behave like it."""
+    candidate = os.path.join(repo_root, "scripts", "forge_memory.py")
+    if not os.path.exists(candidate):
+        return False
+    try:
+        return os.path.samefile(candidate, os.path.abspath(__file__))
+    except OSError:
+        return False
+
+
 def _install_ci_workflow(repo_root):
     """Copy ``templates/forge-memory-check.yml`` into
     ``.github/workflows/``, creating the directory if absent. Idempotent —
-    re-running writes the same template content again."""
+    re-running writes the same template content again.
+
+    Refuses outside the forge plugin repo. The workflow runs ``python3
+    scripts/forge_memory.py fmt --check``, a repo-relative path that exists
+    only where this engine is committed; installed into a downstream repo it
+    could only ever fail "No such file", and a permanently red required
+    check is worse than no check. The alternative — having the workflow
+    check out the forge plugin repo at a pinned ref — is rejected here: no
+    release tags exist to pin to, an unpinned ref is a supply-chain edge no
+    installer should open on a user's behalf, and the plugin repo may not be
+    readable by a downstream repo's token, so that workflow would fail too,
+    just later and less legibly. Layer 2 (``--pre-commit``, which bakes in
+    the absolute plugin path) is the enforcement guarantee for downstream
+    repos; layer 3 is enabled on the forge plugin repo itself, exactly as
+    the spec's enforcement table says."""
+    if not _repo_runs_this_engine(repo_root):
+        raise SchemaError(
+            "install-guards --ci: the CI workflow runs `python3 "
+            "scripts/forge_memory.py fmt --check`, but {!r} has no "
+            "scripts/forge_memory.py of its own — the installed workflow "
+            "could only ever fail 'No such file'. Refusing to install a "
+            "workflow that cannot pass. Use `install-guards --pre-commit` "
+            "instead: the layer-2 hook runs the same check and bakes in the "
+            "absolute path to this engine ({}), so it works in any "
+            "repo.".format(repo_root, os.path.abspath(__file__))
+        )
     if not os.path.exists(_CI_TEMPLATE_PATH):
         raise SchemaError(
             "install-guards --ci: template not found at {!r}.".format(

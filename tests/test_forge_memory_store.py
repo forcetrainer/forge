@@ -3,6 +3,7 @@ retire over the shared forge_memory schema/render/parse/validate; store
 selection is config-driven for deferrals and hardwired to FileStore for
 constraints; every gh failure mode is loud and names its fix, never a
 silent slide to the file store."""
+import inspect
 import json
 import os
 import shutil
@@ -260,7 +261,100 @@ class GitHubStoreTests(unittest.TestCase):
         create_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "create" in a)
         self.assertIn(forge_memory.render(record), create_call)
         self.assertIn(fms.GitHubStore.LABEL, create_call)
-        self.assertIn("revisit-when:q4-audit", create_call)
+        # The follow-up label comes from a fixed, closed set. The raw
+        # `revisit-when:<condition>` value has unbounded cardinality and can
+        # never pre-exist as a label — its full text lives in the rendered
+        # body, where the parser reads it back from.
+        self.assertIn(fms.GitHubStore.FOLLOW_UP_LABELS["revisit"], create_call)
+        self.assertNotIn("revisit-when:q4-audit", create_call)
+        self.assertIn("revisit-when:q4-audit", forge_memory.render(record))
+
+    def _fake_gh(self, calls, create_stdout="https://github.com/o/r/issues/42\n",
+                 label_returncode=0, label_stderr=""):
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            if args[:2] == ["gh", "label"]:
+                return _completed(returncode=label_returncode, stderr=label_stderr)
+            return _completed(returncode=0, stdout=create_stdout)
+        return fake_run
+
+    def test_create_ensures_every_label_it_uses_exists(self):
+        # Nothing else creates these labels, and `gh issue create` rejects an
+        # unknown one — so the default deferral path failed on first use.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(calls)):
+            store.create(_deferral(follow_up="drop"))
+
+        label_calls = [a for a in calls if a[:3] == ["gh", "label", "create"]]
+        created = {a[3] for a in label_calls}
+        self.assertIn(fms.GitHubStore.LABEL, created)
+        self.assertIn(fms.GitHubStore.FOLLOW_UP_LABELS["drop"], created)
+        # Idempotent: creating an existing label must not fail the run.
+        for call in label_calls:
+            self.assertIn("--force", call)
+        create_call = next(a for a in calls if a[:2] == ["gh", "issue"])
+        for call in label_calls:
+            self.assertLess(calls.index(call), calls.index(create_call))
+
+    def test_label_set_is_closed_and_bounded(self):
+        self.assertEqual(
+            sorted(fms.GitHubStore.FOLLOW_UP_LABELS),
+            ["backlog", "drop", "revisit"],
+        )
+        for value, expected in (
+            ("backlog", fms.GitHubStore.FOLLOW_UP_LABELS["backlog"]),
+            ("drop", fms.GitHubStore.FOLLOW_UP_LABELS["drop"]),
+            ("revisit-when:anything at all", fms.GitHubStore.FOLLOW_UP_LABELS["revisit"]),
+        ):
+            self.assertEqual(fms._follow_up_label(value), expected)
+
+    def test_label_creation_failure_names_the_fix(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        fake = self._fake_gh(calls, label_returncode=1,
+                             label_stderr="HTTP 403: Resource not accessible")
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                store.create(_deferral())
+        msg = str(cm.exception)
+        self.assertIn(fms.GitHubStore.LABEL, msg)
+        self.assertIn("gh label create", msg)
+        self.assertFalse(
+            [a for a in calls if a[:2] == ["gh", "issue"]],
+            "must not attempt the issue without its labels",
+        )
+
+    def test_create_validates_like_the_file_store(self):
+        # FileStore.create validates; GitHubStore.create must too, or a
+        # non-CLI caller can push an over-budget record into an issue body
+        # that only CI would catch.
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(calls)):
+            with self.assertRaises(forge_memory.SchemaError) as cm:
+                store.create(_deferral(why="x" * 301))
+        msg = str(cm.exception)
+        self.assertIn("why", msg)
+        self.assertIn("300", msg)
+        self.assertFalse(calls, "an invalid record must never reach gh")
+
+    def test_create_rejects_a_record_the_parser_could_not_read_back(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run",
+                               side_effect=self._fake_gh(calls)):
+            with self.assertRaises(forge_memory.SchemaError):
+                store.create(_deferral(why="one\ntwo"))
+        self.assertFalse(calls)
 
     def test_list_parses_issue_bodies_through_shared_parse(self):
         store = fms.GitHubStore(self.tmp)
@@ -440,6 +534,32 @@ class GitHubStoreTests(unittest.TestCase):
         self.assertIn("42", close_call)
         self.assertIn("--comment", close_call)
         self.assertIn("superseded by task 9", close_call)
+
+
+class RenderAllSharedHelperTests(unittest.TestCase):
+    """One serializer for whole-file text. It lived verbatim in both modules;
+    the store already imports forge_memory, so it uses that one."""
+
+    def test_store_has_no_second_render_all_definition(self):
+        source = inspect.getsource(fms)
+        self.assertNotIn(
+            "def _render_all", source,
+            "forge_memory_store must reuse forge_memory._render_all, not "
+            "define a second copy",
+        )
+        self.assertIn("_render_all", inspect.getsource(fms.FileStore._write))
+        self.assertIn("_render_all", inspect.getsource(forge_memory.fmt_write))
+
+    def test_file_store_writes_forge_memory_canonical_text(self):
+        tmp = tempfile.mkdtemp(prefix="forge-memory-render-all-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "deferrals.md")
+        store = fms.FileStore(path)
+        first, second = _deferral(title="one"), _deferral(title="two")
+        store.create(first)
+        store.create(second)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), forge_memory._render_all([first, second]))
 
 
 if __name__ == "__main__":
