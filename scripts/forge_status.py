@@ -29,6 +29,20 @@ _STATE_MAP = {
 }
 
 
+def is_terminal(status):
+    """True if run.json's top-level ``status`` (the same field
+    ``read_run_state`` maps through ``_STATE_MAP``) names a finished run —
+    the single public definition of that split, implemented directly
+    against ``_STATE_MAP`` so a caller outside this module (e.g.
+    forge_memory's ``defer --run``, which must refuse to write into a
+    run.json that is still in progress) never needs its own copy of this
+    vocabulary. An unrecognized status is NOT terminal, matching
+    ``_STATE_MAP.get(raw, "running")``'s existing default — a status this
+    version doesn't know about is presumed still running, the same way
+    ``read_run_state`` already treats it, rather than guessed at."""
+    return _STATE_MAP.get(status, "running") != "running"
+
+
 def _load_run_json(run_dir):
     try:
         with open(os.path.join(run_dir, "run.json"), "r", encoding="utf-8") as f:

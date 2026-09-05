@@ -62,6 +62,7 @@ import datetime  # noqa: E402
 import fnmatch  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
+import tempfile  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 
 import forge_memory_store as fms  # noqa: E402
@@ -483,7 +484,79 @@ def cmd_list_constraints(args, repo_root):
     return 0
 
 
+def _load_run_json_entry(run_path, finding_id):
+    """Load ``run_path`` and return ``(data, entry)`` where ``entry`` is the
+    ``deferrals`` list item whose ``id`` matches ``finding_id``. Raises
+    ``SchemaError`` naming ``run_path`` (missing or malformed) or naming
+    ``finding_id`` (no matching entry) — never a guess. Read-only; the
+    caller decides whether and what to write back."""
+    if not os.path.exists(run_path):
+        raise SchemaError(
+            "{}: no such file — --run takes the path to an existing run's "
+            "run.json.".format(run_path)
+        )
+    try:
+        with open(run_path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        # Permission-denied, a directory where a file was expected, or any
+        # other reason the path exists but can't be read — same class as
+        # "no such file" (the file cannot be read), so the same named,
+        # non-zero-exit contract applies: never a raw traceback.
+        raise SchemaError("{}: could not read run.json ({})".format(run_path, e))
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SchemaError("{}: malformed run.json ({})".format(run_path, e))
+    if not isinstance(data, dict):
+        raise SchemaError(
+            "{}: malformed run.json (expected a top-level JSON "
+            "object)".format(run_path)
+        )
+    for entry in data.get("deferrals") or []:
+        if isinstance(entry, dict) and entry.get("id") == finding_id:
+            return data, entry
+    raise SchemaError(
+        "{}: no staged deferral with finding-id {!r}".format(run_path, finding_id)
+    )
+
+
+def _atomic_write_json(path, data):
+    """Write ``data`` to ``path`` as JSON without ever leaving a
+    truncated/partial file for a concurrent reader to see. ``run.json`` is
+    written by ``forge-run.py`` and read by ``forge-monitor.py``/
+    ``forge_status.py`` while a run may be in flight; this defer write-back
+    is a second, independent writer, so it writes to a temp file in the
+    same directory first and ``os.replace``s it onto ``path`` — atomic on
+    POSIX, so a reader ever sees either the old content or the new, never
+    a half-written file. Same shape as ``write_run_json`` (``indent=2``, no
+    ``sort_keys``) so this write-back is indistinguishable from a runner
+    write."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".forge_memory_run_json_", dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def cmd_defer(args, repo_root):
+    if bool(args.run) != bool(args.finding_id):
+        print(
+            "defer: --run and --finding-id must be given together (one "
+            "without the other names no deferral entry to record into).",
+            file=sys.stderr,
+        )
+        return 1
+
     record = Record(type="deferral", fields={
         "title": args.title,
         "why": args.why,
@@ -496,12 +569,84 @@ def cmd_defer(args, repo_root):
         _print_lines(defects, sys.stderr)
         return 1
 
+    run_data = None
+    run_entry = None
+    if args.run:
+        try:
+            run_data, run_entry = _load_run_json_entry(args.run, args.finding_id)
+        except SchemaError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        existing_issue = run_entry.get("issue")
+        if existing_issue is not None:
+            print(
+                "defer: finding-id {!r} was already filed as issue #{} — "
+                "not re-filing.".format(args.finding_id, existing_issue),
+                file=sys.stderr,
+            )
+            return 1
+        # Filing is a close-out step: run.json is a live runner artifact
+        # while a run is in progress (forge-run.py/forge_receipts.py write
+        # it, forge-monitor.py/forge_status.py read it), and writing
+        # another process's live artifact is not something to allow by
+        # convention alone. ``forge_status.is_terminal`` is the one
+        # definition of the status vocabulary's terminal/non-terminal
+        # split (built on its own ``_STATE_MAP``) — imported here, inside
+        # the function, rather than at module level, so this runner
+        # concern is pulled in only on the ``--run`` path and never adds
+        # to every other forge_memory invocation's (or forge_lint's)
+        # startup cost.
+        import forge_status
+        status = run_data.get("status")
+        if not forge_status.is_terminal(status):
+            print(
+                "defer: {} is for a run that is not in a recognized "
+                "terminal state (status {!r}) — filing is a close-out "
+                "step, run this once the run has finished.".format(
+                    args.run, status,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         store = fms.select_store(repo_root, "deferral")
-        store.create(record)
+        ref = store.create(record)
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
+
+    if args.run:
+        # ``issue`` is always a string: GitHubStore returns a numeric
+        # string, FileStore returns the record's title — a key that is
+        # sometimes an int and sometimes an arbitrary string is a trap for
+        # a caller (list-deferrals' idempotency check) that only needs to
+        # know "is this key present", not what type it holds.
+        run_entry["issue"] = str(ref)
+        try:
+            _atomic_write_json(args.run, run_data)
+        except OSError as e:
+            # The issue now exists — it must never be lost to a
+            # traceback. Losing it here and blindly retrying `defer`
+            # would create a SECOND issue for the same finding, exactly
+            # the duplicate the idempotency check above exists to
+            # prevent, reached from this side instead. So: name the
+            # created issue loudly, and the fix is a manual edit, not a
+            # re-run (re-running with these same args would create that
+            # duplicate, since run.json still has no recorded ``issue``).
+            print(
+                "defer: issue #{} was created on GitHub, but recording it "
+                "into {} failed ({}). The issue exists — do NOT re-run "
+                "this command with the same arguments, it would file a "
+                "duplicate. Instead, manually add \"issue\": \"{}\" to the "
+                "deferral with finding-id {!r} in that file once the "
+                "underlying write problem is fixed.".format(
+                    ref, args.run, e, ref, args.finding_id,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
     return 0
 
 
@@ -817,6 +962,19 @@ def build_parser():
     p.add_argument("--why", required=True)
     p.add_argument("--follow-up", required=True, dest="follow_up")
     p.add_argument("--from", dest="from_")
+    p.add_argument(
+        "--run", dest="run",
+        help="Path to a run's run.json. Requires --finding-id. On "
+             "successful issue creation, the resolved issue number is "
+             "recorded into the matching deferral entry's 'issue' key — "
+             "idempotent: an entry that already carries 'issue' is not "
+             "re-filed.",
+    )
+    p.add_argument(
+        "--finding-id", dest="finding_id",
+        help="Id of the staged deferral in --run's run.json to record the "
+             "filed issue number into. Requires --run.",
+    )
     p.set_defaults(func=cmd_defer)
 
     p = sub.add_parser("list-deferrals")

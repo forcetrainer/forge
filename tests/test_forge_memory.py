@@ -461,7 +461,7 @@ class SubcommandSurfaceTests(CLITestCase):
         "add-constraint": {"id", "rule", "because", "scope", "issue", "spec"},
         "retire-constraint": {"id"},
         "list-constraints": {"scope", "json"},
-        "defer": {"title", "why", "follow_up", "from_"},
+        "defer": {"title", "why", "follow_up", "from_", "run", "finding_id"},
         "list-deferrals": {"json"},
         "resolve-deferral": {"ref", "reason"},
         "fmt": {"check", "write", "paths", "local_only"},
@@ -696,6 +696,282 @@ class DeferCLITests(CLITestCase):
         with open(path, encoding="utf-8") as f:
             text = f.read()
         self.assertNotIn("improve-x", text)
+
+
+class DeferRunJsonCLITests(CLITestCase):
+    """``defer --run --finding-id`` writes the resolved issue number back
+    into the matching run.json deferral entry, idempotently, without ever
+    disturbing any other key in the file."""
+
+    def _run_json_path(self):
+        return os.path.join(self.tmp, "run.json")
+
+    def _write_run_json(self, deferrals, status="passed"):
+        """A run.json fixture carrying the full set of unrelated keys a
+        real runner writes, so a test can assert every one of them survives
+        a defer write-back byte-for-byte. ``status`` defaults to a terminal
+        value ("passed") since filing is a close-out step; pass "running"
+        to exercise the in-progress guard."""
+        data = {
+            "plan": "/x/plan.md",
+            "spec": "/x/spec.md",
+            "status": status,
+            "base_commit": "abc123",
+            "tasks": [{"number": 1, "status": "passed"}],
+            "threads": {"task-1-worker": "thread-1"},
+            "seeded_findings": [{"id": "seed-1", "summary": "s"}],
+            "autofix_mode": "gate",
+            "doc_sync": {"status": "clean"},
+            "started_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:05:00Z",
+            "deferrals": deferrals,
+        }
+        path = self._run_json_path()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return path, data
+
+    def _defer_args(self, run=None, finding_id=None, title="improve-x"):
+        args = [
+            "defer", "--title", title, "--why", "polish", "--follow-up", "backlog",
+        ]
+        if run is not None:
+            args += ["--run", run]
+        if finding_id is not None:
+            args += ["--finding-id", finding_id]
+        return args
+
+    def test_run_without_finding_id_exits_nonzero(self):
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1"}])
+        code, out, err = _run_cli(self._defer_args(run=path))
+        self.assertNotEqual(code, 0)
+
+    def test_finding_id_without_run_exits_nonzero(self):
+        self._use_file_store_for_deferrals()
+        code, out, err = _run_cli(self._defer_args(finding_id="f1"))
+        self.assertNotEqual(code, 0)
+
+    def test_successful_defer_records_issue_and_preserves_other_keys(self):
+        path, original = self._write_run_json([
+            {"id": "f1", "summary": "one"},
+            {"id": "f2", "summary": "two"},
+        ])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertEqual(code, 0, err)
+
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["deferrals"][0]["issue"], "42")
+        self.assertIsInstance(data["deferrals"][0]["issue"], str)
+        self.assertNotIn("issue", data["deferrals"][1])
+        for key in (
+            "plan", "spec", "status", "base_commit", "tasks", "threads",
+            "seeded_findings", "autofix_mode", "doc_sync", "started_at",
+            "updated_at",
+        ):
+            self.assertEqual(data[key], original[key], key)
+
+    def test_refiling_already_filed_entry_exits_nonzero_and_creates_nothing(self):
+        path, _ = self._write_run_json([{"id": "f1", "issue": "7"}])
+        with self._no_gh_guard():
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("7", err)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["deferrals"][0]["issue"], "7")
+
+    def test_defer_against_file_store_records_string_issue(self):
+        # The FileStore write-back path is the one Task 2's original
+        # review missed: FileStore.create returns the heading (title)
+        # value, not a numeric string, so the pinned-string contract has
+        # to hold there too, not only for GitHubStore's numeric ref.
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1"}])
+        code, out, err = _run_cli(
+            self._defer_args(run=path, finding_id="f1", title="improve-x")
+        )
+        self.assertEqual(code, 0, err)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["deferrals"][0]["issue"], "improve-x")
+        self.assertIsInstance(data["deferrals"][0]["issue"], str)
+
+    def test_refuses_write_back_while_run_is_in_progress(self):
+        path, _ = self._write_run_json([{"id": "f1"}], status="running")
+        with self._no_gh_guard():
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("running", err.lower())
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertNotIn("issue", data["deferrals"][0])
+
+    def test_unknown_finding_id_exits_nonzero_and_leaves_run_json_unmodified(self):
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1"}])
+        with open(path, encoding="utf-8") as f:
+            before = f.read()
+        code, out, err = _run_cli(
+            self._defer_args(run=path, finding_id="no-such-id")
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("no-such-id", err)
+        with open(path, encoding="utf-8") as f:
+            after = f.read()
+        self.assertEqual(before, after)
+
+    def test_malformed_run_json_exits_nonzero_naming_path(self):
+        self._use_file_store_for_deferrals()
+        path = self._run_json_path()
+        _write(path, "not json")
+        code, out, err = _run_cli(self._defer_args(run=path, finding_id="f1"))
+        self.assertNotEqual(code, 0)
+        self.assertIn(path, err)
+
+    def test_permission_denied_run_json_exits_nonzero_naming_path_no_traceback(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("permission checks are bypassed when running as root")
+        self._use_file_store_for_deferrals()
+        path, _ = self._write_run_json([{"id": "f1"}])
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+        # If this propagated as an uncaught exception (rather than being
+        # returned as a non-zero code), _run_cli itself would raise here —
+        # that IS the traceback-free assertion.
+        code, out, err = _run_cli(self._defer_args(run=path, finding_id="f1"))
+        self.assertNotEqual(code, 0)
+        self.assertIn(path, err)
+
+    def test_unrecognized_status_refuses_write_back_and_never_calls_gh(self):
+        # forge_status.py's _STATE_MAP.get(raw_status, "running") treats
+        # any status it doesn't recognize as still "running" (non-
+        # terminal). defer must agree: fail-open here (treating an
+        # unrecognized status as terminal) would let this command write
+        # into a run forge_status still reports as in progress.
+        path, _ = self._write_run_json([{"id": "f1"}], status="paused")
+        with self._no_gh_guard():
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("paused", err)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertNotIn("issue", data["deferrals"][0])
+
+    def test_no_second_copy_of_the_status_vocabulary(self):
+        # The terminal/non-terminal split is forge_status.is_terminal's
+        # one definition (implemented against forge_status._STATE_MAP);
+        # cmd_defer must call it rather than re-deriving its own list of
+        # terminal status strings, or the two would be free to drift.
+        source = inspect.getsource(fm.cmd_defer)
+        self.assertIn("is_terminal", source)
+        self.assertNotIn("_KNOWN_TERMINAL_STATUSES", inspect.getsource(fm))
+        self.assertNotIn("escalated-doc-sync", inspect.getsource(fm))
+
+    def test_absent_run_json_exits_nonzero_naming_path(self):
+        self._use_file_store_for_deferrals()
+        path = os.path.join(self.tmp, "no-such-run.json")
+        code, out, err = _run_cli(self._defer_args(run=path, finding_id="f1"))
+        self.assertNotEqual(code, 0)
+        self.assertIn(path, err)
+
+    def test_issue_creation_failure_leaves_run_json_unmodified(self):
+        path, _ = self._write_run_json([{"id": "f1"}])
+        with open(path, encoding="utf-8") as f:
+            before = f.read()
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=1, stderr="boom")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        with open(path, encoding="utf-8") as f:
+            after = f.read()
+        self.assertEqual(before, after)
+
+    def test_post_creation_write_failure_surfaces_created_issue_number(self):
+        # store.create() succeeds (issue #42 exists on GitHub) but the
+        # run.json write-back itself fails (disk full / permissions /
+        # path removed underneath us). The created issue must never be
+        # lost to an uncaught traceback — retrying blind would file a
+        # duplicate, exactly what the idempotency guarantee exists to
+        # prevent, reached from the other direction.
+        path, _ = self._write_run_json([{"id": "f1"}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(fm.os, "replace", side_effect=OSError("disk full")):
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("42", err)
+        # main() must never let this propagate as an uncaught traceback —
+        # _run_cli would raise instead of returning a code if it did.
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertNotIn("issue", data["deferrals"][0])
+
+    def test_write_back_is_atomic_no_stray_temp_files(self):
+        path, _ = self._write_run_json([{"id": "f1"}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/42\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["docs", "run.json"])
+
+    def test_gh_unavailable_exits_nonzero_and_never_falls_back_to_file_store(self):
+        path, _ = self._write_run_json([{"id": "f1"}])
+        with open(path, encoding="utf-8") as f:
+            before = f.read()
+
+        with mock.patch.object(fms.shutil, "which", return_value=None):
+            code, out, err = _run_cli(
+                self._defer_args(run=path, finding_id="f1")
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("gh", err.lower())
+        deferrals_md = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        self.assertFalse(os.path.exists(deferrals_md))
+        with open(path, encoding="utf-8") as f:
+            after = f.read()
+        self.assertEqual(before, after)
 
 
 class FmtCLITests(CLITestCase):

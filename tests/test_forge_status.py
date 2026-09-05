@@ -106,6 +106,31 @@ def _summary(number, status, attempts=1):
     }
 
 
+class IsTerminalTests(unittest.TestCase):
+    """``is_terminal`` is the single public definition of the run.json
+    status vocabulary's terminal/non-terminal split — implemented directly
+    against ``_STATE_MAP`` so a caller outside this module (forge_memory's
+    ``defer --run``) never needs its own copy of that vocabulary."""
+
+    def test_running_is_not_terminal(self):
+        self.assertFalse(forge_status.is_terminal("running"))
+
+    def test_unrecognized_status_is_not_terminal(self):
+        # Matches _STATE_MAP.get(raw, "running")'s existing default: an
+        # unrecognized status is treated as still running, never terminal.
+        self.assertFalse(forge_status.is_terminal("paused"))
+        self.assertFalse(forge_status.is_terminal(None))
+
+    def test_every_known_terminal_status_is_terminal(self):
+        for status, external in forge_status._STATE_MAP.items():
+            if status == "running":
+                continue
+            self.assertTrue(
+                forge_status.is_terminal(status),
+                "{!r} (-> {!r}) should be terminal".format(status, external),
+            )
+
+
 class ReadRunStateTests(unittest.TestCase):
     def test_missing_dir_returns_none(self):
         self.assertIsNone(forge_status.read_run_state("/no/such/dir"))
