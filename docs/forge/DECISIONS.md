@@ -1,5 +1,9 @@
 # Decisions
 
+## 2026-09-05 — Deferrals file at a reviewed close-out gate, not by the runner; reviewer contract untouched
+**Why:** A reviewer `summary` cannot become an <=80-char title without truncation, and truncation is a budget error — so a record must be *authored*, and `forge-run.py` is headless Python with no LLM at completion. Extending the reviewer verdict with title/follow-up fields was rejected: it changes a contract both harnesses share to make a reviewer guess at a record shape and at the user's priorities. Filing at a close-out review gate puts authorship where judgment already is, keeps "the runner never writes the durable record" verbatim, and matches the requirement that deferrals be reviewed because they affect the next phase. Cost: an autonomous Codex run ends with deferrals staged, not filed.
+**Where:** docs/forge/specs/2026-09-05-deferrals-as-issues-design.md
+
 ## 2026-09-05 — Project memory becomes a schema-driven record engine; GitHub issues replace DEFERRALS/ROADMAP
 **Why:** Drift is prose expansion inside structurally valid entries, so agents authoring by imitation raise each entry's baseline. Fix removes the motive (CLI composes records from typed arguments; no prose template to imitate) rather than validating after the fact. Chose one shared engine over per-type scripts (duplicate validators drift) and over a declarative schema engine (YAGNI for two types). Projects stays human-run — it is account-owned and needs config plus a token scope; issues are repo-native and free.
 **Where:** docs/forge/specs/2026-09-05-project-memory-engine-design.md
