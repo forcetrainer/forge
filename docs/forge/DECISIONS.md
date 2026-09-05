@@ -1,5 +1,9 @@
 # Decisions
 
+## 2026-09-05 — Constraints replace decisions: a snapshot of what is true, not a log
+**Why:** A decision records a choice; a constraint records a rule. The session hook asserted they were the same, and 37 entries of mostly phase history were being read as binding. Constraints hold only what is currently true — a stale one is worse than a missing one, since an agent obeys it into a conflict. Rationale moves to PR bodies and spec changelogs, so there is no decision log afterward. `source` stays on the record because a constraint written in one phase and applied in another needs its originating code to be understood.
+**Where:** docs/forge/specs/2026-09-05-constraints-design.md
+
 ## 2026-09-05 — Deferrals file at a reviewed close-out gate, not by the runner; reviewer contract untouched
 **Why:** A reviewer `summary` cannot become an <=80-char title without truncation, and truncation is a budget error — so a record must be *authored*, and `forge-run.py` is headless Python with no LLM at completion. Extending the reviewer verdict with title/follow-up fields was rejected: it changes a contract both harnesses share to make a reviewer guess at a record shape and at the user's priorities. Filing at a close-out review gate puts authorship where judgment already is, keeps "the runner never writes the durable record" verbatim, and matches the requirement that deferrals be reviewed because they affect the next phase. Cost: an autonomous Codex run ends with deferrals staged, not filed.
 **Where:** docs/forge/specs/2026-09-05-deferrals-as-issues-design.md
