@@ -22,7 +22,7 @@ Routing test: creates new architecture → gear 3 (full flow below); operates wi
 2. Present the design in conversation, one paragraph max.
 3. One approval gate.
 4. Hand off directly to the tdd skill — no spec file, no plan file, planning skill skipped.
-5. After execution: amend the owning spec in place, changelog line (step 6 below); commit the amendment with the change. DECISIONS entry only if something was genuinely decided.
+5. After execution: amend the owning spec in place, changelog line (step 6 below); commit the amendment with the change.
 
 **Gear 3** — full flow below.
 
@@ -32,16 +32,15 @@ Tripwires, both mandatory:
 
 ## Flow
 
-1. **Explore context** — current files, docs, recent commits. Read `docs/forge/DECISIONS.md` and `ROADMAP.md` if present; logged decisions are constraints — flag conflicts to the user, don't design around them silently. If the idea comes from `docs/forge/ideas/` or a path handed at kickoff, and it's graduating to a build (not free-form ideation): read it, confirm your understanding, flag DECISIONS conflicts, skip questions it already answers, go straight to approaches.
+1. **Explore context** — current files, docs, recent commits. Read `ROADMAP.md` if present. Constraints (`docs/forge/constraints.md`) are supplied at session start — flag conflicts with them to the user, don't design around them silently. If the idea comes from `docs/forge/ideas/` or a path handed at kickoff, and it's graduating to a build (not free-form ideation): read it, confirm your understanding, flag constraint conflicts, skip questions it already answers, go straight to approaches.
 2. **Scope check** — if the request spans multiple independent subsystems, decompose before refining details: identify the pieces, how they relate, what order to build them. Record the phases in `docs/forge/ROADMAP.md` (formats: project-memory skill). Then brainstorm the first sub-project; each gets its own spec → plan → implementation cycle.
 3. **Clarify** — batch 2–3 independent questions per turn, multiple choice preferred; single-question only when the answer forks the design. Focus on purpose, constraints, and success criteria.
 4. **Propose 2–3 approaches** with trade-offs. Lead with your recommendation and why.
 5. **Present the design** in sections scaled to their complexity (a few sentences when straightforward, ~200–300 words when nuanced); check in after each section with decision digests — what was chosen, what it forecloses, what's assumed. Cover architecture, components, data flow, error handling, testing.
-6. **Write the spec** to `docs/forge/specs/YYYY-MM-DD-<topic>-design.md` and commit it. (User/project preferences for spec location override this default.) Code appears in a spec only as **contract, never solution**: interface signatures (no bodies), data/wire-format examples, algorithms that are themselves the requirement, desired call-site ergonomics. If deleting a code block would lose only typing time — not a decision — cut it. Specs are living per-system documents, not frozen snapshots: a later change that alters what a spec asserts amends that spec in place, never a new file. On first amendment, add a `## Changelog` section at the spec's end; one dated line per amendment, e.g. `2026-07-02: sort by division, not date (commit abc123)`. Spec style is telegraphic — bullets, contracts, constraints. Sentence test: carries a requirement, contract, or decision, else cut. No narrative preamble, no restated codebase context, no justification prose — the why lives in DECISIONS. Guard: trim toward decision-relevant, not short; edge-case naming, interfaces, and acceptance criteria stay.
+6. **Write the spec** to `docs/forge/specs/YYYY-MM-DD-<topic>-design.md` and commit it. (User/project preferences for spec location override this default.) Code appears in a spec only as **contract, never solution**: interface signatures (no bodies), data/wire-format examples, algorithms that are themselves the requirement, desired call-site ergonomics. If deleting a code block would lose only typing time — not a decision — cut it. Specs are living per-system documents, not frozen snapshots: a later change that alters what a spec asserts amends that spec in place, never a new file. On first amendment, add a `## Changelog` section at the spec's end; one dated line per amendment, e.g. `2026-07-02: sort by division, not date (commit abc123)`. Spec style is telegraphic — bullets, contracts, constraints. Sentence test: carries a requirement, contract, or decision, else cut. No narrative preamble, no restated codebase context, no justification prose — the why lives in the PR body. Guard: trim toward decision-relevant, not short; edge-case naming, interfaces, and acceptance criteria stay.
 7. **Self-review the spec** with fresh eyes: placeholders ("TBD", vague requirements), internal contradictions, scope (focused enough for one plan?), ambiguity (any requirement readable two ways? pick one, make it explicit). Fix inline, no re-review.
 8. **Close out** — tell the user: "spec written to `<path>` and committed — flag changes, otherwise proceeding to planning." The sectioned walkthrough in step 5 was the approval gate; no mandatory re-review of the file.
-9. **Log the decision** — append the chosen approach and why it won over the alternatives to `docs/forge/DECISIONS.md`.
-10. **Hand off to the planning skill.** That is the only next step — no implementation skills.
+9. **Hand off to the planning skill.** That is the only next step — no implementation skills.
 
 ## Design principles
 

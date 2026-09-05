@@ -116,9 +116,10 @@ slices. Parallel writers break that chain and reintroduce the integration
 mess per-task commits exist to prevent. Fan-out stays for **read-only** work
 (research, independent review lenses); coding writes, and that stays serial.
 
-**Project memory** is `docs/forge/DECISIONS.md`, `ROADMAP.md`, and GitHub
-issues. `DECISIONS.md` holds what was decided and why — it's read before new
-work, and logged decisions are constraints. `ROADMAP.md` tracks phases. Work
+**Project memory** is `docs/forge/constraints.md`, `ROADMAP.md`, and GitHub
+issues. `constraints.md` holds the rules that must not be broken right now —
+CLI-authored, user-approved, and a snapshot rather than a log: a rule that
+stops being true is deleted, not annotated. `ROADMAP.md` tracks phases. Work
 that was skipped on purpose is a GitHub issue, filed at a reviewed close-out
 gate rather than a markdown entry — workers can defer nice-to-haves if they
 stage the reason, they can't skip anything the spec requires.
@@ -158,7 +159,7 @@ after a halt, and known Codex caveats — is in
 | `skills/brainstorming` | Gear routing, then idea → design → spec through dialogue. Includes a browser-based visual companion for mockups. |
 | `skills/planning` | Spec → plan (what/where, no code) → tiered execution. Codex execution notes in `codex-execution.md`. |
 | `skills/tdd` | Red-green-refactor cut to its operational core. Test-harness creation is plan-level work, never a drive-by. |
-| `skills/project-memory` | Formats and rules for ROADMAP / DECISIONS / deferral issues. |
+| `skills/project-memory` | Formats and rules for ROADMAP / constraints / deferral issues. |
 | `agents/` | The three tier workers (forge-light, forge-standard, forge-deep), model pinned per harness. |
 | `scripts/` — briefs & packets | `extract-brief.py` (plan+spec → worker brief) and `review-packet.py` (task block + diff → review packet). Stdlib; used by both harnesses. |
 | `scripts/` — Codex runtime | `forge-run.py` (the deterministic plan runner — one `codex exec`/task, receipts, per-task commits), `forge-monitor.py` (the live `rich` TUI), and the `forge_*` / `forge_status` helper modules. Stdlib except the monitor, which needs `rich`. |

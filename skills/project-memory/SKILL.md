@@ -1,25 +1,27 @@
 ---
 name: project-memory
-description: Use when logging a decision made about the system, recording deferred work, or updating the project roadmap — and as the format reference for docs/forge/ROADMAP.md, DECISIONS.md, and deferral issues (via scripts/forge_memory.py).
+description: Use when authoring a constraint, recording deferred work, or updating the project roadmap — and as the format reference for docs/forge/constraints.md, ROADMAP.md, and deferral issues (via scripts/forge_memory.py).
 ---
 
 # Project Memory
 
-Two append-friendly files under `docs/forge/` (DECISIONS.md, ROADMAP.md) plus GitHub issues for deferred work give the project durable memory across sessions. Entries are terse, newest first. Create each markdown file on its first entry — no empty scaffolds. Commit memory updates with the work that produced them.
+One append-friendly file under `docs/forge/` (ROADMAP.md), one CLI-managed file (constraints.md), plus GitHub issues for deferred work give the project durable memory across sessions. Entries are terse, newest first where order applies. Create each markdown file on its first entry — no empty scaffolds. Commit memory updates with the work that produced them.
 
-## DECISIONS.md — read before building, written when decided
+## constraints.md — what must not be broken, right now
 
-One entry per decision about the system:
+A constraint is a rule that, if broken, produces a **defect** — not a preference, not a record of a choice made. `docs/forge/constraints.md` is a snapshot of what is true **now**, never a log: a rule that stops being true is deleted, not annotated. A stale constraint is worse than a missing one, because an agent obeys it into a conflict.
 
-```markdown
-## 2026-06-10 — Use SQLite for local persistence
-**Why:** Single-user app, no server; simplest thing that supports the query needs.
-**Where:** docs/forge/specs/2026-06-10-storage-design.md
-```
+A decision — "we chose X over Y because Z" — is **not** a constraint. Rationale lives in PR bodies and spec changelogs; there is no decision log.
 
-Log when: an approach is chosen during brainstorming, a design decision is locked during planning, or a decision crystallizes ad-hoc mid-session ("let's log that").
+The file is authored **only** through `scripts/forge_memory.py`'s `add-constraint` / `update-constraint` / `retire-constraint` / `list-constraints` subcommands — direct edits are denied by a PreToolUse hook. Every subcommand builds a record from typed flags; there is no free-form body argument.
 
-**Read before any feature build.** New work must not contradict logged decisions. On conflict, surface it to the user — never silently override. Reversing a decision gets a new entry that names the one it supersedes.
+Fields, all required unless noted: `id` (kebab-case, ≤40 chars), `rule` (≤200 chars, imperative), `scope` (≤80 chars, defaults to `repo`), `because` (≤300 chars), `source` (≤120 chars — an issue, PR, or spec path this rule comes from). Budget overrun is a hard error, never a truncation.
+
+**Creation and update always require user approval.** Agents may propose a constraint at an approval gate; no forge stage writes one unattended.
+
+There is a soft cap of 12 constraints: crossing it prints a notice and never refuses — the value of the file comes from staying short enough to re-read every session.
+
+`hooks/session-start` reads `constraints.md` and supplies its rules as session context automatically — no skill needs to read the file itself to surface it to the user.
 
 ## Deferrals — what we consciously didn't do
 
