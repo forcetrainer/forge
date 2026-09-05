@@ -322,6 +322,106 @@ class GitHubStoreTests(unittest.TestCase):
         defects = forge_memory.validate(records[0])
         self.assertTrue(any("budget" in d for d in defects))
 
+    def test_list_preserves_issue_number_as_ref(self):
+        store = fms.GitHubStore(self.tmp)
+        body = forge_memory.render(_deferral(title="parsed-item"))
+        payload = json.dumps([{"number": 7, "title": "parsed-item", "body": body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            records = store.list("deferral")
+
+        self.assertEqual(records[0].ref, "7")
+
+    def test_list_state_defaults_to_all(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="[]")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            store.list("deferral")
+
+        list_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "list" in a)
+        self.assertIn("all", list_call)
+
+    def test_list_accepts_a_state_filter(self):
+        store = fms.GitHubStore(self.tmp)
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="[]")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            store.list("deferral", state="open")
+
+        list_call = next(a for a in calls if a[:2] == ["gh", "issue"] and "list" in a)
+        self.assertIn("open", list_call)
+        self.assertNotIn("all", list_call)
+
+    def test_list_default_still_raises_on_first_unparsable_body(self):
+        # Unchanged default behavior (errors=None): the same case
+        # test_hand_edited_issue_body_out_of_canonical_form_is_reported
+        # covers above, re-asserted here to anchor the "collect" mode's
+        # contrast below.
+        store = fms.GitHubStore(self.tmp)
+        broken_body = "## bad\nnot a valid field line\n"
+        payload = json.dumps([{"number": 9, "body": broken_body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(forge_memory.SchemaError):
+                store.list("deferral")
+
+    def test_list_errors_param_collects_all_bad_issues_without_raising(self):
+        # Two independently unparsable bodies plus one good one: passing
+        # an `errors` list opts into collect-all-defects mode instead of
+        # raising on the first, mirroring the "report every defect, never
+        # just the first" rule the rest of forge_memory follows. Good
+        # records still come back, each still carrying its ref.
+        store = fms.GitHubStore(self.tmp)
+        good_body = forge_memory.render(_deferral(title="good-one"))
+        payload = json.dumps([
+            {"number": 1, "body": "## bad-one\nnot a valid field line\n"},
+            {"number": 2, "body": good_body},
+            {"number": 3, "body": "## bad-two\nalso not valid\n"},
+        ])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        errors = []
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            records = store.list("deferral", errors=errors)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].fields["title"], "good-one")
+        self.assertEqual(records[0].ref, "2")
+        refs_with_errors = {ref for ref, _ in errors}
+        self.assertEqual(refs_with_errors, {"1", "3"})
+
     def test_retire_closes_issue_with_reason_as_comment(self):
         store = fms.GitHubStore(self.tmp)
         calls = []

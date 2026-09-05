@@ -36,9 +36,16 @@ defect they find in one pass, never just the first — the same rule
 Pure functions here; any CLI wiring (``fmt --check``/``--write`` as a
 subcommand of the forge CLI) is a separate task.
 """
+import argparse
+import datetime
+import fnmatch
+import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
+
+import forge_memory_store as fms
 
 
 @dataclass
@@ -77,6 +84,12 @@ class SchemaError(Exception):
 class Record:
     type: str
     fields: dict[str, str] = field(default_factory=dict)
+    # Store-assigned external reference (e.g. a GitHub issue number) for a
+    # record read back from a store that has one; ``None`` for a record
+    # not yet stored, or read from a store (like FileStore) where the
+    # heading field already serves as the ref. Orthogonal to SCHEMA/fields
+    # — render/parse/validate never look at it.
+    ref: str | None = None
 
 
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -308,3 +321,276 @@ def fmt_write(paths):
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(_render_all(records))
+
+
+# --- CLI ---------------------------------------------------------------
+#
+# The composition contract: every subcommand below builds a ``Record`` from
+# its own typed flags. There is no free-form body/text argument anywhere,
+# and no subcommand reads an existing entry to learn its shape — ``--help``
+# is the only template that exists. This is the project's primary anti-
+# drift mechanism (validation is the backstop, not the mechanism): an agent
+# that could pass raw record text could still imitate a drifted entry, so
+# that path is simply not offered.
+
+
+def _today_iso():
+    """``added`` is machine-set to today's date; it is never a settable
+    flag on ``add-constraint``."""
+    return datetime.date.today().isoformat()
+
+
+def _print_lines(lines, out):
+    for line in lines:
+        print(line, file=out)
+
+
+def _record_to_dict(record):
+    return dict(record.fields)
+
+
+def _print_records(records, json_out):
+    if json_out:
+        print(json.dumps([_record_to_dict(r) for r in records], indent=2))
+    else:
+        for r in records:
+            print(render(r))
+
+
+def cmd_add_constraint(args, repo_root):
+    if args.issue is not None:
+        source = "issue-{}".format(args.issue)
+    elif args.spec is not None:
+        source = "spec:{}".format(args.spec)
+    else:
+        source = "user"
+
+    record = Record(type="constraint", fields={
+        "id": args.id,
+        "rule": args.rule,
+        "because": args.because,
+        "scope": args.scope,
+        "added": _today_iso(),
+        "source": source,
+    })
+
+    defects = validate(record)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
+
+    store = fms.select_store(repo_root, "constraint")
+    try:
+        store.create(record)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_retire_constraint(args, repo_root):
+    store = fms.select_store(repo_root, "constraint")
+    try:
+        store.retire(args.id)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_list_constraints(args, repo_root):
+    store = fms.select_store(repo_root, "constraint")
+    try:
+        records = store.list("constraint")
+    except (fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.scope:
+        records = [
+            r for r in records
+            if fnmatch.fnmatch(r.fields.get("scope", ""), args.scope)
+        ]
+    _print_records(records, args.json)
+    return 0
+
+
+def cmd_defer(args, repo_root):
+    record = Record(type="deferral", fields={
+        "title": args.title,
+        "why": args.why,
+        "from": args.from_ or "user",
+        "follow-up": args.follow_up,
+    })
+
+    defects = validate(record)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
+
+    store = fms.select_store(repo_root, "deferral")
+    try:
+        store.create(record)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_list_deferrals(args, repo_root):
+    store = fms.select_store(repo_root, "deferral")
+    try:
+        records = store.list("deferral")
+    except (fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    _print_records(records, args.json)
+    return 0
+
+
+def cmd_resolve_deferral(args, repo_root):
+    store = fms.select_store(repo_root, "deferral")
+    try:
+        store.retire(args.ref, reason=args.reason)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _issue_fmt_defects(store):
+    """Every open deferral issue's body checked through the single public
+    ``GitHubStore.list`` interface — no private-name access into
+    ``forge_memory_store``, and no second ``gh issue list`` call site.
+    Passing ``errors=[]`` opts ``list`` into collect-all-defects mode so
+    an unparsable body never stops the rest of the issues from being
+    checked; every record ``list`` does return is then run through
+    ``validate`` here, the same as a file's records are in ``fmt_check``,
+    so a parsable-but-budget-overrunning body is reported too, not only an
+    unparsable one — each defect names its issue number via the record's
+    ``.ref``."""
+    parse_errors = []
+    records = store.list("deferral", state="open", errors=parse_errors)
+    defects = [
+        "issue #{}: {}".format(ref, msg) for ref, msg in parse_errors
+    ]
+    for record in records:
+        for msg in validate(record):
+            defects.append(
+                "issue #{}: deferral {!r}: {}".format(
+                    record.ref, record.fields.get("title", "?"), msg,
+                )
+            )
+    return defects
+
+
+def cmd_fmt(args, repo_root):
+    if args.paths:
+        # Explicit paths restrict fmt to exactly those files; gh is never
+        # called in this branch, regardless of which deferral store is
+        # configured.
+        if args.check:
+            defects = fmt_check(args.paths)
+            _print_lines(defects, sys.stdout)
+            return 1 if defects else 0
+        try:
+            fmt_write(args.paths)
+        except SchemaError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        return 0
+
+    # No PATH argument: cover every managed file, plus (only when the
+    # GitHub store is selected for deferrals) every open forge:deferral
+    # issue body.
+    managed = []
+    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
+    if os.path.exists(constraints_path):
+        managed.append(constraints_path)
+
+    try:
+        deferral_store = fms.select_store(repo_root, "deferral")
+    except fms.ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    if isinstance(deferral_store, fms.FileStore):
+        if os.path.exists(deferral_store.path):
+            managed.append(deferral_store.path)
+
+    all_defects = []
+    if args.check:
+        all_defects.extend(fmt_check(managed))
+    elif managed:
+        try:
+            fmt_write(managed)
+        except SchemaError as e:
+            all_defects.append(str(e))
+
+    if isinstance(deferral_store, fms.GitHubStore):
+        try:
+            all_defects.extend(_issue_fmt_defects(deferral_store))
+        except fms.StoreUnavailable as e:
+            print(str(e), file=sys.stderr)
+            return 1
+
+    _print_lines(all_defects, sys.stdout)
+    return 1 if all_defects else 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="forge_memory.py")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("add-constraint")
+    p.add_argument("--id", required=True)
+    p.add_argument("--rule", required=True)
+    p.add_argument("--because", required=True)
+    p.add_argument("--scope", default="repo")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--issue", type=int)
+    g.add_argument("--spec")
+    p.set_defaults(func=cmd_add_constraint)
+
+    p = sub.add_parser("retire-constraint")
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_retire_constraint)
+
+    p = sub.add_parser("list-constraints")
+    p.add_argument("--scope")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_list_constraints)
+
+    p = sub.add_parser("defer")
+    p.add_argument("--title", required=True)
+    p.add_argument("--why", required=True)
+    p.add_argument("--follow-up", required=True, dest="follow_up")
+    p.add_argument("--from", dest="from_")
+    p.set_defaults(func=cmd_defer)
+
+    p = sub.add_parser("list-deferrals")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_list_deferrals)
+
+    p = sub.add_parser("resolve-deferral")
+    p.add_argument("--ref", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_resolve_deferral)
+
+    p = sub.add_parser("fmt")
+    fg = p.add_mutually_exclusive_group(required=True)
+    fg.add_argument("--check", action="store_true")
+    fg.add_argument("--write", action="store_true")
+    p.add_argument("paths", nargs="*", metavar="PATH")
+    p.set_defaults(func=cmd_fmt)
+
+    return parser
+
+
+def main(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args, os.getcwd())
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -195,10 +195,24 @@ class GitHubStore(Store):
         number = url.rstrip("/").rsplit("/", 1)[-1]
         return number
 
-    def list(self, type, **filters):
+    def list(self, type, state="all", errors=None, **filters):
+        """Every issue's body parsed back through ``forge_memory.parse``,
+        each returned ``Record`` carrying its issue number as ``.ref`` (the
+        public way a caller — ``fmt``'s open-issue check included —
+        recovers which issue a record came from; this is the only
+        ``gh issue list`` call site in the codebase).
+
+        Default (``errors=None``): fails loud on the first unparsable
+        body, naming the issue, same as every other store failure here.
+        Passing a list as ``errors`` opts into collect-all-defects mode
+        instead — every unparsable body appends an ``(issue_number,
+        message)`` pair to it rather than aborting, so one bad issue never
+        hides another, and the records that DO parse are still returned
+        (and still subject to ``forge_memory.validate`` by the caller, the
+        same as a good record from a bad file would be)."""
         _gh_ready(self.repo_root)
         proc = self._run([
-            "issue", "list", "--label", self.LABEL, "--state", "all",
+            "issue", "list", "--label", self.LABEL, "--state", state,
             "--json", "number,title,body",
         ])
         if proc.returncode != 0:
@@ -206,7 +220,19 @@ class GitHubStore(Store):
         data = json.loads(proc.stdout or "[]")
         records = []
         for item in data:
-            records.extend(forge_memory.parse(item.get("body", ""), type))
+            ref = str(item.get("number"))
+            try:
+                parsed = forge_memory.parse(item.get("body", ""), type)
+            except forge_memory.SchemaError as e:
+                if errors is None:
+                    raise forge_memory.SchemaError(
+                        "issue #{}: {}".format(ref, e)
+                    )
+                errors.append((ref, str(e)))
+                continue
+            for r in parsed:
+                r.ref = ref
+                records.append(r)
         return [r for r in records if _matches(r, filters)]
 
     def retire(self, ref, reason=None):

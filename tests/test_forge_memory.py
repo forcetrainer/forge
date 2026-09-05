@@ -4,17 +4,23 @@ structural checks) so prose-expansion drift inside a valid field is caught;
 `render` is the sole source of record text and `parse` is its exact inverse,
 including on a file a human hand-drifted (reordered fields) but that still
 parses; and unparsable or budget-violating input fails loud naming the line."""
+import argparse
+import contextlib
+import io
+import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
 sys.path.insert(0, SCRIPTS_DIR)
 
 import forge_memory as fm  # noqa: E402
+import forge_memory_store as fms  # noqa: E402
 
 
 def _write(path, text):
@@ -278,6 +284,395 @@ class FmtTests(unittest.TestCase):
         ).format("x" * 201))
         with self.assertRaises(fm.SchemaError):
             fm.fmt_write([path])
+
+
+def _completed(returncode=0, stdout="", stderr=""):
+    return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _run_cli(argv):
+    """Run ``fm.main(argv)``, returning ``(exit_code, stdout, stderr)``."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = fm.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+class CLITestCase(unittest.TestCase):
+    """Every CLI test runs inside a throwaway repo root with the real
+    process cwd pointed at it (``main`` derives ``repo_root`` from
+    ``os.getcwd()``), and with ``gh`` never actually invoked unless a test
+    explicitly stubs it — a spurious ``subprocess.run`` call fails the test
+    instead of silently reaching the network."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-memory-cli-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, self._old_cwd)
+        os.makedirs(os.path.join(self.tmp, "docs", "forge"), exist_ok=True)
+
+    def _no_gh_guard(self):
+        """Patch context: any ``gh`` invocation raises AssertionError."""
+        def _forbidden(*a, **k):
+            raise AssertionError("gh must not be invoked in this path: {}".format(a))
+        return mock.patch.object(fms.subprocess, "run", side_effect=_forbidden)
+
+    def _use_file_store_for_deferrals(self):
+        with open(os.path.join(self.tmp, "docs", "forge", "config.json"), "w",
+                   encoding="utf-8") as f:
+            json.dump({"deferrals": {"store": "file"}}, f)
+
+
+class SubcommandSurfaceTests(CLITestCase):
+    def test_unknown_subcommand_exits_nonzero(self):
+        with self.assertRaises(SystemExit) as cm:
+            fm.main(["bogus-command"])
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_help_exits_zero(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                fm.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_every_subcommand_present(self):
+        parser = fm.build_parser()
+        sub_action = next(
+            a for a in parser._actions
+            if isinstance(a, argparse.Action) and a.choices
+        )
+        self.assertEqual(set(sub_action.choices), {
+            "add-constraint", "retire-constraint", "list-constraints",
+            "defer", "list-deferrals", "resolve-deferral", "fmt",
+        })
+
+    # This is an ALLOW-list, not a denylist, and must stay one: a denylist
+    # of banned names ({"body", "text"}) passes vacuously the instant
+    # someone adds a free-form field under any other name (--notes,
+    # --content, --description, --details, ...). The property this test
+    # guards — that every record is composed from typed fields, with no
+    # free-form text surface anywhere — is the project's central anti-
+    # drift mechanism (the drift being fixed came from agents reading and
+    # imitating prior prose), so it must be checked positively: each
+    # subcommand's flags must be EXACTLY this set. Any newly added flag
+    # fails this test until someone deliberately adds it below.
+    _EXPECTED_DESTS = {
+        "add-constraint": {"id", "rule", "because", "scope", "issue", "spec"},
+        "retire-constraint": {"id"},
+        "list-constraints": {"scope", "json"},
+        "defer": {"title", "why", "follow_up", "from_"},
+        "list-deferrals": {"json"},
+        "resolve-deferral": {"ref", "reason"},
+        "fmt": {"check", "write", "paths"},
+    }
+
+    def test_no_subcommand_accepts_a_free_form_body_argument(self):
+        parser = fm.build_parser()
+        sub_action = next(
+            a for a in parser._actions
+            if isinstance(a, argparse.Action) and a.choices
+        )
+        for name, subparser in sub_action.choices.items():
+            dests = {a.dest for a in subparser._actions if a.dest != "help"}
+            self.assertEqual(
+                dests, self._EXPECTED_DESTS[name],
+                "{} flags changed — update _EXPECTED_DESTS deliberately "
+                "if this is an intentional, reviewed typed field, never "
+                "to admit a free-form body/text argument".format(name),
+            )
+
+
+class AddConstraintCLITests(CLITestCase):
+    def test_composes_canonical_record_with_machine_added_date(self):
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "no-eval-in-hooks",
+            "--rule", "Hooks must never call eval on untrusted input.",
+            "--because", "Untrusted input reaching eval is an injection vector.",
+        ])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        records = fm.parse(text, "constraint")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].fields["added"], fm._today_iso())
+        self.assertEqual(records[0].fields["source"], "user")
+        self.assertEqual(records[0].fields["scope"], "repo")
+
+    def test_added_is_not_a_settable_flag(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+                "--added", "2020-01-01",
+            ])
+
+    def test_issue_and_spec_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+                "--issue", "7", "--spec", "docs/spec.md",
+            ])
+
+    def test_issue_flag_becomes_source(self):
+        code, _, err = _run_cli([
+            "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+            "--issue", "7",
+        ])
+        self.assertEqual(code, 0, err)
+        records = fm.fmt_check  # sanity: module still importable
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        record = fm.parse(text, "constraint")[0]
+        self.assertEqual(record.fields["source"], "issue-7")
+
+    def test_budget_overrun_exits_nonzero_naming_field_and_limit_on_stderr(self):
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "x", "--rule", "x" * 201, "--because", "b",
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("rule", err)
+        self.assertIn("200", err)
+
+    def test_duplicate_id_exits_nonzero(self):
+        code, _, _ = _run_cli([
+            "add-constraint", "--id", "dup", "--rule", "r", "--because", "b",
+        ])
+        self.assertEqual(code, 0)
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "dup", "--rule", "r2", "--because", "b2",
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("dup", err)
+
+
+class RetireConstraintCLITests(CLITestCase):
+    def test_unknown_slug_exits_nonzero(self):
+        code, out, err = _run_cli(["retire-constraint", "--id", "no-such-id"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("no-such-id", err)
+
+    def test_retire_removes_record(self):
+        _run_cli([
+            "add-constraint", "--id", "to-retire", "--rule", "r", "--because", "b",
+        ])
+        code, _, err = _run_cli(["retire-constraint", "--id", "to-retire"])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("to-retire", text)
+
+
+class ListConstraintsCLITests(CLITestCase):
+    def test_json_output_is_parseable(self):
+        _run_cli([
+            "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
+            "--scope", "hooks/",
+        ])
+        code, out, err = _run_cli(["list-constraints", "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["id"], "a")
+
+    def test_human_output_is_not_json(self):
+        _run_cli([
+            "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
+        ])
+        code, out, err = _run_cli(["list-constraints"])
+        self.assertEqual(code, 0, err)
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(out)
+        self.assertIn("a", out)
+
+    def test_scope_filter(self):
+        _run_cli([
+            "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
+            "--scope", "hooks/",
+        ])
+        _run_cli([
+            "add-constraint", "--id", "b", "--rule", "r", "--because", "b",
+            "--scope", "scripts/",
+        ])
+        code, out, err = _run_cli(["list-constraints", "--json", "--scope", "hooks/"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual([d["id"] for d in data], ["a"])
+
+
+class DeferCLITests(CLITestCase):
+    def test_invalid_followup_exits_nonzero_naming_legal_values(self):
+        self._use_file_store_for_deferrals()
+        code, out, err = _run_cli([
+            "defer", "--title", "t", "--why", "w", "--follow-up", "roadmap",
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("backlog", err)
+        self.assertIn("drop", err)
+        self.assertIn("revisit-when", err)
+
+    def test_defer_against_file_store(self):
+        self._use_file_store_for_deferrals()
+        code, out, err = _run_cli([
+            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
+        ])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        records = fm.parse(text, "deferral")
+        self.assertEqual(records[0].fields["from"], "user")
+
+    def test_defer_against_github_store_invokes_gh(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/9\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "defer", "--title", "improve-x", "--why", "polish",
+                "--follow-up", "backlog",
+            ])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(any(a[:2] == ["gh", "issue"] and "create" in a for a in calls))
+
+    def test_list_deferrals_json(self):
+        self._use_file_store_for_deferrals()
+        _run_cli([
+            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
+        ])
+        code, out, err = _run_cli(["list-deferrals", "--json"])
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data[0]["title"], "improve-x")
+
+    def test_resolve_deferral_against_file_store(self):
+        self._use_file_store_for_deferrals()
+        _run_cli([
+            "defer", "--title", "improve-x", "--why", "polish", "--follow-up", "backlog",
+        ])
+        code, out, err = _run_cli([
+            "resolve-deferral", "--ref", "improve-x", "--reason", "done",
+        ])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("improve-x", text)
+
+
+class FmtCLITests(CLITestCase):
+    def test_neither_check_nor_write_exits_nonzero(self):
+        with self.assertRaises(SystemExit):
+            fm.main(["fmt"])
+
+    def test_check_and_write_together_exits_nonzero(self):
+        with self.assertRaises(SystemExit):
+            fm.main(["fmt", "--check", "--write"])
+
+    def _write(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_check_drifted_file_nonzero_canonical_file_zero(self):
+        path = os.path.join(self.tmp, "constraints.md")
+        self._write(path, (
+            "## bad id\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+        ))
+        code, out, err = _run_cli(["fmt", "--check", path])
+        self.assertNotEqual(code, 0)
+
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        self._write(path, fm.render(record))
+        code, out, err = _run_cli(["fmt", "--check", path])
+        self.assertEqual(code, 0, out + err)
+
+    def test_explicit_path_does_not_call_gh(self):
+        path = os.path.join(self.tmp, "constraints.md")
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        self._write(path, fm.render(record))
+        with self._no_gh_guard():
+            code, out, err = _run_cli(["fmt", "--check", path])
+        self.assertEqual(code, 0, out + err)
+
+    def test_no_path_under_file_store_does_not_call_gh(self):
+        self._use_file_store_for_deferrals()
+        with self._no_gh_guard():
+            code, out, err = _run_cli(["fmt", "--check"])
+        self.assertEqual(code, 0, out + err)
+
+    def test_no_path_checks_managed_files_and_open_issues(self):
+        # A drifted managed constraints.md file...
+        constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        self._write(constraints_path, (
+            "## bad id\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+        ))
+
+        # ...and a drifted open forge:deferral issue body (GitHub store is
+        # the default — no config.json).
+        broken_body = "## bad\nthis is not a valid field line\n"
+        payload = json.dumps([{"number": 5, "body": broken_body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(["fmt", "--check"])
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("bad id", out)
+        self.assertIn("#5", out)
+
+    def test_budget_overrunning_but_parsable_issue_body_is_reported(self):
+        record_fields = {
+            "title": "x" * 90,  # over the 80-char budget, still parsable
+            "why": "w", "from": "user", "follow-up": "backlog",
+        }
+        body = "## {}\n**Why:** {}\n**From:** {}\n**Follow-up:** {}\n".format(
+            record_fields["title"], record_fields["why"], record_fields["from"],
+            record_fields["follow-up"],
+        )
+        payload = json.dumps([{"number": 6, "body": body}])
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            return _completed(returncode=0, stdout=payload)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(["fmt", "--check"])
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("#6", out)
+        self.assertIn("budget", out)
 
 
 if __name__ == "__main__":
