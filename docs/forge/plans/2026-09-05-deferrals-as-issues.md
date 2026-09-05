@@ -141,7 +141,7 @@ emit no template.
 
 **Acceptance:**
 - `grep -rn "DEFERRALS.md" skills/ scripts/ hooks/ README.md CONTRIBUTING.md` returns no hit that names it as a write target or a live read path.
-- `grep -rn "docs/forge/DEFERRALS" .` returns hits only under `docs/forge/archive/`, `docs/forge/specs/`, and `docs/forge/plans/`.
+- `grep -rn "docs/forge/DEFERRALS" .` returns hits only under `docs/forge/archive/`, `docs/forge/specs/`, `docs/forge/plans/`, the single retirement notice in `skills/project-memory/SKILL.md`, and the pre-existing citation comment in `tests/test_forge_review.py`. Naming the retired path is unavoidable when documenting that it is retired.
 - The four required content points above each appear in `skills/planning/SKILL.md`.
 - Full suite passes (no test changes expected).
 

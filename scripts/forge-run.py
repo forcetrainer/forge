@@ -1562,8 +1562,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     offer) threads into every per-task and final-review convergence decision:
     ``auto`` runs the disposition matrix, ``gate`` halts on any finding.
     Defer-disposition findings from every task and the final review aggregate into
-    ``run.json`` under ``deferrals`` (the runner never writes DEFERRALS.md — the
-    orchestrator does, at completion). ``seed``-disposition findings (in-run x
+    ``run.json`` under ``deferrals``; the runner writes no durable record of its
+    own — filing happens later, at the close-out review gate, via
+    ``forge_memory.py defer``. ``seed``-disposition findings (in-run x
     contract-breaking — a finding against an earlier task's already-committed
     work) similarly aggregate into ``run.json`` under ``seeded_findings``: logged,
     the task's own run is never halted or reworked over them, and they seed the
@@ -1656,8 +1657,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     overall = "passed"
     escalated = False
     # Defer-disposition findings aggregate here across every task and the final
-    # review; surfaced in the terminal run.json (the orchestrator writes them into
-    # DEFERRALS.md at completion — the runner never touches that curated doc).
+    # review; surfaced in the terminal run.json. The runner writes no durable
+    # record of its own — filing happens later, at the close-out review gate,
+    # via forge_memory.py defer.
     deferrals = []
     doc_sync_record = None
     # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at

@@ -43,6 +43,10 @@ branch-disposition question.
   is a decision point, not a notification.
 - An autonomous Codex run ends with deferrals **staged, not filed**. Accepted
   consequence: an unreviewed auto-deferral must not become a permanent issue.
+- A **halted** run may file. Its collected deferrals are real findings and the user
+  reviews them at the gate either way; discarding them because the run stopped early
+  would lose work. `is_terminal` answers "is anything still writing this file", which
+  is the only question filing safety depends on — not whether the run finished clean.
 
 ## User-initiated deferrals
 
@@ -123,8 +127,8 @@ A guided task, not a script.
 - gh-unavailable at filing: loud, staged, commands printed, run not failed.
 - `Record` equality ignores `ref`; two records differing only by `ref` compare equal.
 - `GitHubStore.list` returns `(records, errors)`; no out-parameter remains.
-- Repo-wide grep: no live reference to `docs/forge/DEFERRALS.md` outside
-  `docs/forge/archive/` and this spec's changelog.
+- Repo-wide grep: no reference to `docs/forge/DEFERRALS.md` as a write target or a
+  live read path. A notice stating that it is retired may name it.
 
 ## Acceptance
 
@@ -147,3 +151,4 @@ neither is touched by this phase.
 Dated per the current convention. Phase 5 de-dates and migrates it.
 
 2026-09-05: D1's fix made uniform across both stores (scan/list) — a GitHubStore-only tuple return forced isinstance branching at call sites and contradicted the Phase 1 Stores contract (Task 1 review, issue #44).
+2026-09-05: halted runs may file — is_terminal gates on write safety, not clean completion; acceptance grep permits a retirement notice naming the retired path (Task 4 review, issue #44).

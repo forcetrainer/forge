@@ -168,11 +168,38 @@ review's defer-disposition findings under `deferrals`, plus `autofix_mode`
 and the terminal `doc_sync` record; `--status` surfaces the deferrals
 count/list and the halt-reason class alongside the existing per-task summary.
 
-**DEFERRALS write-back:** the runner never writes `docs/forge/DEFERRALS.md`
-itself — deferrals stay in `run.json` through the run. At clean completion,
-the orchestrator reads the aggregated `deferrals` list from `run.json` (or
-`--status`'s summary) and appends them to `docs/forge/DEFERRALS.md` as one
-reviewed batch, in the project-memory format (see the project-memory skill).
+**Stage-and-emit contract:** the runner never files a deferral itself — it
+has no `gh` invocation anywhere and writes no durable record beyond
+`run.json`'s `deferrals` list, aggregated through the run as findings are
+classified. Filing is a close-out step: a **still-running** run cannot file (nothing
+should write into `run.json` while the runner itself is still writing it),
+but a **halted** run is terminal too and its staged deferrals can be filed
+just the same — a halt doesn't discard the findings a run already
+collected. On a **terminal** run — any status `forge_status.is_terminal`
+accepts, i.e. anything but a run still in progress — `forge-run.py --status`
+stages and emits: for each staged deferral it prints the finding id, its
+full untruncated summary, and — unless the entry already carries a recorded
+`issue` (meaning `forge_memory.py defer --run ... --finding-id ...` already
+filed it) — a ready-to-run template:
+
+```
+forge_memory.py defer --title <title> --why <why> --follow-up backlog \
+  --run <run.json> --finding-id <id>
+```
+
+`<title>` and `<why>` are left as visible placeholders; this module never
+fabricates them — a reviewer summary runs 100–200 chars against the
+deferral schema's 80-char title budget, and budget overrun is an error, not
+a truncation, so authoring within budget takes judgment the runner doesn't
+have. A human or an agent fills in `--title`/`--why` and runs the command,
+which invokes `forge_memory.py defer` to file the issue and records the
+resulting issue number back into that finding's `run.json` entry (via
+`--run`/`--finding-id`), so a repeated close-out never double-files.
+`follow-up` defaults to `backlog` for every runner-generated deferral —
+`--status` never emits a template guessing `drop` or `revisit-when:<condition>`.
+An autonomous Codex run that reaches a terminal state ends with its
+deferrals **staged, not filed** — that is deliberate; an unreviewed
+auto-deferral must not become a permanent issue.
 
 **Session awareness — run in the foreground:** the runner is run in the foreground, not backgrounded. Foreground is what makes a halt visible: the orchestrator is blocked on the command, so the instant the runner exits non-zero (escalation exit 2, contract error exit 1) control returns to the orchestrator, which reads the receipt/stderr and **relays the halt to the human in the conversation** — "task N escalated: <findings>, needs your decision." A halt that hands control straight back to a waiting orchestrator can't go silent; that is the entire mechanism. No notifications, no hook, no `ps`.
 

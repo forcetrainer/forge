@@ -19,5 +19,6 @@ claude plugin update forge@forge
 
 This repo uses its own conventions: decisions live in
 `docs/forge/DECISIONS.md` (read it before changing skill behavior), skipped
-work in `docs/forge/DEFERRALS.md`. The `docs/forge/` directory also opts
-this repo into its own session hook.
+work is filed as a GitHub issue via `scripts/forge_memory.py defer` (see the
+project-memory skill), not a markdown file. The `docs/forge/` directory also
+opts this repo into its own session hook.
