@@ -1,4 +1,19 @@
-# Decisions
+# Decisions — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Binding rules now live in `docs/forge/constraints.md`, authored through
+`scripts/forge_memory.py`. Rationale — why a choice was made — lives in PR bodies and
+spec changelogs. There is no decision log.
+
+This file is kept because a decision is not a constraint: most of what follows records
+choices made at a moment, several of them since reversed, and reading it as binding is
+exactly the conflation that retired it.
+
+Triaged 2026-09-05 (issue #45). Nine entries yielded constraints; the rest were phase
+history, already enforced by code, or preferences rather than rules.
+
+---
 
 ## 2026-09-05 — Constraints replace decisions: a snapshot of what is true, not a log
 **Why:** A decision records a choice; a constraint records a rule. The session hook asserted they were the same, and 37 entries of mostly phase history were being read as binding. Constraints hold only what is currently true — a stale one is worse than a missing one, since an agent obeys it into a conflict. Rationale moves to PR bodies and spec changelogs, so there is no decision log afterward. `source` stays on the record because a constraint written in one phase and applied in another needs its originating code to be understood.
