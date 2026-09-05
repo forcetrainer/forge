@@ -40,9 +40,8 @@ def _valid_constraint_fields(**overrides):
     fields = {
         "id": "no-eval-in-hooks",
         "rule": "Hooks must never call eval on untrusted input.",
-        "because": "Untrusted input reaching eval is an injection vector.",
         "scope": "hooks/",
-        "added": "2026-09-05",
+        "because": "Untrusted input reaching eval is an injection vector.",
         "source": "issue-42",
     }
     fields.update(overrides)
@@ -89,6 +88,50 @@ class ValidateTests(unittest.TestCase):
         defects = fm.validate(record)
         self.assertTrue(any("because" in d for d in defects), defects)
 
+    def test_source_is_required(self):
+        fields = _valid_constraint_fields()
+        del fields["source"]
+        record = fm.Record(type="constraint", fields=fields)
+        defects = fm.validate(record)
+        self.assertTrue(any("source" in d for d in defects), defects)
+
+    def test_scope_is_required(self):
+        fields = _valid_constraint_fields()
+        del fields["scope"]
+        record = fm.Record(type="constraint", fields=fields)
+        defects = fm.validate(record)
+        self.assertTrue(any("scope" in d for d in defects), defects)
+
+    def test_scope_budget_rejected_one_over(self):
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            scope="x" * 81,
+        ))
+        defects = fm.validate(record)
+        matches = [d for d in defects if "scope" in d and "80" in d]
+        self.assertEqual(len(matches), 1, defects)
+
+    def test_scope_budget_accepted_at_exact_limit(self):
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            scope="x" * 80,
+        ))
+        defects = fm.validate(record)
+        self.assertEqual([d for d in defects if "scope" in d], [])
+
+    def test_source_budget_rejected_one_over(self):
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            source="x" * 121,
+        ))
+        defects = fm.validate(record)
+        matches = [d for d in defects if "source" in d and "120" in d]
+        self.assertEqual(len(matches), 1, defects)
+
+    def test_source_budget_accepted_at_exact_limit(self):
+        record = fm.Record(type="constraint", fields=_valid_constraint_fields(
+            source="x" * 120,
+        ))
+        defects = fm.validate(record)
+        self.assertEqual([d for d in defects if "source" in d], [])
+
     def test_id_accepts_kebab_case(self):
         record = fm.Record(type="constraint", fields=_valid_constraint_fields(
             id="abc-def-123",
@@ -131,6 +174,17 @@ class ValidateTests(unittest.TestCase):
         ))
         defects = fm.validate(record)
         self.assertEqual([d for d in defects if "id" in d], [])
+
+    def test_constraint_record_is_id_rule_scope_because_source(self):
+        # `added` is retired: it served retirement deliberation, and
+        # constraints.md holds only what is currently true — there is no
+        # deliberation to support. `source` stays: it's read-time material,
+        # since a constraint written in one phase may be applied in another.
+        self.assertEqual(
+            [spec.name for spec in fm.SCHEMA["constraint"]],
+            ["id", "rule", "scope", "because", "source"],
+        )
+        self.assertNotIn("_today_iso", dir(fm))
 
     def test_deferral_record_is_title_why_from(self):
         # `follow-up` is retired. A deferral IS an open issue nobody is
@@ -198,7 +252,6 @@ class RenderParseRoundTripTests(unittest.TestCase):
             "**Because:** Untrusted input reaching eval is an injection vector.\n"
             "**Rule:** Hooks must never call eval on untrusted input.\n"
             "**Scope:** hooks/\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** issue-42\n"
         )
         records = fm.parse(drifted, "constraint")
@@ -223,21 +276,36 @@ class RenderParseRoundTripTests(unittest.TestCase):
         text = (
             "## no-eval-in-hooks\n"
             "**Rule:** Hooks must never call eval.\n"
-            "**Because:** Reason one.\n"
             "**Scope:** hooks/\n"
-            "**Added:** 2026-09-05\n"
+            "**Because:** Reason one.\n"
             "**Source:** issue-42\n"
             "\n"
             "## no-eval-in-hooks\n"
             "**Rule:** A different rule text.\n"
-            "**Because:** Reason two.\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-06\n"
+            "**Because:** Reason two.\n"
             "**Source:** issue-43\n"
         )
         with self.assertRaises(fm.SchemaError) as ctx:
             fm.parse(text, "constraint")
         self.assertIn("duplicate", str(ctx.exception).lower())
+
+    def test_added_field_is_removed_from_schema(self):
+        # `added` served retirement deliberation, and there is none: a
+        # constraint that stops being true is deleted, not annotated. A
+        # record carrying an `**Added:**` line is now simply unparsable.
+        self.assertNotIn("added", [spec.name for spec in fm.SCHEMA["constraint"]])
+        text = (
+            "## no-eval-in-hooks\n"
+            "**Rule:** Hooks must never call eval.\n"
+            "**Scope:** hooks/\n"
+            "**Because:** Reason one.\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** issue-42\n"
+        )
+        with self.assertRaises(fm.SchemaError) as ctx:
+            fm.parse(text, "constraint")
+        self.assertIn("added", str(ctx.exception).lower())
 
 
 class SchemaErrorLineAttributeTests(unittest.TestCase):
@@ -261,21 +329,19 @@ class SchemaErrorLineAttributeTests(unittest.TestCase):
         text = (
             "## dup\n"
             "**Rule:** r\n"
-            "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
+            "**Because:** b\n"
             "**Source:** user\n"
             "\n"
             "## dup\n"
             "**Rule:** r2\n"
-            "**Because:** b2\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-06\n"
+            "**Because:** b2\n"
             "**Source:** user\n"
         )
         with self.assertRaises(fm.SchemaError) as ctx:
             fm.parse(text, "constraint")
-        self.assertEqual(ctx.exception.line, 8)
+        self.assertEqual(ctx.exception.line, 7)
 
     def test_unknown_field_label_carries_its_line_number(self):
         text = (
@@ -352,7 +418,6 @@ class FmtTests(unittest.TestCase):
             "## AbcDef\n"
             "**Rule:** {}\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** issue-42\n"
         ).format("x" * 201))
         defects = fm.fmt_check([path])
@@ -371,7 +436,6 @@ class FmtTests(unittest.TestCase):
             "**Because:** Untrusted input reaching eval is an injection vector.\n"
             "**Rule:** Hooks must never call eval on untrusted input.\n"
             "**Scope:** hooks/\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** issue-42\n"
         )
         _write(path, drifted)
@@ -390,9 +454,8 @@ class FmtTests(unittest.TestCase):
         _write(path, (
             "## no-eval-in-hooks\n"
             "**Rule:** {}\n"
-            "**Because:** Untrusted input reaching eval is an injection vector.\n"
             "**Scope:** hooks/\n"
-            "**Added:** 2026-09-05\n"
+            "**Because:** Untrusted input reaching eval is an injection vector.\n"
             "**Source:** issue-42\n"
         ).format("x" * 201))
         with self.assertRaises(fm.SchemaError):
@@ -472,8 +535,8 @@ class SubcommandSurfaceTests(CLITestCase):
             if isinstance(a, argparse.Action) and a.choices
         )
         self.assertEqual(set(sub_action.choices), {
-            "add-constraint", "retire-constraint", "list-constraints",
-            "defer", "resolve-deferral", "fmt",
+            "add-constraint", "update-constraint", "retire-constraint",
+            "list-constraints", "defer", "resolve-deferral", "fmt",
             "install-guards",
         })
 
@@ -488,7 +551,8 @@ class SubcommandSurfaceTests(CLITestCase):
     # subcommand's flags must be EXACTLY this set. Any newly added flag
     # fails this test until someone deliberately adds it below.
     _EXPECTED_DESTS = {
-        "add-constraint": {"id", "rule", "because", "scope", "issue", "spec"},
+        "add-constraint": {"id", "rule", "because", "scope", "source"},
+        "update-constraint": {"id", "rule", "because", "scope", "source"},
         "retire-constraint": {"id"},
         "list-constraints": {"scope", "json"},
         # --occurrence added deliberately (typed, closed-vocabulary
@@ -522,11 +586,12 @@ class SubcommandSurfaceTests(CLITestCase):
 
 
 class AddConstraintCLITests(CLITestCase):
-    def test_composes_canonical_record_with_machine_added_date(self):
+    def test_composes_canonical_record_defaulting_scope(self):
         code, out, err = _run_cli([
             "add-constraint", "--id", "no-eval-in-hooks",
             "--rule", "Hooks must never call eval on untrusted input.",
             "--because", "Untrusted input reaching eval is an injection vector.",
+            "--source", "issue-42",
         ])
         self.assertEqual(code, 0, err)
         path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
@@ -534,55 +599,253 @@ class AddConstraintCLITests(CLITestCase):
             text = f.read()
         records = fm.parse(text, "constraint")
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].fields["added"], fm._today_iso())
-        self.assertEqual(records[0].fields["source"], "user")
+        self.assertNotIn("added", records[0].fields)
+        self.assertEqual(records[0].fields["source"], "issue-42")
         self.assertEqual(records[0].fields["scope"], "repo")
 
     def test_added_is_not_a_settable_flag(self):
         with self.assertRaises(SystemExit):
             fm.main([
                 "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
-                "--added", "2020-01-01",
+                "--source", "issue-1", "--added", "2020-01-01",
             ])
 
-    def test_issue_and_spec_are_mutually_exclusive(self):
+    def test_source_is_required(self):
+        # No default exists — a placeholder like "user" would point
+        # nowhere, defeating the field's purpose (following a constraint
+        # back to the spec/PR/issue that motivated it). Missing --source
+        # must fail at argparse, before cmd_add_constraint ever runs.
         with self.assertRaises(SystemExit):
             fm.main([
                 "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
-                "--issue", "7", "--spec", "docs/spec.md",
             ])
 
-    def test_issue_flag_becomes_source(self):
+    def test_issue_flag_is_gone(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+                "--source", "issue-7", "--issue", "7",
+            ])
+
+    def test_spec_flag_is_gone(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+                "--source", "spec:docs/spec.md", "--spec", "docs/spec.md",
+            ])
+
+    def test_source_accepts_an_issue_style_ref_and_round_trips_through_update(self):
         code, _, err = _run_cli([
             "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
-            "--issue", "7",
+            "--source", "issue-7",
         ])
         self.assertEqual(code, 0, err)
-        records = fm.fmt_check  # sanity: module still importable
         path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
         with open(path, encoding="utf-8") as f:
-            text = f.read()
-        record = fm.parse(text, "constraint")[0]
+            record = fm.parse(f.read(), "constraint")[0]
         self.assertEqual(record.fields["source"], "issue-7")
+
+        code, _, err = _run_cli([
+            "update-constraint", "--id", "x", "--source", "issue-9",
+        ])
+        self.assertEqual(code, 0, err)
+        with open(path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "constraint")[0]
+        self.assertEqual(record.fields["source"], "issue-9")
+
+    def test_source_accepts_a_pr_style_ref_and_round_trips_through_update(self):
+        # source is "issue, PR, or spec path" — --issue/--spec (Phase 1
+        # machinery for a machine-set field) could never express a PR at
+        # all; a plain --source string can.
+        code, _, err = _run_cli([
+            "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+            "--source", "PR #38",
+        ])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "constraint")[0]
+        self.assertEqual(record.fields["source"], "PR #38")
+
+        code, _, err = _run_cli([
+            "update-constraint", "--id", "x", "--source", "PR #41",
+        ])
+        self.assertEqual(code, 0, err)
+        with open(path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "constraint")[0]
+        self.assertEqual(record.fields["source"], "PR #41")
+
+    def test_source_accepts_a_spec_path_and_round_trips_through_update(self):
+        code, _, err = _run_cli([
+            "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+            "--source", "docs/forge/specs/no-eval.md",
+        ])
+        self.assertEqual(code, 0, err)
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "constraint")[0]
+        self.assertEqual(record.fields["source"], "docs/forge/specs/no-eval.md")
+
+        code, _, err = _run_cli([
+            "update-constraint", "--id", "x",
+            "--source", "docs/forge/specs/no-eval-v2.md",
+        ])
+        self.assertEqual(code, 0, err)
+        with open(path, encoding="utf-8") as f:
+            record = fm.parse(f.read(), "constraint")[0]
+        self.assertEqual(
+            record.fields["source"], "docs/forge/specs/no-eval-v2.md",
+        )
 
     def test_budget_overrun_exits_nonzero_naming_field_and_limit_on_stderr(self):
         code, out, err = _run_cli([
             "add-constraint", "--id", "x", "--rule", "x" * 201, "--because", "b",
+            "--source", "issue-1",
         ])
         self.assertNotEqual(code, 0)
         self.assertIn("rule", err)
         self.assertIn("200", err)
 
+    def test_constraints_md_created_on_first_add_not_scaffolded_before(self):
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        self.assertFalse(os.path.exists(path))
+        code, _, err = _run_cli([
+            "add-constraint", "--id", "x", "--rule", "r", "--because", "b",
+            "--source", "issue-1",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.exists(path))
+
     def test_duplicate_id_exits_nonzero(self):
         code, _, _ = _run_cli([
             "add-constraint", "--id", "dup", "--rule", "r", "--because", "b",
+            "--source", "issue-1",
         ])
         self.assertEqual(code, 0)
         code, out, err = _run_cli([
             "add-constraint", "--id", "dup", "--rule", "r2", "--because", "b2",
+            "--source", "issue-1",
         ])
         self.assertNotEqual(code, 0)
         self.assertIn("dup", err)
+
+
+class UpdateConstraintCLITests(CLITestCase):
+    def _add(self, id="to-update", rule="r", because="b", scope="repo",
+             source="issue-1"):
+        code, _, err = _run_cli([
+            "add-constraint", "--id", id, "--rule", rule, "--because", because,
+            "--scope", scope, "--source", source,
+        ])
+        self.assertEqual(code, 0, err)
+
+    def _read(self):
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_updates_only_the_named_fields(self):
+        self._add()
+        before = fm.parse(self._read(), "constraint")[0]
+
+        code, _, err = _run_cli([
+            "update-constraint", "--id", "to-update", "--rule", "new rule text",
+        ])
+        self.assertEqual(code, 0, err)
+
+        after = fm.parse(self._read(), "constraint")[0]
+        self.assertEqual(after.fields["rule"], "new rule text")
+        self.assertEqual(after.fields["because"], before.fields["because"])
+        self.assertEqual(after.fields["scope"], before.fields["scope"])
+        self.assertEqual(after.fields["source"], before.fields["source"])
+
+    def test_unnamed_fields_survive_byte_identical(self):
+        self._add()
+        code, _, err = _run_cli([
+            "update-constraint", "--id", "to-update", "--because", "new because",
+        ])
+        self.assertEqual(code, 0, err)
+        record = fm.parse(self._read(), "constraint")[0]
+        self.assertEqual(record.fields["rule"], "r")
+        self.assertEqual(record.fields["scope"], "repo")
+        self.assertEqual(record.fields["source"], "issue-1")
+
+    def test_no_field_flags_exits_nonzero(self):
+        self._add()
+        before = self._read()
+        code, _, err = _run_cli(["update-constraint", "--id", "to-update"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self._read(), before)
+
+    def test_unknown_id_exits_nonzero_naming_id_file_untouched(self):
+        self._add()
+        before = self._read()
+        code, out, err = _run_cli([
+            "update-constraint", "--id", "no-such-id", "--rule", "x",
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("no-such-id", err)
+        self.assertEqual(self._read(), before)
+
+    def test_id_is_not_a_settable_flag(self):
+        parser = fm.build_parser()
+        sub_action = next(
+            a for a in parser._actions
+            if isinstance(a, argparse.Action) and a.choices
+        )
+        dests = {
+            a.dest for a in sub_action.choices["update-constraint"]._actions
+            if a.dest != "help"
+        }
+        # --id is the selector, not a content field: there is no flag that
+        # could rename a constraint's id, since a rename breaks every
+        # citation pointing at the old one.
+        self.assertEqual(dests, {"id", "rule", "because", "scope", "source"})
+
+    def test_budget_overrun_leaves_file_byte_identical(self):
+        self._add()
+        before = self._read()
+        code, out, err = _run_cli([
+            "update-constraint", "--id", "to-update", "--rule", "x" * 201,
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("rule", err)
+        self.assertIn("200", err)
+        self.assertEqual(self._read(), before)
+
+
+class ConstraintSoftCapTests(CLITestCase):
+    def _add(self, id):
+        code, _, err = _run_cli([
+            "add-constraint", "--id", id, "--rule", "r", "--because", "b",
+            "--source", "issue-1",
+        ])
+        self.assertEqual(code, 0, err)
+
+    def test_no_notice_at_or_under_twelve(self):
+        out = ""
+        for n in range(12):
+            code, out, err = _run_cli([
+                "add-constraint", "--id", "c{}".format(n),
+                "--rule", "r", "--because", "b", "--source", "issue-1",
+            ])
+            self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "")
+
+    def test_thirteenth_succeeds_with_a_notice_naming_the_count(self):
+        for n in range(12):
+            self._add("c{}".format(n))
+        code, out, err = _run_cli([
+            "add-constraint", "--id", "c12", "--rule", "r", "--because", "b",
+            "--source", "issue-1",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("13", out)
+
+        path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        with open(path, encoding="utf-8") as f:
+            records = fm.parse(f.read(), "constraint")
+        self.assertEqual(len(records), 13)
 
 
 class RetireConstraintCLITests(CLITestCase):
@@ -594,6 +857,7 @@ class RetireConstraintCLITests(CLITestCase):
     def test_retire_removes_record(self):
         _run_cli([
             "add-constraint", "--id", "to-retire", "--rule", "r", "--because", "b",
+            "--source", "issue-1",
         ])
         code, _, err = _run_cli(["retire-constraint", "--id", "to-retire"])
         self.assertEqual(code, 0, err)
@@ -607,7 +871,7 @@ class ListConstraintsCLITests(CLITestCase):
     def test_json_output_is_parseable(self):
         _run_cli([
             "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
-            "--scope", "hooks/",
+            "--scope", "hooks/", "--source", "issue-1",
         ])
         code, out, err = _run_cli(["list-constraints", "--json"])
         self.assertEqual(code, 0, err)
@@ -618,6 +882,7 @@ class ListConstraintsCLITests(CLITestCase):
     def test_human_output_is_not_json(self):
         _run_cli([
             "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
+            "--source", "issue-1",
         ])
         code, out, err = _run_cli(["list-constraints"])
         self.assertEqual(code, 0, err)
@@ -628,11 +893,11 @@ class ListConstraintsCLITests(CLITestCase):
     def test_scope_filter(self):
         _run_cli([
             "add-constraint", "--id", "a", "--rule", "r", "--because", "b",
-            "--scope", "hooks/",
+            "--scope", "hooks/", "--source", "issue-1",
         ])
         _run_cli([
             "add-constraint", "--id", "b", "--rule", "r", "--because", "b",
-            "--scope", "scripts/",
+            "--scope", "scripts/", "--source", "issue-1",
         ])
         code, out, err = _run_cli(["list-constraints", "--json", "--scope", "hooks/"])
         self.assertEqual(code, 0, err)
@@ -1169,15 +1434,14 @@ class FmtCLITests(CLITestCase):
             "**Rule:** r\n"
             "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** user\n"
         ))
         code, out, err = _run_cli(["fmt", "--check", path])
         self.assertNotEqual(code, 0)
 
         record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
+            "id": "good-id", "rule": "r", "scope": "repo", "because": "b",
+            "source": "user",
         })
         self._write(path, fm.render(record))
         code, out, err = _run_cli(["fmt", "--check", path])
@@ -1186,8 +1450,8 @@ class FmtCLITests(CLITestCase):
     def test_explicit_path_does_not_call_gh(self):
         path = os.path.join(self.tmp, "constraints.md")
         record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
+            "id": "good-id", "rule": "r", "scope": "repo", "because": "b",
+            "source": "user",
         })
         self._write(path, fm.render(record))
         with self._no_gh_guard():
@@ -1213,7 +1477,6 @@ class FmtCLITests(CLITestCase):
             "**Rule:** r\n"
             "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** user\n"
         ))
 
@@ -1426,8 +1689,7 @@ class GuardMemoryWritesHookTests(unittest.TestCase):
         # really is a different, unmanaged file and must be allowed.
         constraints_path = os.path.join(self.repo, "docs", "forge", "constraints.md")
         _write(constraints_path, "## x\n**Rule:** r\n**Because:** b\n"
-                                  "**Scope:** repo\n**Added:** 2026-09-05\n"
-                                  "**Source:** user\n")
+                                  "**Scope:** repo\n**Source:** user\n")
         if not _fs_is_case_insensitive(os.path.dirname(constraints_path)):
             self.skipTest(
                 "filesystem is case-sensitive; the case-variant bypass "
@@ -1584,15 +1846,14 @@ class InstallGuardsCLITests(CLITestCase):
             "**Rule:** r\n"
             "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** user\n"
         ))
         proc = subprocess.run([self.hook_path], cwd=self.tmp, capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
         record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
+            "id": "good-id", "rule": "r", "scope": "repo", "because": "b",
+            "source": "user",
         })
         _write(constraints_path, fm.render(record))
         proc = subprocess.run([self.hook_path], cwd=self.tmp, capture_output=True, text=True)
@@ -1625,7 +1886,6 @@ class InstallGuardsCLITests(CLITestCase):
             "**Rule:** r\n"
             "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** user\n"
         ))
         proc = subprocess.run(
@@ -1638,8 +1898,8 @@ class InstallGuardsCLITests(CLITestCase):
         )
 
         record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
+            "id": "good-id", "rule": "r", "scope": "repo", "because": "b",
+            "source": "user",
         })
         _write(constraints_path, fm.render(record))
         proc = subprocess.run(
@@ -1662,8 +1922,8 @@ class InstallGuardsCLITests(CLITestCase):
         env["PATH"] = os.path.dirname(os.path.realpath(sys.executable))
 
         record = fm.Record(type="constraint", fields={
-            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
-            "added": "2026-09-05", "source": "user",
+            "id": "good-id", "rule": "r", "scope": "repo", "because": "b",
+            "source": "user",
         })
         constraints_path = os.path.join(self.tmp, "docs", "forge", "constraints.md")
         _write(constraints_path, fm.render(record))
@@ -1957,7 +2217,6 @@ class FmtBranchExclusivityTests(CLITestCase):
             "**Rule:** r\n"
             "**Because:** b\n"
             "**Scope:** repo\n"
-            "**Added:** 2026-09-05\n"
             "**Source:** user\n"
         ))
         with self._no_gh_guard():
@@ -2082,7 +2341,6 @@ class SingleLineFieldTests(unittest.TestCase):
                 rule="Never use **eval**: ## not a heading, either.")),
             ("constraint", _valid_constraint_fields(
                 because="Because: **Rule:** looks like a field label.")),
-            ("constraint", _valid_constraint_fields(scope="")),
             ("constraint", _valid_constraint_fields(scope="  spaced  ")),
             ("constraint", _valid_constraint_fields(rule="x" * 200)),
             ("deferral", _valid_deferral_fields()),
@@ -2113,7 +2371,7 @@ class NewlineArgumentCLITests(CLITestCase):
         code, out, err = _run_cli([
             "add-constraint", "--id", "multi-line",
             "--rule", "first line\nsecond line",
-            "--because", "Because.",
+            "--because", "Because.", "--source", "issue-1",
         ])
         self.assertEqual(code, 1)
         self.assertIn("rule", err)
@@ -2126,12 +2384,12 @@ class NewlineArgumentCLITests(CLITestCase):
     def test_add_constraint_newline_in_because_leaves_file_parsable(self):
         code, _, _ = _run_cli([
             "add-constraint", "--id", "good-one", "--rule", "A rule.",
-            "--because", "A reason.",
+            "--because", "A reason.", "--source", "issue-1",
         ])
         self.assertEqual(code, 0)
         code, out, err = _run_cli([
             "add-constraint", "--id", "bad-one", "--rule", "A rule.",
-            "--because", "line one\nline two",
+            "--because", "line one\nline two", "--source", "issue-1",
         ])
         self.assertEqual(code, 1)
         path = os.path.join(self.tmp, "docs", "forge", "constraints.md")

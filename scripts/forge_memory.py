@@ -61,7 +61,6 @@ if __name__ == "__main__":
     sys.exit(forge_memory.main(sys.argv[1:]))
 
 import argparse  # noqa: E402
-import datetime  # noqa: E402
 import fnmatch  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
@@ -84,10 +83,9 @@ SCHEMA: dict[str, list[FieldSpec]] = {
     "constraint": [
         FieldSpec("id", 40, True, "kebab-id"),
         FieldSpec("rule", 200, True, None),
+        FieldSpec("scope", 80, True, None),
         FieldSpec("because", 300, True, None),
-        FieldSpec("scope", None, False, None),
-        FieldSpec("added", None, True, "iso-date"),
-        FieldSpec("source", None, True, None),
+        FieldSpec("source", 120, True, None),
     ],
     "deferral": [
         FieldSpec("title", 80, True, None),
@@ -393,12 +391,6 @@ def fmt_write(paths):
 # that path is simply not offered.
 
 
-def _today_iso():
-    """``added`` is machine-set to today's date; it is never a settable
-    flag on ``add-constraint``."""
-    return datetime.date.today().isoformat()
-
-
 def _print_lines(lines, out):
     for line in lines:
         print(line, file=out)
@@ -406,6 +398,29 @@ def _print_lines(lines, out):
 
 def _record_to_dict(record):
     return dict(record.fields)
+
+
+# constraints.md is a snapshot of what's true RIGHT NOW, not a log — its
+# value comes from staying short enough to re-read every session, which is
+# exactly what lets a rule that stopped being true get noticed. Twelve is a
+# soft cap: crossing it never refuses (the whole engine composes and merges
+# typed records; whether one is still true is a human read, not something
+# this script can judge), it only prints a notice so a human decides whether
+# to retire something.
+_CONSTRAINT_SOFT_CAP = 12
+
+
+def _constraint_cap_notice(count):
+    if count <= _CONSTRAINT_SOFT_CAP:
+        return None
+    return (
+        "note: constraints.md now holds {} constraints, past the soft cap "
+        "of {}. This is not refused, but a file this long stops being one "
+        "you re-read at every session start — consider whether one of "
+        "these has stopped being true and retiring it.".format(
+            count, _CONSTRAINT_SOFT_CAP,
+        )
+    )
 
 
 def _print_records(records, json_out):
@@ -417,20 +432,12 @@ def _print_records(records, json_out):
 
 
 def cmd_add_constraint(args, repo_root):
-    if args.issue is not None:
-        source = "issue-{}".format(args.issue)
-    elif args.spec is not None:
-        source = "spec:{}".format(args.spec)
-    else:
-        source = "user"
-
     record = Record(type="constraint", fields={
         "id": args.id,
         "rule": args.rule,
-        "because": args.because,
         "scope": args.scope,
-        "added": _today_iso(),
-        "source": source,
+        "because": args.because,
+        "source": args.source,
     })
 
     defects = validate(record)
@@ -441,9 +448,76 @@ def cmd_add_constraint(args, repo_root):
     try:
         store = fms.select_store(repo_root, "constraint")
         store.create(record)
+        count = len(store.list("constraint"))
     except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
+
+    notice = _constraint_cap_notice(count)
+    if notice is not None:
+        print(notice)
+    return 0
+
+
+def cmd_update_constraint(args, repo_root):
+    updates = {
+        name: value for name, value in (
+            ("rule", args.rule),
+            ("because", args.because),
+            ("scope", args.scope),
+            ("source", args.source),
+        )
+        if value is not None
+    }
+    if not updates:
+        print(
+            "update-constraint: pass at least one of --rule/--because/"
+            "--scope/--source — an update that changes nothing is a "
+            "mistake, not a no-op.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        store = fms.select_store(repo_root, "constraint")
+        records = store.list("constraint")
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    match_index = next(
+        (i for i, r in enumerate(records) if r.fields.get("id") == args.id),
+        None,
+    )
+    if match_index is None:
+        print(
+            "update-constraint: no constraint with id {!r} to update.".format(
+                args.id,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    # Validate the WHOLE merged record before touching the file: a budget
+    # overrun (or any other defect) introduced by the update must leave
+    # constraints.md byte-identical, never a half-applied edit.
+    merged_fields = dict(records[match_index].fields)
+    merged_fields.update(updates)
+    merged = Record(type="constraint", fields=merged_fields)
+
+    defects = validate(merged)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
+
+    records[match_index] = merged
+    # ``store`` is always a FileStore for "constraint" (select_store hard-
+    # wires it), so ``_write`` — the same serializer fmt_write and create
+    # use — is available here. There is no public replace-in-place method
+    # on Store because create/retire are the only operations GitHubStore
+    # could ever honour for a deferral; this in-place edit is specific to
+    # the constraint file.
+    store._write(records)
     return 0
 
 
@@ -940,10 +1014,28 @@ def build_parser():
     p.add_argument("--rule", required=True)
     p.add_argument("--because", required=True)
     p.add_argument("--scope", default="repo")
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--issue", type=int)
-    g.add_argument("--spec")
+    p.add_argument(
+        "--source", required=True,
+        help="Where this rule comes from — an issue, PR, or spec path. "
+             "Read-time material: a constraint written in one phase may be "
+             "applied in another and need this to be understood. Required, "
+             "with no default — a placeholder value would point nowhere.",
+    )
     p.set_defaults(func=cmd_add_constraint)
+
+    p = sub.add_parser("update-constraint")
+    p.add_argument(
+        "--id", required=True,
+        help="The constraint to update. This is the record's key and is "
+             "never itself a settable field — a renamed constraint is a "
+             "retire plus an add, since every citation pointing at the old "
+             "id would otherwise break silently.",
+    )
+    p.add_argument("--rule")
+    p.add_argument("--because")
+    p.add_argument("--scope")
+    p.add_argument("--source")
+    p.set_defaults(func=cmd_update_constraint)
 
     p = sub.add_parser("retire-constraint")
     p.add_argument("--id", required=True)

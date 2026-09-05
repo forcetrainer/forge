@@ -324,7 +324,7 @@ def _constraint_text(entries):
     for cid, because in entries:
         blocks.append(
             "## {}\n**Rule:** does a thing\n**Because:** {}\n"
-            "**Scope:** repo\n**Added:** 2026-01-01\n**Source:** user\n".format(
+            "**Scope:** repo\n**Source:** user\n".format(
                 cid, because,
             )
         )

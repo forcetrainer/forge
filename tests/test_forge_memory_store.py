@@ -31,14 +31,14 @@ def _deferral(title="fix-the-thing", why="Needed later.", frm="user"):
 
 
 def _constraint(id_="no-network-calls", rule="Never call the network.",
-                because="Determinism.", added="2026-09-01", source="user"):
+                scope="repo", because="Determinism.", source="user"):
     return forge_memory.Record(
         type="constraint",
         fields={
             "id": id_,
             "rule": rule,
+            "scope": scope,
             "because": because,
-            "added": added,
             "source": source,
         },
     )
