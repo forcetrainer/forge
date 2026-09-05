@@ -36,16 +36,35 @@ defect they find in one pass, never just the first — the same rule
 Pure functions here; any CLI wiring (``fmt --check``/``--write`` as a
 subcommand of the forge CLI) is a separate task.
 """
-import argparse
-import datetime
-import fnmatch
-import json
 import os
-import re
 import sys
-from dataclasses import dataclass, field
 
-import forge_memory_store as fms
+if __name__ == "__main__":
+    # This file is both an importable module and the executable entry point
+    # (the pre-commit hook and the CI workflow run `forge_memory.py ...`).
+    # Executing the body under the name ``__main__`` would make
+    # forge_memory_store's ``import forge_memory`` load a SECOND copy of it:
+    # SchemaError and Record would then exist as two distinct classes, and
+    # the CLI's ``except SchemaError`` could not catch what the store
+    # raises — the user got a raw traceback instead of the named error.
+    # So ``__main__`` defines nothing of its own; it imports the one
+    # canonical module and delegates. One ``sys.modules`` object, one class
+    # identity (DECISIONS 2026-07-14, the same rule ``forge_common`` and
+    # ``forge_lint`` follow), and the import cycle is broken at the entry
+    # point rather than papered over inside it.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import forge_memory
+
+    sys.exit(forge_memory.main(sys.argv[1:]))
+
+import argparse  # noqa: E402
+import datetime  # noqa: E402
+import fnmatch  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+
+import forge_memory_store as fms  # noqa: E402
 
 
 @dataclass
@@ -402,7 +421,7 @@ def cmd_list_constraints(args, repo_root):
     store = fms.select_store(repo_root, "constraint")
     try:
         records = store.list("constraint")
-    except (fms.StoreUnavailable, fms.ConfigError) as e:
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
     if args.scope:
@@ -440,7 +459,7 @@ def cmd_list_deferrals(args, repo_root):
     store = fms.select_store(repo_root, "deferral")
     try:
         records = store.list("deferral")
-    except (fms.StoreUnavailable, fms.ConfigError) as e:
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
         print(str(e), file=sys.stderr)
         return 1
     _print_records(records, args.json)
@@ -483,37 +502,34 @@ def _issue_fmt_defects(store):
     return defects
 
 
-def _local_managed_paths(repo_root):
-    """Managed local files only, resolved the same way as ``fmt``'s no-PATH
-    branch and ``forge_lint.check_memory_files``: ``docs/forge/
-    constraints.md`` when present, plus ``docs/forge/deferrals.md`` only
-    when config selects the file store for deferrals. ``select_store``
-    itself never calls ``gh`` — it only constructs a ``GitHubStore``
-    object, it doesn't invoke it — so this is safe to call even when the
-    GitHub store is selected; the point is that the *caller* then never
-    calls ``.list()``/``.create()`` on it. For a local guard (a pre-commit
-    hook) that must work offline, with no network, no `gh` invocation, and
-    no dependence on a configured git remote."""
-    paths = []
-    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
-    if os.path.exists(constraints_path):
-        paths.append(constraints_path)
-
-    deferral_store = fms.select_store(repo_root, "deferral")
-    if isinstance(deferral_store, fms.FileStore):
-        if os.path.exists(deferral_store.path):
-            paths.append(deferral_store.path)
-
-    return paths
-
-
 def cmd_fmt(args, repo_root):
+    # Three branches, mutually exclusive and exhaustive: explicit paths,
+    # --local-only, and the no-PATH CI branch. --local-only and explicit
+    # paths are both scope selectors, so passing both names no coherent
+    # scope — argparse cannot express "this flag conflicts with a
+    # positional", so it is rejected here by name rather than resolved by
+    # accident. (It used to fall through to the explicit-paths branch,
+    # silently ignoring the flag.)
+    if args.paths and args.local_only:
+        print(
+            "fmt: --local-only and explicit PATH arguments are mutually "
+            "exclusive — --local-only *is* a path selection (the managed "
+            "local files). Pass PATHs to check exactly those files, or "
+            "--local-only with no PATH.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.paths:
         # Explicit paths restrict fmt to exactly those files; gh is never
         # called in this branch, regardless of which deferral store is
         # configured.
         if args.check:
-            defects = fmt_check(args.paths)
+            try:
+                defects = fmt_check(args.paths)
+            except SchemaError as e:
+                print(str(e), file=sys.stderr)
+                return 1
             _print_lines(defects, sys.stdout)
             return 1 if defects else 0
         try:
@@ -529,7 +545,7 @@ def cmd_fmt(args, repo_root):
         # `gh` invocation — unlike the no-PATH branch below, which is
         # spec'd for CI and does check open forge:deferral issues.
         try:
-            managed = _local_managed_paths(repo_root)
+            managed = fms.managed_paths(repo_root)
         except fms.ConfigError as e:
             print(str(e), file=sys.stderr)
             return 1
@@ -547,20 +563,12 @@ def cmd_fmt(args, repo_root):
     # No PATH argument: cover every managed file, plus (only when the
     # GitHub store is selected for deferrals) every open forge:deferral
     # issue body.
-    managed = []
-    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
-    if os.path.exists(constraints_path):
-        managed.append(constraints_path)
-
     try:
+        managed = fms.managed_paths(repo_root)
         deferral_store = fms.select_store(repo_root, "deferral")
     except fms.ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
-
-    if isinstance(deferral_store, fms.FileStore):
-        if os.path.exists(deferral_store.path):
-            managed.append(deferral_store.path)
 
     all_defects = []
     if args.check:
@@ -748,6 +756,3 @@ def main(argv):
     args = parser.parse_args(argv)
     return args.func(args, os.getcwd())
 
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

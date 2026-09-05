@@ -302,26 +302,17 @@ def check_memory_files(repo_root):
     that catches a drifted ``constraints.md``/``deferrals.md`` no matter
     which harness (Bash, Codex, a human) wrote it.
 
-    Managed paths: ``docs/forge/constraints.md`` always; ``docs/forge/
-    deferrals.md`` only when the repo's config selects the file store for
-    deferrals (the default is GitHub, which this function never touches —
-    no ``gh`` call, no network, ever). A managed path that does not exist is
-    not a defect: most repos will never have these files, and this check
-    must never reject a legal repo for lacking them."""
-    paths = []
-
-    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
-    if os.path.exists(constraints_path):
-        paths.append(constraints_path)
-
+    Which files are managed is ``forge_memory_store.managed_paths``'s
+    answer, not a second copy of it — the same helper ``forge_memory``'s
+    ``fmt`` calls, so a third managed file can never be added to one and
+    forgotten in the other. It never touches ``gh``: no network, ever. A
+    managed path that does not exist is not a defect — most repos will
+    never have these files, and this check must never reject a legal repo
+    for lacking them."""
     try:
-        deferral_store = forge_memory_store.select_store(repo_root, "deferral")
+        paths = forge_memory_store.managed_paths(repo_root)
     except forge_memory_store.ConfigError as e:
         return [_error("memory", str(e))]
-
-    if isinstance(deferral_store, forge_memory_store.FileStore):
-        if os.path.exists(deferral_store.path):
-            paths.append(deferral_store.path)
 
     if not paths:
         return []

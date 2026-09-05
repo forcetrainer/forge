@@ -305,3 +305,36 @@ def select_store(repo_root, type):
     if store_value == "file":
         return FileStore(os.path.join(repo_root, "docs/forge/deferrals.md"))
     return GitHubStore(repo_root)
+
+
+def managed_paths(repo_root):
+    """The managed local project-memory files under ``repo_root``:
+    ``docs/forge/constraints.md`` when it exists, plus ``docs/forge/
+    deferrals.md`` only when config selects the file store for deferrals.
+    A managed file that does not exist is simply absent from the list —
+    most repos will never have these files, and lacking them is not a
+    defect.
+
+    The single definition of "what are the managed paths", called by both
+    ``forge_memory``'s ``fmt`` and ``forge_lint.check_memory_files``; a
+    third managed file is added here once and both callers pick it up. It
+    lives in this module because the answer is store selection, which is
+    this module's job — and because both callers already import it, so
+    sharing costs no new import edge.
+
+    Never calls ``gh``: ``select_store`` only *constructs* a
+    ``GitHubStore``, it never invokes one, so this is safe on the offline
+    path (a pre-commit hook) even when the GitHub store is selected.
+    Raises ``ConfigError`` on malformed config, same as ``select_store``.
+    """
+    paths = []
+
+    constraints_path = os.path.join(repo_root, "docs/forge/constraints.md")
+    if os.path.exists(constraints_path):
+        paths.append(constraints_path)
+
+    deferral_store = select_store(repo_root, "deferral")
+    if isinstance(deferral_store, FileStore) and os.path.exists(deferral_store.path):
+        paths.append(deferral_store.path)
+
+    return paths

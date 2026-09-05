@@ -6,6 +6,7 @@ including on a file a human hand-drifted (reordered fields) but that still
 parses; and unparsable or budget-violating input fails loud naming the line."""
 import argparse
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -1211,6 +1212,210 @@ class HooksJsonTests(unittest.TestCase):
         self.assertIn("PreToolUse", data["hooks"])
         pretooluse = data["hooks"]["PreToolUse"][0]
         self.assertEqual(pretooluse["matcher"], "Edit|Write|MultiEdit")
+
+
+SCRIPT = os.path.join(SCRIPTS_DIR, "forge_memory.py")
+
+# Probe that reproduces, in-process, exactly what `python3 forge_memory.py`
+# does: load the file under the module name ``__main__``. If the module body
+# runs under that name, forge_memory_store's ``import forge_memory`` loads a
+# SECOND copy and every class in it (SchemaError, Record) exists twice, so the
+# CLI's ``except SchemaError`` cannot catch what the store raises. Run in a
+# subprocess because it replaces ``sys.modules["__main__"]``.
+_MAIN_IDENTITY_PROBE = r'''
+import importlib.util, sys
+
+scripts_dir, script = sys.argv[1], sys.argv[2]
+sys.path.insert(0, scripts_dir)
+sys.argv = ["forge_memory.py", "list-constraints"]
+
+spec = importlib.util.spec_from_file_location("__main__", script)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["__main__"] = mod
+try:
+    spec.loader.exec_module(mod)
+except SystemExit:
+    pass
+
+import forge_memory
+import forge_memory_store
+
+dupes = [
+    name for name in ("SchemaError", "Record", "SCHEMA")
+    if hasattr(mod, name) and getattr(mod, name) is not getattr(forge_memory, name)
+]
+if dupes:
+    print("DUPLICATED:" + ",".join(dupes))
+elif forge_memory_store.forge_memory.SchemaError is not forge_memory.SchemaError:
+    print("DUPLICATED:store")
+else:
+    print("SINGLE")
+'''
+
+
+class ScriptEntrypointIdentityTests(unittest.TestCase):
+    """``forge_memory.py`` is both an importable module and the executable
+    entry point the pre-commit hook and the CI workflow invoke. Running it as
+    a script must not give its classes a second identity, or the CLI's
+    ``except SchemaError`` stops catching what the store raises and the user
+    gets a traceback instead of the named error (DECISIONS 2026-07-14: one
+    ``sys.modules`` object, one class identity)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-memory-script-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, "docs", "forge"))
+
+    def _write_config(self, **deferrals):
+        with open(os.path.join(self.tmp, "docs", "forge", "config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"deferrals": deferrals}, f)
+
+    def _run_script(self, argv):
+        return subprocess.run(
+            [sys.executable, SCRIPT] + argv, cwd=self.tmp,
+            capture_output=True, text=True,
+        )
+
+    def test_store_schema_error_prints_cleanly_when_run_as_a_script(self):
+        self._write_config(store="file")
+        _write(
+            os.path.join(self.tmp, "docs", "forge", "deferrals.md"),
+            "this is not a valid record\n",
+        )
+
+        proc = self._run_script(["list-deferrals"])
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("line 1", proc.stderr)
+        self.assertIn("unparsable", proc.stderr)
+
+    def test_fmt_write_schema_error_prints_cleanly_when_run_as_a_script(self):
+        self._write_config(store="file")
+        path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        _write(path, "this is not a valid record\n")
+
+        proc = self._run_script(["fmt", "--write", "--local-only"])
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_running_as_a_script_creates_no_second_module_copy(self):
+        proc = subprocess.run(
+            [sys.executable, "-c", _MAIN_IDENTITY_PROBE, SCRIPTS_DIR, SCRIPT],
+            cwd=self.tmp, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout.strip().splitlines()[-1], "SINGLE",
+            "the classes the store raises must be the same objects the CLI "
+            "catches; stderr: {}".format(proc.stderr),
+        )
+
+
+class FmtBranchExclusivityTests(CLITestCase):
+    """``fmt``'s three branches — explicit paths, ``--local-only``, and the
+    no-PATH CI branch — are mutually exclusive and exhaustive. ``--local-only``
+    with explicit paths named neither: it silently took the explicit-paths
+    branch. Two scope selectors at once is a user error with no correct
+    reading, so it is rejected by name rather than resolved by accident."""
+
+    def test_local_only_with_explicit_paths_is_rejected(self):
+        path = os.path.join(self.tmp, "constraints.md")
+        record = fm.Record(type="constraint", fields={
+            "id": "good-id", "rule": "r", "because": "b", "scope": "repo",
+            "added": "2026-09-05", "source": "user",
+        })
+        _write(path, fm.render(record))
+
+        with self._no_gh_guard():
+            code, out, err = _run_cli(["fmt", "--check", "--local-only", path])
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("--local-only", err)
+        self.assertEqual(out, "")
+
+    def test_local_only_write_with_explicit_paths_does_not_write(self):
+        path = os.path.join(self.tmp, "constraints.md")
+        drifted = "## good-id\n**Because:** b\n**Rule:** r\n**Scope:** repo\n" \
+                  "**Added:** 2026-09-05\n**Source:** user\n"
+        _write(path, drifted)
+
+        with self._no_gh_guard():
+            code, _, err = _run_cli(["fmt", "--write", "--local-only", path])
+
+        self.assertNotEqual(code, 0)
+        self.assertIn("--local-only", err)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), drifted)
+
+    def test_local_only_checks_managed_files_without_gh(self):
+        self._use_file_store_for_deferrals()
+        _write(os.path.join(self.tmp, "docs", "forge", "constraints.md"), (
+            "## bad id\n"
+            "**Rule:** r\n"
+            "**Because:** b\n"
+            "**Scope:** repo\n"
+            "**Added:** 2026-09-05\n"
+            "**Source:** user\n"
+        ))
+        with self._no_gh_guard():
+            code, out, err = _run_cli(["fmt", "--check", "--local-only"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("bad id", out)
+
+    def test_local_only_never_reaches_gh_under_the_github_store(self):
+        # No config.json: the GitHub store is selected for deferrals, and
+        # --local-only must still make no gh call at all.
+        with self._no_gh_guard():
+            code, out, err = _run_cli(["fmt", "--check", "--local-only"])
+        self.assertEqual(code, 0, out + err)
+
+
+class ManagedPathsSharedHelperTests(unittest.TestCase):
+    """One definition of "what are the managed local paths", called by both
+    ``forge_memory``'s fmt and ``forge_lint.check_memory_files`` — a third
+    managed file must be impossible to add to one and forget in the other."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-memory-managed-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, "docs", "forge"))
+
+    def test_forge_lint_and_fmt_read_the_same_helper(self):
+        import forge_lint
+
+        self.assertIs(
+            forge_lint.forge_memory_store.managed_paths, fms.managed_paths
+        )
+        source = inspect.getsource(forge_lint.check_memory_files)
+        self.assertIn("managed_paths", source)
+        self.assertIn("managed_paths", inspect.getsource(fm.cmd_fmt))
+
+    def test_managed_paths_includes_constraints_and_file_backed_deferrals(self):
+        constraints = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        deferrals = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
+        _write(constraints, "")
+        _write(deferrals, "")
+        with open(os.path.join(self.tmp, "docs", "forge", "config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"deferrals": {"store": "file"}}, f)
+
+        self.assertEqual(
+            fms.managed_paths(self.tmp), [constraints, deferrals],
+        )
+
+    def test_managed_paths_omits_deferrals_under_the_github_store(self):
+        constraints = os.path.join(self.tmp, "docs", "forge", "constraints.md")
+        _write(constraints, "")
+        _write(os.path.join(self.tmp, "docs", "forge", "deferrals.md"), "")
+
+        self.assertEqual(fms.managed_paths(self.tmp), [constraints])
+
+    def test_managed_paths_omits_absent_files(self):
+        self.assertEqual(fms.managed_paths(self.tmp), [])
+
 
 
 if __name__ == "__main__":
