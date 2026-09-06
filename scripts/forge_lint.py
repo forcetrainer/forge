@@ -25,7 +25,7 @@ one task's bad tier never hides a defect in another task.
 
 Imported as a plain module (``import forge_common``, not importlib) so
 ``sys.modules`` caches one instance and ``Finding``/``Verdict`` keep a single
-class identity across the runner and this module (DECISIONS 2026-07-14).
+class identity across the runner and this module.
 """
 import argparse
 import os
@@ -40,6 +40,8 @@ sys.path.insert(0, SCRIPTS_DIR)
 import forge_common  # noqa: E402
 import forge_plan  # noqa: E402
 import forge_checklist  # noqa: E402
+import forge_memory  # noqa: E402
+import forge_memory_store  # noqa: E402
 
 eb = forge_common.eb
 
@@ -57,6 +59,183 @@ def _error(where, message):
 
 def _warning(where, message):
     return LintDefect(severity="warning", where=where, message=message)
+
+
+# --- Living-spec grammar (Phase 14/5) --------------------------------------
+#
+# A living spec's frontmatter is a fixed, two-key grammar (``system:`` a
+# scalar, ``supersedes:`` a ``  - path`` list) — not general YAML, so it is
+# parsed by hand rather than pulling in a third-party library
+# (stdlib-only binds). A file with no frontmatter at all is simply a spec
+# that hasn't been migrated yet — that's a rule-2 defect (system missing),
+# reported like any other rule violation, never a raise. Once a frontmatter
+# block has been *opened* (the file's first line is ``---``), anything
+# inside it that isn't valid grammar — no closing ``---``, a line that is
+# neither ``key: value`` nor a ``supersedes`` list item — can't be
+# reinterpreted as "no frontmatter"; guessing intent there is exactly what
+# fail-loud forbids, so it raises instead, naming the line.
+
+DATED_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
+_FRONTMATTER_KEY_RE = re.compile(r"^(system|supersedes):\s*(.*)$")
+_SUPERSEDES_ITEM_RE = re.compile(r"^  - (\S.*)$")
+CHANGELOG_HEADING_RE = re.compile(r"^## Changelog\s*$")
+CHANGELOG_ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}: \S.*$")
+AMENDED_BY_RE = re.compile(r"amended by \[([^\]]*)\]")
+ARCHIVE_PREFIX = "docs/forge/archive/"
+
+
+def parse_frontmatter(lines):
+    """``lines`` -> ``(dict, body_start_index)``.
+
+    Grammar: exactly two possible keys. ``system: <value>`` is a scalar;
+    ``supersedes:`` (no inline value) introduces zero or more ``  - path``
+    lines. No frontmatter at all (first line isn't ``---``) is not an
+    error — it returns ``({}, 0)`` so the caller can report it as a normal
+    rule-2 defect. Anything else that goes wrong once a block has been
+    opened raises ``RuntimeError`` naming the 1-based line number; the
+    caller (which knows the path) is responsible for naming the file too.
+    """
+    if not lines or lines[0].rstrip("\n") != "---":
+        return {}, 0
+
+    data = {}
+    n = len(lines)
+    i = 1
+    while i < n and lines[i].rstrip("\n") != "---":
+        raw = lines[i].rstrip("\n")
+        if not raw.strip():
+            i += 1
+            continue
+        m = _FRONTMATTER_KEY_RE.match(raw)
+        if not m:
+            raise RuntimeError(
+                "line {}: not a 'key: value' line: {!r}".format(i + 1, raw)
+            )
+        key, value = m.group(1), m.group(2).strip()
+        if key == "system":
+            data["system"] = value
+            i += 1
+        else:  # supersedes
+            if value:
+                raise RuntimeError(
+                    "line {}: 'supersedes:' takes a list, not an inline "
+                    "value".format(i + 1)
+                )
+            items = []
+            i += 1
+            while i < n and _SUPERSEDES_ITEM_RE.match(lines[i].rstrip("\n")):
+                items.append(_SUPERSEDES_ITEM_RE.match(lines[i].rstrip("\n")).group(1).strip())
+                i += 1
+            data["supersedes"] = items
+
+    if i >= n:
+        raise RuntimeError("line {}: unterminated frontmatter block".format(n))
+
+    return data, i + 1
+
+
+def _is_archived(path, repo_root):
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(repo_root))
+    return rel.replace(os.sep, "/").startswith(ARCHIVE_PREFIX)
+
+
+def lint_living_spec(path, *, repo_root):
+    """The five living-spec rules against ``path``, as a list of defect
+    strings — every rule broken, never just the first. A file under
+    ``docs/forge/archive/`` is never linted: the archive is frozen and its
+    documents are dated, frontmatter-less records by design, not living
+    specs. Malformed (as opposed to absent) frontmatter still raises, via
+    ``parse_frontmatter`` — see that function's docstring."""
+    if _is_archived(path, repo_root):
+        return []
+
+    defects = []
+    filename = os.path.basename(path)
+    stem = os.path.splitext(filename)[0]
+
+    if DATED_FILENAME_RE.match(filename):
+        defects.append("{}: filename carries a YYYY-MM-DD prefix".format(path))
+
+    lines = eb.read_lines(path)
+    try:
+        frontmatter, body_start = parse_frontmatter(lines)
+    except RuntimeError as e:
+        raise RuntimeError("{}: {}".format(path, e))
+
+    system = frontmatter.get("system")
+    if system is None:
+        defects.append("{}: no frontmatter 'system:' key found".format(path))
+    elif system != stem:
+        defects.append(
+            "{}: system '{}' disagrees with filename stem '{}'".format(
+                path, system, stem
+            )
+        )
+
+    docs_forge_dir = os.path.join(repo_root, "docs", "forge")
+    for sup in frontmatter.get("supersedes", []):
+        if not os.path.isfile(os.path.join(docs_forge_dir, sup)):
+            defects.append(
+                "{}: supersedes path does not resolve: {}".format(path, sup)
+            )
+
+    changelog_idx = None
+    for i in range(body_start, len(lines)):
+        if CHANGELOG_HEADING_RE.match(lines[i].rstrip("\n")):
+            changelog_idx = i
+            break
+
+    if changelog_idx is None:
+        defects.append("{}: missing '## Changelog' section".format(path))
+    else:
+        for i in range(changelog_idx + 1, len(lines)):
+            line = lines[i].rstrip("\n")
+            if line.startswith("## "):
+                break
+            if not line.strip():
+                continue
+            if not CHANGELOG_ENTRY_RE.match(line.strip()):
+                defects.append(
+                    "{}: line {}: malformed changelog entry: {!r}".format(
+                        path, i + 1, line.strip()
+                    )
+                )
+
+    systems = _existing_systems(repo_root)
+    for m in AMENDED_BY_RE.finditer("".join(lines)):
+        system_id = m.group(1)
+        if system_id not in systems:
+            defects.append(
+                "{}: 'amended by [{}]' names a system that does not exist".format(
+                    path, system_id
+                )
+            )
+
+    return defects
+
+
+def _existing_systems(repo_root):
+    """Systems recognized by rule 5, derived from the filenames actually
+    present in ``docs/forge/specs/`` — never a hardcoded list, so a system
+    can't drift out of sync with the corpus that defines it."""
+    specs_dir = os.path.join(repo_root, "docs", "forge", "specs")
+    try:
+        names = os.listdir(specs_dir)
+    except OSError:
+        return set()
+    return {os.path.splitext(n)[0] for n in names if n.endswith(".md")}
+
+
+def lint_spec_corpus(repo_root):
+    """Every living-spec defect across every file in ``docs/forge/specs/``,
+    in one run — never just the first offending spec."""
+    specs_dir = os.path.join(repo_root, "docs", "forge", "specs")
+    defects = []
+    for name in sorted(os.listdir(specs_dir)):
+        if not name.endswith(".md"):
+            continue
+        defects.extend(lint_living_spec(os.path.join(specs_dir, name), repo_root=repo_root))
+    return defects
 
 
 def _slice_block(lines, mask, start):
@@ -293,7 +472,32 @@ def _dedup(defects):
     return deduped
 
 
-def lint_plan(plan_path, spec_path=None):
+def check_memory_files(repo_root):
+    """Every ``forge_memory.fmt_check`` defect across this repo's managed
+    project-memory files, reusing ``fmt_check``/``select_store`` rather than
+    reimplementing parsing or store selection — the harness-agnostic layer
+    that catches a drifted ``constraints.md``/``deferrals.md`` no matter
+    which harness (Bash, Codex, a human) wrote it.
+
+    Which files are managed is ``forge_memory_store.managed_paths``'s
+    answer, not a second copy of it — the same helper ``forge_memory``'s
+    ``fmt`` calls, so a third managed file can never be added to one and
+    forgotten in the other. It never touches ``gh``: no network, ever. A
+    managed path that does not exist is not a defect — most repos will
+    never have these files, and this check must never reject a legal repo
+    for lacking them."""
+    try:
+        paths = forge_memory_store.managed_paths(repo_root)
+    except forge_memory_store.ConfigError as e:
+        return [_error("memory", str(e))]
+
+    if not paths:
+        return []
+
+    return [_error("memory", msg) for msg in forge_memory.fmt_check(paths)]
+
+
+def lint_plan(plan_path, spec_path=None, *, repo_root):
     """Every documented-grammar defect in ``plan_path`` (and ``spec_path``
     when given), never short-circuiting on the first — including when the
     heading structure itself is broken: a wrong-level or duplicated task
@@ -302,10 +506,24 @@ def lint_plan(plan_path, spec_path=None):
     rejects a legal plan: ``**Spec:**``, ``**Global Constraints:**``, and
     prose acceptance are all optional per the planning skill, so their
     absence is never an error — and an empty checklist is a warning, not an
-    error."""
+    error.
+
+    ``repo_root`` is a required keyword-only argument (no process-cwd
+    guessing here, by design (constraint: parsers-fail-loud) — a library
+    function that inferred the repo root from
+    ``os.getcwd()`` would silently check the wrong directory the moment a
+    caller's own tracked cwd diverges from the process cwd, exactly the
+    failure this harness-agnostic check exists to prevent). Every caller
+    resolves and passes its own repo root explicitly; only a CLI edge may
+    default it to ``os.getcwd()``. It is where ``check_memory_files`` looks
+    for managed project-memory files; a memory defect and a plan/spec defect
+    are always reported together in one run, never one suppressing the
+    other."""
+    memory_defects = check_memory_files(repo_root)
+
     lines = eb.read_lines(plan_path)
     mask = eb.fence_mask(lines)
-    defects = []
+    defects = list(memory_defects)
 
     heading_defects, task_numbers, blocks = _lint_heading_structure(lines, mask)
     defects.extend(heading_defects)
@@ -337,12 +555,38 @@ def lint_plan(plan_path, spec_path=None):
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="forge_lint.py")
-    parser.add_argument("plan")
+    parser.add_argument("plan", nargs="?")
     parser.add_argument("--spec")
+    parser.add_argument(
+        "--specs", action="store_true",
+        help="lint every file in docs/forge/specs/ instead of a plan",
+    )
+    parser.add_argument(
+        "--repo-root",
+        help="repo root to check managed project-memory files under "
+             "(default: cwd)",
+    )
     args = parser.parse_args(argv)
+    # The CLI is an edge — a human is present — so it's the one place
+    # allowed to default repo_root to the process cwd; lint_plan itself
+    # never guesses.
+    repo_root = args.repo_root if args.repo_root is not None else os.getcwd()
+
+    if args.specs:
+        try:
+            defects = lint_spec_corpus(repo_root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        for d in defects:
+            print(d)
+        return 1 if defects else 0
+
+    if not args.plan:
+        parser.error("plan is required unless --specs is given")
 
     try:
-        defects = lint_plan(args.plan, args.spec)
+        defects = lint_plan(args.plan, args.spec, repo_root=repo_root)
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 1

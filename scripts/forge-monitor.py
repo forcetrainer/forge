@@ -121,7 +121,7 @@ def _ledger_panel(state, now, frame):
     table.add_column(justify="left")
     table.add_column(justify="left")
     table.add_column(justify="right")
-    run_terminal = state["state"] in ("completed", "halted", "contract-error")
+    run_terminal = forge_status.is_terminal(state.get("status"))
     for t in tasks:
         st = t.get("status")
         glyph, color = _GLYPH.get(st, ("·", DIM))
@@ -233,14 +233,6 @@ def _render(state, log_lines, now=None, frame="⠙"):
     return Group(*parts)
 
 
-def _is_terminal(state):
-    # Only a terminal run.json status ends the watch. A stale `running` run is NOT
-    # terminal — the monitor keeps polling and shows `stalled?`, because the cutoff
-    # can trip on a long silent (but healthy) phase; exiting would abandon a live
-    # run. A genuinely dead run just stays on `stalled?` until the user quits.
-    return state["state"] in ("completed", "halted", "contract-error")
-
-
 def _current_log_path(run_dir, state):
     if (state.get("current_phase") or "").startswith("final-review"):
         return os.path.join(run_dir, "final-review-live.log")
@@ -281,8 +273,7 @@ def _live_capacity(height, state):
     own two borders. Sized so ledger + live + banner exactly fit the viewport."""
     tasks = state.get("tasks") or []
     ledger_h = len(tasks) + 6  # 3 meta lines + 1 blank + N rows + 2 borders
-    terminal = state["state"] in ("completed", "halted", "contract-error")
-    banner_h = 4 if terminal else 0
+    banner_h = 4 if forge_status.is_terminal(state.get("status")) else 0
     return max(3, height - ledger_h - banner_h - 2)
 
 
@@ -304,7 +295,15 @@ def _watch(run_dir, poll):  # pragma: no cover - interactive Live loop
             cap = _live_capacity(console.size.height, state)
             lines = _tail(log_path, cap) if log_path else []
             live.update(_render(state, lines, frame=frame), refresh=True)
-            if _is_terminal(state):
+            # Only a terminal run.json status ends the watch — asked through
+            # ``forge_status.is_terminal``, the one definition of that split,
+            # against the same raw ``status`` field it was written for. A
+            # stale `running` run is NOT terminal: the monitor keeps polling
+            # and shows `stalled?`, because the cutoff can trip on a long
+            # silent (but healthy) phase and exiting would abandon a live
+            # run. A genuinely dead run just stays on `stalled?` until the
+            # user quits.
+            if forge_status.is_terminal(state.get("status")):
                 terminal = True
                 break
             time.sleep(poll)

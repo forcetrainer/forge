@@ -12,6 +12,39 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import forge_status  # noqa: E402
+
+
+def _defer_msg(finding_id, summary):
+    """A verdict carrying one deferrable improvement under an explicit
+    finding id (``_findings_msg`` numbers ids positionally, and the resume
+    tests need the SAME id re-reported across two invocations)."""
+    return json.dumps({"verdict": "findings", "findings": [
+        {"id": finding_id, "summary": summary, "location": None,
+         "provenance": "in-diff", "impact": "improvement",
+         "contract_ref": None, "convergence": None, "carried_from": None,
+         "repair_task": None},
+    ]})
+
+
+def _defer_and_halt_msg(defer_id, defer_summary, halt_file, halt_summary):
+    """One reviewer verdict carrying both a deferrable improvement and a
+    pre-existing contract-breaking finding — the task stages a deferral AND
+    halts, which is the shape a resume has to survive."""
+    return json.dumps({"verdict": "findings", "findings": [
+        {"id": defer_id, "summary": defer_summary, "location": None,
+         "provenance": "in-diff", "impact": "improvement",
+         "contract_ref": None, "convergence": None, "carried_from": None,
+         "repair_task": None},
+        {"id": "h1", "summary": halt_summary,
+         "location": {"file": halt_file, "lines": "1"},
+         "provenance": "in-diff", "impact": "contract-breaking",
+         "contract_ref": "Spec \u00a7X", "convergence": None,
+         "carried_from": None,
+         "repair_task": {"title": "Fix the legacy bug", "tier": "standard"}},
+    ]})
+
 
 class DispatchWorkerTests(unittest.TestCase):
     def setUp(self):
@@ -316,6 +349,215 @@ class AutofixAndDeferralTests(unittest.TestCase):
         self.assertEqual(len(data["deferrals"]), 1)
         self.assertEqual(data["deferrals"][0]["summary"], "harmless nit")
         self.assertEqual(data["deferrals"][0]["impact"], "improvement")
+
+    def test_staged_deferral_records_the_task_that_produced_it(self):
+        # `from` is specified as plan path PLUS task number, and nothing
+        # downstream of the runner can recover which task produced a finding —
+        # so the task number must be staged onto the entry here, at staging
+        # time, or the whole "<plan>, Task N" contract is unreachable.
+        plan = self._plan(PLAN_STD)
+        self._init_repo()
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                             # worker
+            {"exit": 0, "msg": _findings_msg("harmless nit")},  # reviewer: defer
+            {"exit": 0, "msg": _pass_msg()},                    # final review
+            {"exit": 0, "msg": '{"doc_sync": "clean"}'},        # doc-sync
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        entry = data["deferrals"][0]
+        self.assertEqual(entry["task_number"], 1)
+        self.assertEqual(
+            forge_status.deferral_provenance(
+                data["plan"], entry, os.path.join(self.run_dir, "run.json")),
+            "{}, Task 1".format(data["plan"]),
+        )
+
+    def test_final_review_deferral_records_the_stage_not_a_task_number(self):
+        # A final-review finding belongs to no single task. It still must not
+        # fall back to a bare plan path indistinguishable from a task entry,
+        # and must never claim a task number it does not have.
+        plan = self._plan(PLAN_STD_TRACKED)
+        self._init_repo(tracked=["f1.txt"])
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                           # worker
+            {"exit": 0, "msg": _pass_msg()},                  # task 1 review
+            {"exit": 0, "msg": _findings_msg("final nit")},   # final review: defer
+            {"exit": 0, "msg": '{"doc_sync": "clean"}'},      # doc-sync
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        entry = next(d for d in data["deferrals"] if d["summary"] == "final nit")
+        self.assertEqual(entry["stage"], "final-review")
+        self.assertNotIn("task_number", entry)
+        self.assertEqual(
+            forge_status.deferral_provenance(
+                data["plan"], entry, os.path.join(self.run_dir, "run.json")),
+            "{}, final review".format(data["plan"]),
+        )
+
+
+class StageDeferralsTests(unittest.TestCase):
+    """``stage_deferrals`` stamps the producing stage onto each entry and is
+    LOSSLESS: the spec's guarantee is that a deferral, once staged, is never
+    lost, so nothing a verdict raised may be silently collapsed away. The
+    dedupe exists only to stop a resumed run from re-staging what a PRIOR
+    invocation already staged."""
+
+    def test_two_findings_sharing_an_id_in_one_verdict_both_survive(self):
+        staged = forge_run.stage_deferrals([], [
+            {"id": "F1", "summary": "first"},
+            {"id": "F1", "summary": "second"},
+        ], task_number=2)
+        self.assertEqual([e["summary"] for e in staged], ["first", "second"])
+        self.assertEqual([e["task_number"] for e in staged], [2, 2])
+
+    def test_carried_keys_from_a_prior_invocation_are_not_staged_again(self):
+        prior = forge_run.stage_deferrals(
+            [], [{"id": "F1", "summary": "first"}], task_number=2)
+        prior[0]["issue"] = "77"
+        carried = forge_run.deferral_stage_keys(prior)
+        staged = forge_run.stage_deferrals(
+            prior, [{"id": "F1", "summary": "first"}], task_number=2,
+            carried=carried,
+        )
+        self.assertEqual([e["summary"] for e in staged], ["first"])
+        self.assertEqual(staged[0]["issue"], "77")
+
+    def test_the_same_id_from_a_different_task_is_a_different_deferral(self):
+        # Finding ids are per-review, so task 1's F1 and task 2's F1 name two
+        # unrelated findings and both must be staged.
+        staged = forge_run.stage_deferrals(
+            [], [{"id": "F1", "summary": "task one"}], task_number=1)
+        carried = forge_run.deferral_stage_keys(staged)
+        staged = forge_run.stage_deferrals(
+            staged, [{"id": "F1", "summary": "task two"}], task_number=2,
+            carried=carried,
+        )
+        self.assertEqual([e["summary"] for e in staged], ["task one", "task two"])
+
+    def test_findings_are_copied_not_mutated_in_place(self):
+        # The same dicts are already persisted on the task's attempt receipt,
+        # which records what the reviewer said, not staging bookkeeping.
+        finding = {"id": "F1", "summary": "first"}
+        forge_run.stage_deferrals([], [finding], task_number=2)
+        self.assertNotIn("task_number", finding)
+
+
+class DeferralResumePersistenceTests(unittest.TestCase):
+    """Staged deferrals persist across a resume (Staging and idempotency
+    spec). run_plan's accumulator starts empty each invocation and an
+    already-passed task `continue`s before it is ever appended to, so a
+    terminal write that did not read the prior list back would replace
+    run.json's `deferrals` with only this invocation's entries — erasing
+    earlier staged deferrals and any `issue` numbers already filed against
+    them. Order matters as much as content: `--occurrence` is an ordinal
+    into this list, so a shifted list mis-attributes a filing."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-run-defer-resume-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        self.run_dir = os.path.join(self.d, "run")
+        self.log = os.path.join(self.d, "fakelog")
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        )
+
+    def _init_repo(self, tracked=()):
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
+        for name in tracked:
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write("base\n")
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+
+    def _plan(self, content, name="plan.md"):
+        p = os.path.join(self.d, name)
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def _run(self, plan_path, responses):
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), plan_path,
+             "--spec", self.spec, "--run-dir", self.run_dir,
+             "--codex-bin", self.fake],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+
+    def _run_json(self):
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            return json.load(f)
+
+    def test_resume_keeps_earlier_deferrals_their_issues_and_their_order(self):
+        plan = self._plan(PLAN_TWO_STD)
+        # pre.txt is committed and never touched by the run, so a finding
+        # located in it verifies pre-existing -> halt (a real scope decision),
+        # which is how run 1 is made to stop at task 2.
+        self._init_repo(tracked=["f1.txt", "pre.txt"])
+        res1 = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                              # t1 worker
+            {"exit": 0, "msg": _defer_msg("d1", "task one nit")},  # t1 review: defer
+            {"exit": 0, "msg": ""},                              # t2 worker
+            {"exit": 0, "msg": _defer_and_halt_msg(              # t2 review: defer + halt
+                "d2", "task two nit", "pre.txt", "pre-existing scope call")},
+        ])
+        self.assertEqual(res1.returncode, 2, res1.stderr)
+        staged = self._run_json()["deferrals"]
+        self.assertEqual([d["summary"] for d in staged],
+                         ["task one nit", "task two nit"])
+        self.assertEqual([d["task_number"] for d in staged], [1, 2])
+
+        # The close-out gate files the first one; the issue number is recorded
+        # back onto the staged entry, exactly as `defer --run` writes it.
+        path = os.path.join(self.run_dir, "run.json")
+        data = self._run_json()
+        data["deferrals"][0]["issue"] = "77"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+        # The escalated attempt left the tree dirty (task 2's acceptance
+        # created f2.txt); a human discards it before resuming, since the
+        # runner requires a clean tree at run start.
+        self._git("reset", "--hard")
+        self._git("clean", "-fd")
+        res2 = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                             # t2 worker
+            # Task 2 re-runs and re-reports the SAME deferrable finding. It is
+            # already staged, so it must not be staged a second time — a
+            # duplicate would be filed twice and would shift every later
+            # --occurrence ordinal.
+            {"exit": 0, "msg": _defer_msg("d2", "task two nit")},
+            {"exit": 0, "msg": _pass_msg()},                    # final review
+            {"exit": 0, "msg": '{"doc_sync": "clean"}'},        # doc-sync
+        ])
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        after = self._run_json()["deferrals"]
+        self.assertEqual([d["summary"] for d in after],
+                         ["task one nit", "task two nit"])
+        self.assertEqual([d["task_number"] for d in after], [1, 2])
+        self.assertEqual(after[0]["issue"], "77")
+        self.assertNotIn("issue", after[1])
 
 
 class OversizedPromptTests(unittest.TestCase):

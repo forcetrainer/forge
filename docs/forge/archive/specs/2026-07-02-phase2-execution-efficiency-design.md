@@ -1,4 +1,10 @@
-# Phase 2: Execution efficiency & scripts — design
+# Phase 2: Execution efficiency & scripts — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/pipeline.md`](../../specs/pipeline.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 2 of the 2026-07 upgrade cycle ([ideation](../ideas/2026-07-02-upgrade-cycle.md) §6–§7). Owns: plan-execution efficiency rules, reviewer integrity, the two pipeline scripts.
 

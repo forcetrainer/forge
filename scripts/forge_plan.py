@@ -2,8 +2,8 @@
 
 Parses every ``### Task N:`` block into a ``Task`` (reusing extract-brief's
 heading grammar), orders tasks by dependency, and parses ``--effort N=LEVEL``
-overrides. All parse failures raise loudly naming the cause (DECISIONS
-2026-07-11).
+overrides. All parse failures raise loudly naming the cause (constraint:
+parsers-fail-loud).
 """
 import re
 
@@ -78,7 +78,7 @@ def _normalize_tier_level(raw):
 def parse_plan_tasks(plan_path):
     """Parse every ``### Task N:`` block into a Task. Raises RuntimeError naming
     the cause on a wrong-level task heading or a duplicate task number — never
-    guesses (DECISIONS 2026-07-11)."""
+    guesses (constraint: parsers-fail-loud)."""
     lines = eb.read_lines(plan_path)
     mask = eb.fence_mask(lines)
 

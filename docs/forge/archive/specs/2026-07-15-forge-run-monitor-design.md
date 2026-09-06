@@ -1,4 +1,10 @@
-# Forge Run Monitor — design
+# Forge Run Monitor — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/codex-runner.md`](../../specs/codex-runner.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Codex-runner live monitor: an attach-from-outside TUI that shows where a `forge-run.py` execution is in its plan and streams the in-flight task's `codex exec` output. Read-only observer; never touches execution semantics.
 

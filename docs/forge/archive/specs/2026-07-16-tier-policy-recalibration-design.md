@@ -1,4 +1,10 @@
-# Tier Policy Recalibration — design
+# Tier Policy Recalibration — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Cross-harness change to how forge classifies task difficulty and routes it to a model. Reframes tier assignment from "predict how hard this is" to "sit at the floor; move off it only on named evidence," and lowers per-tier effort defaults to each provider's recommended starting point. Applies to both the Claude dispatch/inline path and the Codex runner.
 

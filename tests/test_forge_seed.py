@@ -200,7 +200,7 @@ class LintBlocksRunTests(unittest.TestCase):
         # **Acceptance:** — a legal plan whose checklist is empty (a lint
         # warning, never an error; Phase 13 spec).
         plan = self._plan(PLAN_PASS)
-        defects = forge_lint.lint_plan(plan, self.spec)
+        defects = forge_lint.lint_plan(plan, self.spec, repo_root=self.d)
         self.assertTrue(defects)
         self.assertTrue(all(d.severity == "warning" for d in defects))
 

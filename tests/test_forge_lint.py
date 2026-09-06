@@ -132,7 +132,7 @@ class ForgeLintTests(unittest.TestCase):
 
     def _lint(self, plan_text, spec_path=None):
         _write(self.plan_path, plan_text)
-        return fl.lint_plan(self.plan_path, spec_path)
+        return fl.lint_plan(self.plan_path, spec_path, repo_root=self.tmp)
 
     def _errors(self, defects):
         return [d for d in defects if d.severity == "error"]
@@ -316,6 +316,156 @@ class ForgeLintTests(unittest.TestCase):
         self.assertTrue(any("depends on unknown task 77" in d.message for d in errors))
 
 
+def _constraint_text(entries):
+    """entries: [(id, because), ...] -> canonical-shaped constraints.md text
+    (one record per entry; ``because`` is the field under test since it
+    carries the widest budget)."""
+    blocks = []
+    for cid, because in entries:
+        blocks.append(
+            "## {}\n**Rule:** does a thing\n**Because:** {}\n"
+            "**Scope:** repo\n**Source:** user\n".format(
+                cid, because,
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _deferral_text(entries):
+    """entries: [(title, why), ...] -> canonical-shaped deferrals.md text."""
+    blocks = []
+    for title, why in entries:
+        blocks.append(
+            "## {}\n**Why:** {}\n**From:** user\n**Follow-up:** backlog\n".format(
+                title, why,
+            )
+        )
+    return "\n".join(blocks)
+
+
+class ForgeLintMemoryTests(unittest.TestCase):
+    """``check_memory_files`` — the harness-agnostic layer that catches a
+    drifted constraints.md/deferrals.md no matter which harness wrote it."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.docs_dir = os.path.join(self.repo, "docs", "forge")
+
+    def _write_constraints(self, text):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        _write(os.path.join(self.docs_dir, "constraints.md"), text)
+
+    def _write_deferrals(self, text):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        _write(os.path.join(self.docs_dir, "deferrals.md"), text)
+
+    def _write_config(self, config_obj):
+        os.makedirs(self.docs_dir, exist_ok=True)
+        import json
+        _write(os.path.join(self.docs_dir, "config.json"), json.dumps(config_obj))
+
+    def test_drifted_constraints_one_defect_per_record(self):
+        drifted = _constraint_text([
+            ("bad-one", "x" * 310),
+            ("bad-two", "y" * 310),
+        ])
+        self._write_constraints(drifted)
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(len(defects), 2)
+        self.assertTrue(all(d.severity == "error" for d in defects))
+
+    def test_canonical_constraints_no_defects(self):
+        self._write_constraints(_constraint_text([("good-one", "a short reason")]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_absent_constraints_no_defects(self):
+        # No docs/forge directory at all.
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_deferrals_checked_when_file_store_configured(self):
+        self._write_config({"deferrals": {"store": "file"}})
+        self._write_deferrals(_deferral_text([("bad-title", "z" * 310)]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(len(defects), 1)
+        self.assertEqual(defects[0].severity, "error")
+
+    def test_deferrals_ignored_without_file_store_config(self):
+        # No config.json => deferral store defaults to GitHub. A drifted
+        # deferrals.md must be ignored entirely — no gh call, no defect.
+        self._write_deferrals(_deferral_text([("bad-title", "z" * 310)]))
+        defects = fl.check_memory_files(self.repo)
+        self.assertEqual(defects, [])
+
+    def test_memory_and_plan_defects_both_reported_in_one_run(self):
+        self._write_constraints(_constraint_text([("bad-one", "x" * 310)]))
+        defects = fl.lint_plan(
+            self._write_plan_with_bad_tier(), repo_root=self.repo,
+        )
+        errors = [d for d in defects if d.severity == "error"]
+        self.assertTrue(any("bogus" in d.message for d in errors))
+        self.assertTrue(any(d.where == "memory" for d in errors))
+
+    def _write_plan_with_bad_tier(self):
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, _base_plan(task1_tier="**Tier:** `bogus`"))
+        return plan_path
+
+    def test_existing_lint_behavior_unchanged_with_no_memory_files(self):
+        # No docs/forge/ at all under repo_root: the memory check must
+        # contribute zero defects, leaving every pre-existing lint defect
+        # exactly as it was.
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+        other_clean_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-other-")
+        self.addCleanup(shutil.rmtree, other_clean_repo, ignore_errors=True)
+        defects_a = fl.lint_plan(plan_path, repo_root=self.repo)
+        defects_b = fl.lint_plan(plan_path, repo_root=other_clean_repo)
+        self.assertEqual(defects_a, defects_b)
+
+    def test_repo_root_omitted_fails_loud_instead_of_guessing(self):
+        # lint_plan must never fall back to os.getcwd() itself — a caller
+        # that forgets repo_root gets a loud error, not a silent guess.
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+        with self.assertRaises(TypeError):
+            fl.lint_plan(plan_path)
+
+    def test_lint_plan_checks_the_given_repo_root_not_process_cwd(self):
+        # This is the test that would have caught the original bug: process
+        # cwd and repo_root are made to disagree, and lint_plan must follow
+        # repo_root, never the process cwd, in either direction.
+        dirty_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-dirty-")
+        self.addCleanup(shutil.rmtree, dirty_repo, ignore_errors=True)
+        os.makedirs(os.path.join(dirty_repo, "docs", "forge"))
+        _write(
+            os.path.join(dirty_repo, "docs", "forge", "constraints.md"),
+            _constraint_text([("bad-one", "x" * 310)]),
+        )
+        clean_repo = tempfile.mkdtemp(prefix="forge-lint-memrepo-clean-")
+        self.addCleanup(shutil.rmtree, clean_repo, ignore_errors=True)
+
+        plan_path = os.path.join(self.repo, "plan.md")
+        _write(plan_path, LEGAL_MINIMAL_PLAN)
+
+        old_cwd = os.getcwd()
+        self.addCleanup(os.chdir, old_cwd)
+
+        # process cwd is the dirty repo, but repo_root explicitly names the
+        # clean one — no memory defect must appear.
+        os.chdir(dirty_repo)
+        defects = fl.lint_plan(plan_path, repo_root=clean_repo)
+        self.assertFalse(any(d.where == "memory" for d in defects))
+
+        # process cwd is the clean repo, but repo_root explicitly names the
+        # dirty one — the memory defect must appear.
+        os.chdir(clean_repo)
+        defects = fl.lint_plan(plan_path, repo_root=dirty_repo)
+        self.assertTrue(any(d.where == "memory" for d in defects))
+
+
 class ForgeLintCLITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="forge-lint-cli-")
@@ -349,7 +499,7 @@ class ForgeLintCLITests(unittest.TestCase):
 
     def test_real_phase14_plan_lints_clean(self):
         plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-08-21-phase14-halt-precision.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/specs/2026-08-21-halt-precision-design.md")
+        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-08-21-halt-precision-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
             capture_output=True, text=True,
@@ -358,9 +508,225 @@ class ForgeLintCLITests(unittest.TestCase):
 
     def test_real_phase12b_plan_lints_clean(self):
         plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-07-17-phase12b-claude-dispatch-parity.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md")
+        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+def _spec_text(system="execution", supersedes=None, changelog=None, extra=""):
+    """Canonical-shaped living-spec text; each parameter overridable to
+    inject exactly one defect. ``changelog`` is a list of raw lines placed
+    verbatim under '## Changelog'; ``None`` means a well-formed single
+    entry."""
+    fm_lines = ["---"]
+    fm_lines.append("system: {}".format(system))
+    if supersedes is not None:
+        fm_lines.append("supersedes:")
+        for path in supersedes:
+            fm_lines.append("  - {}".format(path))
+    fm_lines.append("---")
+
+    if changelog is None:
+        changelog = ["2026-09-05: initial version (#1)"]
+
+    return "\n".join(fm_lines) + "\n\n# Title\n\nBody text.{}\n\n## Changelog\n{}\n".format(
+        extra, "\n".join(changelog)
+    )
+
+
+class ForgeLintLivingSpecTests(unittest.TestCase):
+    """The five living-spec grammar rules (Phase 14/5): dated filename,
+    frontmatter/system-identity, supersedes resolution, Changelog presence
+    and entry grammar, and amended-by system existence — plus the
+    hand-written frontmatter parser and the corpus mode built on all five."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-lint-spec-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.specs_dir = os.path.join(self.tmp, "docs", "forge", "specs")
+        os.makedirs(self.specs_dir)
+
+    def _write_spec(self, name, text):
+        path = os.path.join(self.specs_dir, name)
+        _write(path, text)
+        return path
+
+    # --- rule 2: frontmatter parses, system == filename stem -------------
+
+    def test_clean_spec_lints_with_no_defects(self):
+        path = self._write_spec("execution.md", _spec_text(system="execution"))
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    def test_system_disagreeing_with_stem_named(self):
+        path = self._write_spec("execution.md", _spec_text(system="planning"))
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("planning" in d and "execution" in d for d in defects))
+
+    def test_missing_frontmatter_is_a_defect(self):
+        path = self._write_spec("execution.md", "# Title\n\n## Changelog\n2026-09-05: x (#1)\n")
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("system" in d for d in defects))
+
+    # --- rule 3: supersedes resolves relative to docs/forge/ ---------------
+
+    def test_supersedes_path_resolves_no_defect(self):
+        archive_dir = os.path.join(self.tmp, "docs", "forge", "archive")
+        os.makedirs(archive_dir)
+        _write(os.path.join(archive_dir, "2026-01-01-old.md"), "old content\n")
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", supersedes=["archive/2026-01-01-old.md"]),
+        )
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    def test_supersedes_path_that_does_not_resolve_named(self):
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", supersedes=["archive/nosuchfile.md"]),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("archive/nosuchfile.md" in d for d in defects))
+
+    # --- rule 4: Changelog presence and entry grammar ----------------------
+
+    def test_missing_changelog_named(self):
+        text = "---\nsystem: execution\n---\n\n# Title\n\nBody, no changelog.\n"
+        path = self._write_spec("execution.md", text)
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("Changelog" in d for d in defects))
+
+    def test_malformed_changelog_entry_named_by_line(self):
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", changelog=["not a dated entry"]),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("not a dated entry" in d for d in defects))
+
+    # --- rule 5: amended by [<id>] names a system that exists --------------
+
+    def test_amended_by_unknown_system_named(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        path = self._write_spec(
+            "planning.md",
+            _spec_text(
+                system="planning",
+                changelog=["2026-09-05: amended by [nosuchsystem] — x (#1)"],
+            ),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("nosuchsystem" in d for d in defects))
+
+    def test_amended_by_real_system_no_defect(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        path = self._write_spec(
+            "planning.md",
+            _spec_text(
+                system="planning",
+                changelog=["2026-09-05: amended by [execution] — x (#1)"],
+            ),
+        )
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- rule 1: dated filename ---------------------------------------------
+
+    def test_dated_filename_named(self):
+        path = self._write_spec(
+            "2026-09-05-execution-design.md",
+            _spec_text(system="2026-09-05-execution-design"),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("YYYY-MM-DD" in d for d in defects))
+
+    def test_same_content_renamed_is_clean(self):
+        path = self._write_spec("execution.md", _spec_text(system="execution"))
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- archive is never linted --------------------------------------------
+
+    def test_dated_frontmatter_less_spec_under_archive_no_defect(self):
+        archive_dir = os.path.join(self.tmp, "docs", "forge", "archive")
+        os.makedirs(archive_dir)
+        path = os.path.join(archive_dir, "2026-01-01-old-design.md")
+        _write(path, "# Old dated spec\n\nNo frontmatter, no changelog.\n")
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- corpus mode reports every offender, not just the first ------------
+
+    def test_corpus_mode_reports_every_offending_spec(self):
+        self._write_spec("execution.md", _spec_text(system="wrong-one"))
+        self._write_spec("planning.md", _spec_text(system="also-wrong"))
+        defects = fl.lint_spec_corpus(self.tmp)
+        self.assertTrue(any("execution.md" in d for d in defects))
+        self.assertTrue(any("planning.md" in d for d in defects))
+
+    def test_corpus_mode_clean_when_every_spec_clean(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        self._write_spec("planning.md", _spec_text(system="planning"))
+        self.assertEqual(fl.lint_spec_corpus(self.tmp), [])
+
+    # --- hand-written frontmatter parser: fails loud on malformed grammar ---
+
+    def test_parse_frontmatter_no_dashes_returns_empty_not_raise(self):
+        data, body_start = fl.parse_frontmatter(["# Title\n", "\n", "body\n"])
+        self.assertEqual(data, {})
+        self.assertEqual(body_start, 0)
+
+    def test_parse_frontmatter_unterminated_block_raises(self):
+        with self.assertRaises(RuntimeError):
+            fl.parse_frontmatter(["---\n", "system: execution\n"])
+
+    def test_parse_frontmatter_non_key_value_line_raises(self):
+        with self.assertRaises(RuntimeError):
+            fl.parse_frontmatter(["---\n", "not a key value line\n", "---\n"])
+
+    def test_lint_living_spec_malformed_frontmatter_raises_naming_file_and_line(self):
+        path = self._write_spec(
+            "execution.md",
+            "---\nsystem: execution\nnot a key value line\n---\n\n## Changelog\n",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fl.lint_living_spec(path, repo_root=self.tmp)
+        message = str(ctx.exception)
+        self.assertIn(path, message)
+        self.assertIn("line 3", message)
+
+    def test_no_third_party_import_in_forge_lint(self):
+        with open(os.path.join(SCRIPTS_DIR, "forge_lint.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("import yaml", src)
+
+    # --- --specs CLI mode ---------------------------------------------------
+
+    def test_cli_specs_mode_exits_nonzero_and_lists_defects(self):
+        self._write_spec("execution.md", _spec_text(system="wrong-one"))
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", self.tmp],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("execution.md", result.stdout)
+
+    def test_cli_specs_mode_exits_zero_when_clean(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", self.tmp],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class ForgeLintRealSpecCorpusTests(unittest.TestCase):
+    """docs/forge/specs/ now holds only the four migrated living specs — the
+    dated corpus was archived under docs/forge/archive/specs/. This is the
+    post-migration acceptance criterion."""
+
+    def test_real_specs_dir_is_compliant_post_migration(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", REPO_ROOT],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

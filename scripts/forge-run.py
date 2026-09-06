@@ -31,8 +31,9 @@ docs address them as ``forge_run.<name>``):
 Reuses ``extract-brief.py``/``review-packet.py`` (via forge_common) for all
 plan/spec parsing and packet assembly — no duplicated heading grammar. Tier ->
 model/effort mapping lives in exactly one table (``TIER_MAP``). All parse
-failures raise loudly naming the cause (DECISIONS 2026-07-11); ``ultra``
-reasoning effort is never emitted (DECISIONS 2026-07-13).
+failures raise loudly naming the cause (constraint: parsers-fail-loud);
+``ultra`` reasoning effort is never emitted (spec:
+docs/forge/specs/codex-runner.md).
 """
 import argparse
 import datetime
@@ -122,6 +123,7 @@ from forge_plan import (  # noqa: F401
 from forge_receipts import (  # noqa: F401
     _clear_task_receipts,
     _read_base_commit,
+    _read_deferrals,
     _read_latest_receipt,
     _read_run_tasks,
     _read_seeded_findings,
@@ -516,12 +518,20 @@ def _verdict_defects(verdict, checklist, review_kind="discovery"):
     defect kinds are plain human-readable strings in the same shape, so they
     share one retry-once-then-contract-error mechanism (Location parsing
     spec, 2026-08-21 — reuses Phase 13's coverage retry rather than adding a
-    second one)."""
+    second one).
+
+    ``validate_finding_ids`` is checked on the same always-on terms as
+    locations: a verdict naming two findings with one id is malformed on
+    every review kind, with or without a checklist, because the id is the
+    runner's only handle on a finding (carried/resolved convergence
+    tracking, and the staged deferrals `defer --finding-id` selects
+    from)."""
     defects = (
         list(forge_dispose.validate_coverage(verdict, checklist))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)
+    defects += forge_dispose.validate_finding_ids(verdict)
     return defects
 
 
@@ -744,9 +754,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             )
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
-            # separate reviewer (DECISIONS 2026-07-16, 2026-07-17); resuming it
-            # would hand the review to an agent that already holds the
-            # worker's reasoning. Verification (every review after) resumes
+            # separate reviewer (constraint: discovery-review-is-cold);
+            # resuming it would hand the review to an agent that already
+            # holds the worker's reasoning. Verification (every review after) resumes
             # the reviewer thread, with the same missing-id/failed-resume
             # cold fallback as the worker (Session continuity /
             # Continuity scope and failure specs). Once a fallback happens
@@ -1224,10 +1234,11 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             update_run_progress(run_dir, None, "final-review")
             diff = _git_diff(cwd, run_base)
             # Discovery (this loop's first review) is always cold — same
-            # justification as the per-task reviewer (DECISIONS 2026-07-16,
-            # 2026-07-17). Verification (every review after a repair) resumes
-            # the final-reviewer thread against the repair delta + reduced
-            # checklist (Delta-scoped verification packets spec) — the
+            # justification as the per-task reviewer (constraint:
+            # discovery-review-is-cold). Verification (every review after a
+            # repair) resumes the final-reviewer thread against the repair
+            # delta + reduced checklist (Delta-scoped verification packets
+            # spec) — the
             # resumed reviewer already holds the full spec and whole-plan
             # diff in session, so re-sending them is exactly the waste this
             # phase removes.
@@ -1357,10 +1368,11 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
 # mirroring REVIEW_VERDICT_INSTRUCTION's split.
 DOC_SYNC_INSTRUCTION = (
     "Reconcile EXISTING documentation to the shipped whole-plan diff below: "
-    "update stale references, changed signatures/behavior, spec changelog "
-    "entries, and ROADMAP status that the diff made inaccurate. Edit only docs "
+    "update stale references, changed signatures/behavior, and spec changelog "
+    "entries that the diff made inaccurate. Edit only docs "
     "that already exist and that the diff affects — never author new "
-    "documentation, and never touch code. If you find a documentation/contract "
+    "documentation, never touch code, and never reconcile issue status. If "
+    "you find a documentation/contract "
     "contradiction you cannot mechanically reconcile (a doc asserts something "
     "the shipped code now contradicts, and choosing the correct side is a human "
     "decision), make no edit and end your message with exactly one JSON object "
@@ -1475,8 +1487,9 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
                       timeout=DEFAULT_TIMEOUT):
     """Terminal doc-sync stage (Terminal doc-sync stage spec): one ``codex exec``
     dispatch that reconciles EXISTING documentation to the shipped whole-plan
-    ``diff`` — stale references, changed signatures/behavior, spec changelog,
-    ROADMAP status — never authoring new docs and never touching code. Runs only
+    ``diff`` — stale references, changed signatures/behavior, spec changelog —
+    never authoring new docs, never touching code, and never reconciling issue
+    status. Runs only
     after final review passes (the caller's guard). Returns a DocSyncResult:
 
     - the worker names an unreconcilable doc/contract contradiction -> ``halt``
@@ -1548,6 +1561,68 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     return DocSyncResult(status="reconciled", commit=sha, reconciled=reconciled)
 
 
+def _deferral_stage_key(entry):
+    """Identity of a staged deferral across invocations: the stage that
+    produced it plus the reviewer's finding id."""
+    return (entry.get("task_number"), entry.get("stage"), entry.get("id"))
+
+
+def deferral_stage_keys(staged):
+    """The ``_deferral_stage_key`` set for a deferral list read back from a
+    prior invocation's ``run.json`` — what ``stage_deferrals`` refuses to
+    stage a second time. Built once, before this invocation stages anything,
+    so it names exactly the entries an EARLIER invocation left behind."""
+    return {_deferral_stage_key(e) for e in staged}
+
+
+def stage_deferrals(staged, findings, *, task_number=None, stage=None,
+                    carried=frozenset()):
+    """Append ``findings`` (``defer``-disposition finding dicts) to a run's
+    ``staged`` deferral list, stamping each with the stage that produced it,
+    and return ``staged``.
+
+    The stamp is the whole point. ``from`` is specified as plan path PLUS task
+    number, and a finding dict (``forge_common.finding_to_dict``) carries no
+    task number of its own; nothing downstream can recover which task produced
+    a finding, so it is recorded HERE, at staging time, or the contract is
+    unreachable. ``forge_status.deferral_provenance`` is the reader.
+
+    A per-task finding gets ``task_number``. A final-review finding belongs to
+    no single task, so it gets ``stage: "final-review"`` instead and no task
+    number is invented for it — its provenance reads ``"<plan>, final review"``.
+
+    Staging is LOSSLESS: every finding handed to one call is appended. The
+    spec's guarantee is that a deferral, once staged, is never lost, and
+    collapsing two findings a verdict actually raised would be exactly the
+    loss staging exists to prevent — even though ``validate_finding_ids``
+    now rejects a verdict that names one id twice, this must not be the
+    thing quietly depending on it.
+
+    ``carried`` is the ONE narrow exception, and it is a cross-invocation
+    one: the ``_deferral_stage_key`` set of the deferrals read back from the
+    prior ``run.json`` (``deferral_stage_keys``). A resumed run re-executes
+    its escalated task, whose review legitimately re-reports the same
+    deferrable finding; appending that again would file one deferral twice
+    and shift every later ``--occurrence`` ordinal onto the wrong entry. The
+    already-staged copy wins, keeping list order — and therefore those
+    ordinals — stable, along with any ``issue`` already recorded on it.
+    Within a single invocation nothing is skipped.
+
+    Each finding is copied before stamping: the same dicts are already
+    persisted on the task's own attempt receipt, which records what the
+    reviewer said, not the runner's staging bookkeeping."""
+    for finding in findings:
+        entry = dict(finding)
+        if task_number is not None:
+            entry["task_number"] = task_number
+        if stage is not None:
+            entry["stage"] = stage
+        if _deferral_stage_key(entry) in carried:
+            continue
+        staged.append(entry)
+    return staged
+
+
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
              timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
     """Sequential whole-plan loop. Every invocation first lints the plan (+ spec)
@@ -1562,8 +1637,11 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     offer) threads into every per-task and final-review convergence decision:
     ``auto`` runs the disposition matrix, ``gate`` halts on any finding.
     Defer-disposition findings from every task and the final review aggregate into
-    ``run.json`` under ``deferrals`` (the runner never writes DEFERRALS.md — the
-    orchestrator does, at completion). ``seed``-disposition findings (in-run x
+    ``run.json`` under ``deferrals``, each stamped with the task number (or the
+    ``final-review`` stage) that produced it and read back across a resume so
+    nothing already staged — or already filed — is lost (``stage_deferrals``);
+    the runner writes no durable record of its own — filing happens later, at
+    the close-out review gate, via ``forge_memory.py defer``. ``seed``-disposition findings (in-run x
     contract-breaking — a finding against an earlier task's already-committed
     work) similarly aggregate into ``run.json`` under ``seeded_findings``: logged,
     the task's own run is never halted or reworked over them, and they seed the
@@ -1597,7 +1675,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # created or anything dispatches, naming every defect in the raised
     # message too. A warning-only plan (e.g. a legal empty checklist) prints
     # and proceeds.
-    lint_defects = forge_lint.lint_plan(plan_path, spec_path)
+    lint_defects = forge_lint.lint_plan(plan_path, spec_path, repo_root=cwd)
     lint_lines = [
         "[{}] {}: {}".format(d.severity, d.where, d.message) for d in lint_defects
     ]
@@ -1656,9 +1734,22 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     overall = "passed"
     escalated = False
     # Defer-disposition findings aggregate here across every task and the final
-    # review; surfaced in the terminal run.json (the orchestrator writes them into
-    # DEFERRALS.md at completion — the runner never touches that curated doc).
-    deferrals = []
+    # review; surfaced in the terminal run.json. The runner writes no durable
+    # record of its own — filing happens later, at the close-out review gate,
+    # via forge_memory.py defer.
+    # Staged deferrals — like seeded_findings below, and unlike `threads`,
+    # this READS BACK the prior run.json: a resume `continue`s past every
+    # already-passed task before its findings are aggregated, so an
+    # accumulator that started empty would have the terminal write erase
+    # every earlier staged deferral and the `issue` numbers already filed
+    # against them (_read_deferrals). Order is preserved because prior
+    # entries keep their positions and this invocation's only ever append —
+    # forge_memory.py's `--occurrence` is an ordinal into this list.
+    # `carried_deferrals` names exactly what the PRIOR invocation staged, so
+    # a re-executed task re-reporting the same finding is not staged twice;
+    # within this invocation staging is lossless (stage_deferrals).
+    deferrals = list(_read_deferrals(run_dir) or [])
+    carried_deferrals = deferral_stage_keys(deferrals)
     doc_sync_record = None
     # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at
     # invocation start (never read back from a prior run.json), populated in
@@ -1718,7 +1809,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             autofix_mode=autofix_mode, run_base=run_base,
             seeded_findings=seeded_findings,
         )
-        deferrals.extend(outcome.deferrals)
+        stage_deferrals(deferrals, outcome.deferrals,
+                        task_number=task.number, carried=carried_deferrals)
         print("task {}: {} ({} attempt(s))".format(
             task.number, outcome.status, outcome.attempts), flush=True)
         summary.update({
@@ -1769,7 +1861,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
                 seeded_findings=seeded_findings,
             )
-            deferrals.extend(final_outcome.deferrals)
+            stage_deferrals(deferrals, final_outcome.deferrals,
+                            stage="final-review", carried=carried_deferrals)
             if final_outcome.status == "escalated":
                 overall = "escalated-final-review"
             else:

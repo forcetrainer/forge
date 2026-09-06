@@ -299,6 +299,120 @@ class ValidateLocationsUnitTests(unittest.TestCase):
         self.assertIn("f1", str(ctx.exception))
 
 
+class ValidateFindingIdsUnitTests(unittest.TestCase):
+    """validate_finding_ids: a reviewer verdict must not name two findings
+    with one id. Ids are the runner's handle on a finding everywhere it
+    matters — carried/resolved convergence tracking, the staged deferrals
+    list, `defer --occurrence` — so two findings sharing one is a malformed
+    verdict, rejected loudly through the same retry-once-then-contract-error
+    mechanism as coverage and location defects, never papered over."""
+
+    def _finding(self, **kw):
+        base = dict(
+            id="f1", summary="x", file="a.py", lines="12-20",
+            provenance="in-diff", impact="improvement", contract_ref=None,
+        )
+        base.update(kw)
+        return forge_common.Finding(**base)
+
+    def test_duplicate_ids_are_a_defect_naming_the_id(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(summary="first"),
+            self._finding(summary="second"),
+        ])
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+        self.assertIn("duplicate", defects[0].lower())
+
+    def test_every_colliding_id_is_named_not_just_the_first(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(id="a"), self._finding(id="a"),
+            self._finding(id="b"), self._finding(id="b"),
+            self._finding(id="c"),
+        ])
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        named = defects[0].split(":", 1)[1]
+        self.assertEqual([p.strip() for p in named.split(",")], ["a", "b"])
+
+    def test_unique_ids_are_no_defect(self):
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(id="f1"), self._finding(id="f2"),
+        ])
+        self.assertEqual(forge_dispose.validate_finding_ids(v), [])
+
+    def test_pass_verdict_is_no_defect(self):
+        self.assertEqual(
+            forge_dispose.validate_finding_ids(
+                forge_common.Verdict(kind="pass", findings=[])),
+            [],
+        )
+
+    def test_checked_on_a_verification_verdict_with_no_checklist(self):
+        # Coverage is discovery-only and can be skipped; a duplicate id is
+        # malformed on every review kind, checklist or not, exactly like a
+        # location defect.
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(), self._finding(),
+        ])
+        defects = forge_run._verdict_defects(
+            v, checklist=None, review_kind="verification")
+        self.assertTrue(any("f1" in d for d in defects))
+
+    def _dup_msg(self):
+        return json.dumps({
+            "verdict": "findings",
+            "coverage": [],
+            "findings": [
+                {"id": "f1", "summary": "first", "impact": "improvement",
+                 "contract_ref": None, "location": None},
+                {"id": "f1", "summary": "second", "impact": "improvement",
+                 "contract_ref": None, "location": None},
+            ],
+        })
+
+    def test_review_with_coverage_retries_once_then_accepts_a_fixed_verdict(self):
+        good_msg = json.dumps({"verdict": "pass", "coverage": []})
+        calls = []
+
+        def dispatch_call(packet_path):
+            calls.append(packet_path)
+            msg = self._dup_msg() if len(calls) == 1 else good_msg
+            return forge_run.parse_verdict(msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            verdict, retried = forge_run._review_with_coverage(
+                dispatch_call, packet_path, checklist=None, run_dir=d,
+                label="task-1",
+            )
+            with open(os.path.join(d, "task-1-coverage-retry.md")) as f:
+                retry_packet = f.read()
+        self.assertTrue(retried)
+        self.assertEqual(verdict.kind, "pass")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("f1", retry_packet)
+
+    def test_review_with_coverage_second_duplicate_is_a_contract_error(self):
+        def dispatch_call(packet_path):
+            return forge_run.parse_verdict(self._dup_msg())
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            with self.assertRaises(RuntimeError) as ctx:
+                forge_run._review_with_coverage(
+                    dispatch_call, packet_path, checklist=None, run_dir=d,
+                    label="task-1",
+                )
+        self.assertIn("still invalid after one retry", str(ctx.exception))
+        self.assertIn("f1", str(ctx.exception))
+
+
 class ReviewKindGatingTests(unittest.TestCase):
     """Coverage on discovery only (Task 6): _verdict_defects/_review_with_
     coverage validate coverage only when review_kind="discovery"; a

@@ -1,4 +1,10 @@
-# Claude Dispatch Parity (Phase 7 canon on Claude) — design
+# Claude Dispatch Parity (Phase 7 canon on Claude) — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 12b (Claude path). Brings the Phase 7 **disposition matrix + convergence** to the Claude *dispatch* path — the lone remaining cell without it (inline has it via Phase 11; the Codex runner has it via Phase 7). Reaches **full cross-harness logic parity**; ships as the **0.8.0** milestone. The approach (DECISIONS 2026-07-17, option C): extract the runner's pure decision logic into a **shared, tested `scripts/forge_dispose.py`** with a CLI, driven by the Codex runner in-process and by the Claude orchestrator via the CLI — one tested implementation of the decision, two actors carrying it out.
 

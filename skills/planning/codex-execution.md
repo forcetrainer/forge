@@ -71,7 +71,7 @@ source files or reasoning through the fix itself.
 
 **Convergence stop (replaces the old 2-iteration cap):** each attempt re-runs worker → acceptance → reviewer → classify, and the runner picks deterministically: any **halt**-disposition finding stops the run (reason `scope-decision`); a **regression** (a finding the runner previously tracked resolved reappears, or acceptance goes green→red) stops the run (reason `regression`); a **stuck** fix finding carried across two consecutive attempts stops the run (reason `stuck`); no fix findings left and acceptance green → pass; otherwise rework. Net progress each round isn't required — a round may resolve one finding and surface a new one and still rework, not halt. A `MAX_ATTEMPTS_BACKSTOP` of **5** (raised from the old 2) is a seatbelt against slow non-convergence only, halting with reason `backstop`. Final review (below) runs the same loop.
 
-**Session continuity (Codex mechanics):** every `codex exec` dispatch runs with `--json` (never `--ephemeral` — it defeats persistence). The runner parses the first `{"type":"thread.started","thread_id":...}` event and persists `thread_id` into a per-role `threads` map (`task-N-worker`, `task-N-reviewer`, `final-reviewer`, `final-fixer`); the map is cleared at the start of every invocation, including a resume, and never read back from a prior `run.json`, so a stale thread id can never leak across runs. `~/.codex/sessions` is never inspected and `--last` is never used (wrong-session hazard). Resume form: `codex exec resume --json --output-last-message <path> -m <model> -c 'model_reasoning_effort="<effort>"' <thread_id>` — tier pinning and last-message verdict capture are preserved on resume. **The prompt is never an argv element, cold or resumed:** it is written to the child's stdin, which `codex exec` reads whenever no PROMPT argument is given. argv is bounded by `ARG_MAX` (1 MiB on darwin, shared with the environment block) — far below the model's usable context — so a large brief or review packet passed as an argument fails the *spawn* with `E2BIG`. A PROMPT argument must not be passed alongside piped stdin: `codex exec` then appends stdin as a separate `<stdin>` block, duplicating the whole packet. Workers and reviewers are cold on lap 1; on rework laps the worker resumes with the findings-only prompt as its brief, and the task/final reviewer resumes **only for verification** — discovery review (a task's first review, and the final review's first pass) stays **cold on both harnesses**, deliberately: independence is the entire justification for a separate reviewer (DECISIONS 2026-07-16, 2026-07-17), and this is a qualification of the fresh-context rule, not an exception to it. A failed resume (missing thread, non-zero exit before any event) falls back to a cold spawn with the full packet, recorded as `resume_fallback` on the task's receipt — degraded, never fatal. Resume is scoped to **one runner invocation**: a halted run's re-invocation always spawns cold, since a human may have hand-edited code in between and the persisted session's context would then be stale and misleading.
+**Session continuity (Codex mechanics):** every `codex exec` dispatch runs with `--json` (never `--ephemeral` — it defeats persistence). The runner parses the first `{"type":"thread.started","thread_id":...}` event and persists `thread_id` into a per-role `threads` map (`task-N-worker`, `task-N-reviewer`, `final-reviewer`, `final-fixer`); the map is cleared at the start of every invocation, including a resume, and never read back from a prior `run.json`, so a stale thread id can never leak across runs. `~/.codex/sessions` is never inspected and `--last` is never used (wrong-session hazard). Resume form: `codex exec resume --json --output-last-message <path> -m <model> -c 'model_reasoning_effort="<effort>"' <thread_id>` — tier pinning and last-message verdict capture are preserved on resume. **The prompt is never an argv element, cold or resumed:** it is written to the child's stdin, which `codex exec` reads whenever no PROMPT argument is given. argv is bounded by `ARG_MAX` (1 MiB on darwin, shared with the environment block) — far below the model's usable context — so a large brief or review packet passed as an argument fails the *spawn* with `E2BIG`. A PROMPT argument must not be passed alongside piped stdin: `codex exec` then appends stdin as a separate `<stdin>` block, duplicating the whole packet. Workers and reviewers are cold on lap 1; on rework laps the worker resumes with the findings-only prompt as its brief, and the task/final reviewer resumes **only for verification** — discovery review (a task's first review, and the final review's first pass) stays **cold on both harnesses**, deliberately: independence is the entire justification for a separate reviewer (constraint: discovery-review-is-cold), and this is a qualification of the fresh-context rule, not an exception to it. A failed resume (missing thread, non-zero exit before any event) falls back to a cold spawn with the full packet, recorded as `resume_fallback` on the task's receipt — degraded, never fatal. Resume is scoped to **one runner invocation**: a halted run's re-invocation always spawns cold, since a human may have hand-edited code in between and the persisted session's context would then be stale and misleading.
 
 **Coverage checklist:** before each review dispatch, the runner generates the checklist via `scripts/forge_checklist.py` (a task checklist for a task review, a final checklist for the final review) and folds it into the review packet; the reviewer's verdict must carry a `coverage` array satisfying it (Reviewer verdict contract, planning skill `SKILL.md`). Verification laps get the **reduced** checklist — only items referenced by the outstanding findings' `contract_ref` — not the full one. An empty checklist is a runner-level **SKIP**, not an error: the review dispatches without a coverage requirement and the receipt records `coverage_skipped`; `forge_checklist.py` invoked directly still raises on an empty checklist, since the tolerance belongs to the runner, not the generator. `forge_dispose.py` validates the coverage array (missing/unknown ids, an unbacked `violated` id, empty evidence) alongside the verdict parse; an invalid array gets **one retry** naming the specific defect, which does not advance the attempt counter or convergence state, then a contract error on a second invalid verdict.
 
@@ -150,9 +150,10 @@ field apply.
 **Terminal doc-sync stage:** once final review passes, the runner dispatches
 one more `codex exec` call that reconciles **existing** documentation to the
 shipped whole-plan diff — stale references, changed signatures/behavior, spec
-changelog entries, ROADMAP status. It never authors new docs (that would be
-the gold-plating the disposition matrix already forbids) and never touches
-code. Landed edits commit as `docs: sync`; no drift found → no commit. A
+changelog entries. It never authors new docs (that would be the gold-plating
+the disposition matrix already forbids), never touches code, and never
+reconciles issue status — closing an issue is planning's job, not doc-sync's.
+Landed edits commit as `docs: sync`; no drift found → no commit. A
 doc/contract contradiction it can't mechanically reconcile halts the run for
 a human decision, named in `run.json`'s `doc_sync.contradiction`.
 
@@ -168,11 +169,94 @@ review's defer-disposition findings under `deferrals`, plus `autofix_mode`
 and the terminal `doc_sync` record; `--status` surfaces the deferrals
 count/list and the halt-reason class alongside the existing per-task summary.
 
-**DEFERRALS write-back:** the runner never writes `docs/forge/DEFERRALS.md`
-itself — deferrals stay in `run.json` through the run. At clean completion,
-the orchestrator reads the aggregated `deferrals` list from `run.json` (or
-`--status`'s summary) and appends them to `docs/forge/DEFERRALS.md` as one
-reviewed batch, in the project-memory format (see the project-memory skill).
+**Stage-and-emit contract:** the runner never files a deferral itself — it
+has no `gh` invocation anywhere and writes no durable record beyond
+`run.json`'s `deferrals` list, aggregated through the run as findings are
+classified. Filing is a close-out step: a **still-running** run cannot file (nothing
+should write into `run.json` while the runner itself is still writing it),
+but a **halted** run is terminal too and its staged deferrals can be filed
+just the same — a halt doesn't discard the findings a run already
+collected. On a **terminal** run — any status `forge_status.is_terminal`
+accepts, i.e. anything but a run still in progress — `forge-run.py --status`
+stages and emits: for each staged deferral it prints the finding id, its
+full untruncated summary, and — unless the entry already carries a recorded
+`issue` (meaning `forge_memory.py defer --run ... --finding-id ...` already
+filed it) — a **fill-in-the-blanks** command template, not a ready-to-run
+command:
+
+```
+forge_memory.py defer --title <title> --why <why> --by agent \
+  --from <plan path[, Task N]> --run <run.json> --finding-id <id> [--occurrence N]
+```
+
+`<title>` and `<why>` are emitted literally, as visible placeholders; this
+module never fabricates them — a reviewer summary runs 100–200 chars against
+the deferral schema's 80-char title budget, and budget overrun is an error,
+not a truncation, so authoring within budget takes judgment the runner
+doesn't have. **The command as emitted does not run**: `<title>` and `<why>`
+are not values. A human or an agent replaces those two placeholders with
+authored text and then runs it; every other flag is already filled in with a
+real value and must be left alone. Running it invokes `forge_memory.py
+defer`, which files the issue and records the resulting issue number back
+into that finding's `run.json` entry (via `--run`/`--finding-id`), so a
+repeated close-out never double-files.
+
+**Staged deferrals survive a resume.** Like `seeded_findings` and unlike
+`threads`, `run.json`'s `deferrals` list **is read back** at the start of
+every invocation (`_read_deferrals`) and only ever appended to. A resume
+skips past every already-passed task before its findings are aggregated, so
+an accumulator that started empty would have the terminal write replace the
+list with just this invocation's entries — erasing earlier staged deferrals
+and the `issue` numbers already filed against them, which would re-emit a
+filed deferral as unfiled and file it twice. That read-back is the ONLY
+thing the dedupe covers: an entry is skipped when the PRIOR invocation
+already staged one with the same key — `(task_number, stage, id)`, so
+task 1's `F1` and task 2's `F1` are two different deferrals and both are
+kept. Within a single invocation staging is lossless: every `defer`
+finding a verdict raised is appended, none collapsed. This is also what
+makes `--occurrence` sound: positions are append-only, so an ordinal names
+the same entry on every re-run.
+
+**Duplicate finding ids are a malformed verdict.** `validate_finding_ids`
+(`forge_dispose.py`) rejects a verdict naming two findings with one id, on
+every review kind and with or without a checklist, through the same
+retry-once-then-contract-error path as coverage and location defects. The
+id is the runner's only handle on a finding — `carried_ids`/`resolved_ids`
+convergence tracking, `convergence: "resolved"` matching, and the staged
+deferral `defer --finding-id` selects — so a collision inside one verdict
+makes all of them ambiguous. Ids stay deliberately un-namespaced ACROSS a
+run; only within one verdict must they be unique.
+
+`--from` is emitted filled in, carrying the run's own provenance: the plan
+path, plus the stage that produced the finding — `, Task N` for a per-task
+finding, and `, final review` for a final-review one, which belongs to no
+single task and is never given an invented task number. The runner stamps
+that stage onto the entry at staging time (`stage_deferrals`), because a
+reviewer finding dict carries no task of its own and nothing downstream can
+recover which task produced it. A bare
+`defer` defaults `from` to `user` — the value reserved for a deferral a
+human asked for directly, which deliberately skips this review gate — so a
+runner-staged deferral must never be filed under it. `defer --run` derives
+the same provenance itself when `--from` is omitted, through the one
+function that renders it here (`forge_status.deferral_provenance`), so what
+the template advertises and what a filing records cannot drift apart.
+
+`--occurrence N` appears only when two or more staged deferrals share one
+finding id. Reviewer finding ids are authored per review and are not
+namespaced across a run, so `F1` can legitimately name two entries; the
+ordinal says which one a command means, so both can be filed and neither is
+attributed to the other's finding. Filing an ambiguous id without it is
+refused, loudly and by name — never resolved by guessing.
+
+`--by agent` is fixed in the template, not derived: everything `--status`
+emits is a finding a reviewer raised during the run, so the issue it becomes
+is one an agent noticed. `--by` is required on every `defer` and is never
+defaulted. The **kind** label (`feature`/`defect`/`debt`/`risk`) is
+deliberately absent — a human applies it in the GitHub UI after the issue
+exists; the runner has no flag for it and never guesses one.
+An autonomous Codex run that reaches a terminal state ends with its
+deferrals **staged, not filed** — that is deliberate; an unreviewed
+auto-deferral must not become a permanent issue.
 
 **Session awareness — run in the foreground:** the runner is run in the foreground, not backgrounded. Foreground is what makes a halt visible: the orchestrator is blocked on the command, so the instant the runner exits non-zero (escalation exit 2, contract error exit 1) control returns to the orchestrator, which reads the receipt/stderr and **relays the halt to the human in the conversation** — "task N escalated: <findings>, needs your decision." A halt that hands control straight back to a waiting orchestrator can't go silent; that is the entire mechanism. No notifications, no hook, no `ps`.
 

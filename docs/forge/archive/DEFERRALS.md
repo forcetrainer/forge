@@ -1,4 +1,17 @@
-# Deferrals
+# Deferrals — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Deferred work now lives in GitHub issues, recorded through
+`scripts/forge_memory.py defer`. This file is the record of what came before,
+kept because roughly half of it turned out to be finished work that was never
+struck — which is the clearest argument for a store that has a close.
+
+Triaged 2026-09-05 (issue #44). Entries judged still live were re-authored as
+issues #48, #50, #51, #52. One was filed as a defect with its design intact
+(#49). The rest were resolved, superseded, or consciously dropped.
+
+---
 
 ## 2026-09-02 — Verification-lap delta over-includes a task's earlier new files
 **Why:** 0.10.3 made every review diff include untracked files (a task built entirely from new files reviewed as an empty diff; a finding on a new file classified pre-existing). The pre-repair snapshot is `git stash create`, which cannot record untracked files, so on a rework lap the delta (`git diff <snapshot>` + untracked new-file hunks) shows every still-uncommitted new file the task has created so far — attempt 1's included — not only the files this repair added or changed. Tracked files stay correctly scoped. Cost is packet size on multi-lap tasks with new files, never correctness: the reviewer sees more, not less.

@@ -197,10 +197,15 @@ class RenderTests(unittest.TestCase):
 class TerminalAndBannerTests(unittest.TestCase):
     def test_stale_running_is_not_terminal(self):
         # A stale running run must NOT end the watch — the cutoff can trip on a
-        # long quiet-but-healthy phase; exiting would abandon a live run.
-        self.assertFalse(forge_monitor._is_terminal({"state": "running", "stale": True}))
-        for s in ("completed", "halted", "contract-error"):
-            self.assertTrue(forge_monitor._is_terminal({"state": s, "stale": False}))
+        # long quiet-but-healthy phase; exiting would abandon a live run. The
+        # monitor no longer owns a `_is_terminal` of its own: the watch loop
+        # asks forge_status.is_terminal about the raw run.json status, the one
+        # definition of that split.
+        self.assertFalse(forge_status.is_terminal("running"))
+        for raw in ("passed", "escalated", "escalated-final-review",
+                    "escalated-doc-sync", "contract-error"):
+            self.assertTrue(forge_status.is_terminal(raw))
+        self.assertFalse(hasattr(forge_monitor, "_is_terminal"))
 
     def test_completed_without_review_omits_review_clean(self):
         with tempfile.TemporaryDirectory() as d:
@@ -257,7 +262,12 @@ class TerminalAndBannerTests(unittest.TestCase):
 
 class CapacityTests(unittest.TestCase):
     def _state(self, st, n):
-        return {"state": st, "tasks": [{"number": i} for i in range(n)]}
+        # Both keys, as read_run_state always returns: the mapped `state`
+        # and the raw run.json `status` the terminal check is asked about.
+        raw = {"running": "running", "completed": "passed",
+               "halted": "escalated", "contract-error": "contract-error"}[st]
+        return {"state": st, "status": raw,
+                "tasks": [{"number": i} for i in range(n)]}
 
     def test_shrinks_with_more_tasks(self):
         self.assertGreater(

@@ -1,4 +1,10 @@
-# Halt Precision — design
+# Halt Precision — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Cross-harness. Phase 13 made reviews exhaustive and laps cheap. This phase fixes the other half of the same complaint: **forge halts on things that are not scope decisions.** Every halt in this class arrives with an obvious fix attached, costs a human round-trip and a re-invocation, and teaches the operator to distrust halts generally — which is worse than the individual stops.
 

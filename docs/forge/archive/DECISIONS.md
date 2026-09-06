@@ -1,4 +1,31 @@
-# Decisions
+# Decisions — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Binding rules now live in `docs/forge/constraints.md`, authored through
+`scripts/forge_memory.py`. Rationale — why a choice was made — lives in PR bodies and
+spec changelogs. There is no decision log.
+
+This file is kept because a decision is not a constraint: most of what follows records
+choices made at a moment, several of them since reversed, and reading it as binding is
+exactly the conflation that retired it.
+
+Triaged 2026-09-05 (issue #45). Nine entries yielded constraints; the rest were phase
+history, already enforced by code, or preferences rather than rules.
+
+---
+
+## 2026-09-05 — Constraints replace decisions: a snapshot of what is true, not a log
+**Why:** A decision records a choice; a constraint records a rule. The session hook asserted they were the same, and 37 entries of mostly phase history were being read as binding. Constraints hold only what is currently true — a stale one is worse than a missing one, since an agent obeys it into a conflict. Rationale moves to PR bodies and spec changelogs, so there is no decision log afterward. `source` stays on the record because a constraint written in one phase and applied in another needs its originating code to be understood.
+**Where:** docs/forge/specs/2026-09-05-constraints-design.md
+
+## 2026-09-05 — Deferrals file at a reviewed close-out gate, not by the runner; reviewer contract untouched
+**Why:** A reviewer `summary` cannot become an <=80-char title without truncation, and truncation is a budget error — so a record must be *authored*, and `forge-run.py` is headless Python with no LLM at completion. Extending the reviewer verdict with title/follow-up fields was rejected: it changes a contract both harnesses share to make a reviewer guess at a record shape and at the user's priorities. Filing at a close-out review gate puts authorship where judgment already is, keeps "the runner never writes the durable record" verbatim, and matches the requirement that deferrals be reviewed because they affect the next phase. Cost: an autonomous Codex run ends with deferrals staged, not filed.
+**Where:** docs/forge/specs/2026-09-05-deferrals-as-issues-design.md
+
+## 2026-09-05 — Project memory becomes a schema-driven record engine; GitHub issues replace DEFERRALS/ROADMAP
+**Why:** Drift is prose expansion inside structurally valid entries, so agents authoring by imitation raise each entry's baseline. Fix removes the motive (CLI composes records from typed arguments; no prose template to imitate) rather than validating after the fact. Chose one shared engine over per-type scripts (duplicate validators drift) and over a declarative schema engine (YAGNI for two types). Projects stays human-run — it is account-owned and needs config plus a token scope; issues are repo-native and free.
+**Where:** docs/forge/specs/2026-09-05-project-memory-engine-design.md
 
 ## 2026-08-21 — Phase 14 (halt precision): halts must be scope decisions, not classification artifacts
 **Why:** Phase 13 fixed review *cost* (exhaustive discovery + session continuity). Executing it surfaced the other half of the same operator complaint — "the halts I get always have a solution offered, and when I approve it everything is fixed." Four independent mechanisms route non-decisions into the halt quadrant, plus one review-load defect found while exercising Phase 13's own machinery. (1) **Document defects** — a defect in the plan or spec can never be `in-diff`, because a task's diff contains code, not the document specifying it; so every such finding lands `pre-existing × contract-breaking` → halt regardless of triviality. Hit twice in one run: a tier-parsing bug that made 11 of 13 plans unparseable by the Codex runner, and a `**Spec:**` line violating documented grammar. Chosen fix is **prevention, not disposition** — a `scripts/forge_lint.py` run at run start validates the plan/spec against documented grammar and reports *every* defect at once before any dispatch, converting a mid-run scope decision into a two-second syntax error. Rejected auto-editing a plan mid-run: a document is the contract, and a worker rewriting its own contract is self-dealing. (2) **`convergence: "resolved"` parsed then ignored** — a finding labelled resolved still classified as `fix` and drove rework, so a reviewer following the Phase 7 contract literally ("resolved findings may be listed") made the runner re-repair something already repaired until the backstop. Now dropped before disposition, guarded on prior-carried-set membership so an untracked id's label is meaningless, with the unchanged regression rule still catching a false claim. A bug fix: the rule was always written this way. (3) **Silent location degradation** — `_parse_lines` accepted only `"12"`/`"12-20"`, so a reviewer naming five call sites returned `None`, fell through to `pre-existing`, and was punished for precision with a halt. Now accepts comma-separated ranges (any intersection wins), and an unparseable location on a *contract-breaking* finding is a verdict validation defect reusing Phase 13's retry, never a silent reclassification. (4) **Cross-task defects** — a finding against code *this run* wrote but outside *this task's* diff is indistinguishable from pre-existing to a diff-based check. Third provenance value `in-run` plus a new **`seed`** disposition: logged, run continues, carried into the final review's discovery packet. Integration defects belong in integration review, and a task's rework editing another task's committed work would break the linear vertical-slice history the per-task review base depends on (Phase 5, 12b). Rejected fixing in-loop for that reason; rejected keeping the halt because it stops a run over our own new code. (5) **Coverage output load** — requiring `coverage` on every verdict added output-token load to exactly the largest reviews; two reviewers died mid-verdict on whole-plan reviews during the Phase 13 run. Now discovery-only: verification's scope is prior findings plus repair delta, so a full contract sweep there is redundant and the discovery pass already carries the exhaustiveness guarantee. **The disposition matrix's four existing cells, the 5-lap backstop, and `--autofix auto|gate` are untouched** — this phase changes what *reaches* the matrix, not what the matrix does. `test_forge_convergence.py` must still pass unchanged; `test_forge_classify.py` legitimately changes, since provenance becomes three-way.

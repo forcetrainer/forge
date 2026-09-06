@@ -1,4 +1,10 @@
-# Review Continuity & Contract Coverage — design
+# Review Continuity & Contract Coverage — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Cross-harness. Two independent defects make review loops expensive without making them better: reviews are not **exhaustive** (a review returns when it has found *something*, so findings arrive one per lap), and every lap **rebuilds context from zero** (a fresh worker patches code it did not write; a fresh reviewer re-reads the full packet). Fix: a machine-checked **contract-coverage** requirement on the discovery review, and **session continuity** for the worker and for the verification reviewer.
 

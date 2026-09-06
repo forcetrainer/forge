@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import time
 
 _ATTEMPT_RE = re.compile(r"^task-(\d+)-attempt-(\d+)\.json$")
@@ -27,6 +28,20 @@ _STATE_MAP = {
     "escalated-doc-sync": "halted",
     "contract-error": "contract-error",
 }
+
+
+def is_terminal(status):
+    """True if run.json's top-level ``status`` (the same field
+    ``read_run_state`` maps through ``_STATE_MAP``) names a finished run —
+    the single public definition of that split, implemented directly
+    against ``_STATE_MAP`` so a caller outside this module (e.g.
+    forge_memory's ``defer --run``, which must refuse to write into a
+    run.json that is still in progress) never needs its own copy of this
+    vocabulary. An unrecognized status is NOT terminal, matching
+    ``_STATE_MAP.get(raw, "running")``'s existing default — a status this
+    version doesn't know about is presumed still running, the same way
+    ``read_run_state`` already treats it, rather than guessed at."""
+    return _STATE_MAP.get(status, "running") != "running"
 
 
 def _load_run_json(run_dir):
@@ -212,6 +227,13 @@ def read_run_state(run_dir, now=None):
     return {
         "run_dir": run_dir,
         "plan": run.get("plan") if run else None,
+        # Raw run.json `status` (untranslated through _STATE_MAP), kept
+        # alongside the mapped `state` so a caller that needs the exact
+        # terminal/non-terminal split (render_status gating the staged-
+        # deferrals review surface) can call `is_terminal` directly against
+        # the same field it was written for, rather than re-deriving the
+        # split from `state`.
+        "status": raw_status,
         "state": state,
         "reason": reason,
         "halt_class": halt_class,
@@ -247,6 +269,144 @@ def render_status(state):
             line += " — " + t["finding"]
         lines.append(line)
     if state.get("deferrals"):
-        summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
-        lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
+        # The terse one-liner is for a run still in progress. Once the run
+        # is terminal, the full close-out review surface (untruncated
+        # summary + a pasteable `defer` command template per unfiled entry)
+        # REPLACES it rather than adding to it — showing both would restate
+        # every summary twice, in two different truncations, which degrades
+        # the one thing this surface exists to do. `is_terminal` is the one
+        # public definition of that split, checked against the same raw
+        # `status` field it was written for (never re-derived from the
+        # mapped `state`). Task 2's `defer --run` also refuses to write into
+        # a non-terminal run.json, so a running run must never show a
+        # filing command guaranteed to be rejected.
+        if is_terminal(state.get("status")):
+            run_json_path = os.path.join(state["run_dir"], "run.json")
+            lines.append("")
+            lines.extend(render_staged_deferrals(state, run_json_path))
+        else:
+            summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
+            lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
     return "\n".join(lines)
+
+
+def deferral_provenance(plan, entry, run_json_path):
+    """The ``from`` field value for a runner-staged deferral: the plan the
+    run executed, plus the stage that produced the entry — the
+    ``"<plan>, Task N"`` shape ``skills/project-memory`` documents.
+
+    One definition, used by both sides of the seam: the template
+    ``render_staged_deferrals`` emits, and ``forge_memory.py defer``'s own
+    derivation when a ``--run`` filing omits ``--from``. The one value it
+    must never produce is ``user``, which the spec reserves for a deferral
+    a human asked for directly (no close-out gate) — so when run.json
+    records no plan, the fallback is the run.json path itself: still real
+    provenance, and still not a claim that a human initiated it. That
+    fallback is normalized to an absolute path because the two callers
+    reach it by different routes — ``render_staged_deferrals`` derives it
+    from the run dir, ``cmd_defer`` uses the path the user typed at
+    ``--run`` — and one definition that returned two different strings for
+    the same file would defeat the point of there being one.
+
+    A staged entry is the runner's finding dict (``forge_common.
+    finding_to_dict``) plus the stamp ``forge-run.py``'s ``stage_deferrals``
+    adds. A per-task entry carries ``task_number`` (a bare ``task`` is also
+    accepted). A final-review entry belongs to no single task, so it carries
+    ``stage: "final-review"`` instead and reads ``"<plan>, final review"`` —
+    named, rather than collapsing to a bare plan path indistinguishable from
+    a task entry, and never given an invented task number."""
+    source = plan or os.path.abspath(run_json_path)
+    task = entry.get("task_number")
+    if task is None:
+        task = entry.get("task")
+    if task is not None and str(task).strip() != "":
+        return "{}, Task {}".format(source, task)
+    if entry.get("stage") == "final-review":
+        return "{}, final review".format(source)
+    return str(source)
+
+
+def render_staged_deferrals(state, run_json_path):
+    """The close-out review surface for `state["deferrals"]`: one block per
+    staged deferral.
+
+    An entry already carrying an ``issue`` key (recorded by `forge_memory.py
+    defer --run ... --finding-id ...`) renders as already filed, with its
+    issue number, and emits no command — presence of the key is the whole
+    test (Task 2 pins `issue` as always a string; never check its type or
+    whether it looks numeric, since a file-store ref is an arbitrary slug,
+    not a number).
+
+    An unfiled entry renders its finding id, its FULL untruncated summary (so
+    whoever files it has the material to write from), and a `forge_memory.py
+    defer` command TEMPLATE with `--title` and `--why` left as visible
+    placeholders. This module never fabricates a title or a why: a reviewer
+    finding summary runs 100-200 chars against the deferral schema's 80-char
+    title budget, budget overrun is an error not a truncation, and this is
+    deterministic Python with no way to author prose within budget —
+    authorship happens at the review gate, by a human or an LLM holding
+    judgment this module doesn't have.
+
+    The command carries ``--from`` explicitly. ``forge_memory.py defer``
+    defaults an omitted ``from`` to ``user``, and ``from: user`` is the
+    value the spec reserves for a deferral a human asked for directly —
+    one that deliberately SKIPS this review gate. A template that omitted
+    the flag would therefore file every runner-staged deferral under the
+    one provenance it certainly does not have; ``deferral_provenance``
+    supplies the real one from the run itself.
+
+    ``--by agent`` is fixed, not derived: everything this function renders
+    is a finding a REVIEWER raised during the run, so the issue it becomes
+    is one an agent noticed. A deferral a human asked for directly never
+    passes through here — it files immediately, with ``--by human``.
+    The KIND label (feature/defect/debt/risk) is deliberately absent from
+    the template: it is a human judgment, made after the issue exists.
+
+    ``--occurrence`` is emitted only for a finding id that more than one
+    staged entry shares. Finding ids are reviewer-authored per review and
+    never namespaced, so a run's ``deferrals`` list can hold two entries
+    with id ``F1``; the ordinal is what tells ``defer`` which of them a
+    command means, so both can be filed and neither is attributed to the
+    other's finding.
+
+    ``run_json_path``, each finding id, and the provenance value are
+    shlex-quoted before being interpolated into the emitted command, so the
+    line is safe to paste even when a path or id carries a space, quote, or
+    newline."""
+    deferrals = state.get("deferrals") or []
+    if not deferrals:
+        return []
+
+    all_ids = [e.get("id", "?") for e in deferrals]
+    seen = {}
+
+    lines = []
+    for entry in deferrals:
+        finding_id = entry.get("id", "?")
+        seen[finding_id] = seen.get(finding_id, 0) + 1
+        summary = (entry.get("summary") or "").strip()
+        lines.append("deferral {}:".format(finding_id))
+        lines.append("  {}".format(summary))
+        issue = entry.get("issue")
+        if issue is not None:
+            lines.append("  filed as issue #{}".format(issue))
+        else:
+            command = (
+                "  forge_memory.py defer --title <title> --why <why> "
+                "--by agent --from {} --run {} --finding-id {}".format(
+                    shlex.quote(
+                        deferral_provenance(
+                            state.get("plan"), entry, run_json_path,
+                        )
+                    ),
+                    shlex.quote(run_json_path),
+                    shlex.quote(finding_id),
+                )
+            )
+            if all_ids.count(finding_id) > 1:
+                command += " --occurrence {}".format(seen[finding_id])
+            lines.append(command)
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines

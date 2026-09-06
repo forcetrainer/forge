@@ -1,7 +1,13 @@
-# Phase 10 — Codex inline execution branch — Design
+# Phase 10 — Codex inline execution branch — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 **Status:** approved (2026-07-17)
-**Roadmap:** Phase 10 (Codex path). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../DECISIONS.md) (Phase 8 decomposition; inline self-review).
+**Roadmap:** Phase 10 (Codex path). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../archive/DECISIONS.md) (Phase 8 decomposition; inline self-review).
 **Constraint:** own spec per the no-mixed-implementations rule — never amend the Codex-runner spec.
 
 ## Problem
@@ -19,7 +25,7 @@ Prose/skill-only phase: **no script changes**. Inline is the session following i
 Inline = the orchestrating session executes the plan task-by-task in-session, keeping accumulated context:
 
 - **TDD per task** — test first, then implementation, per the tdd skill.
-- **Self-review before commit** — the orchestrator reviews its own work as a lightweight consistency pass. Inline does **not** dispatch a separate fresh-context reviewer: fresh-context review is a dispatch-only concern (its bias-removal value scales with design content, which is low at the simple end where inline operates), and **TDD + acceptance commands are the objective, unbiased check** ([DECISIONS 2026-07-17](../DECISIONS.md), inline self-review). Trivial-tier precedent: acceptance commands are verification enough.
+- **Self-review before commit** — the orchestrator reviews its own work as a lightweight consistency pass. Inline does **not** dispatch a separate fresh-context reviewer: fresh-context review is a dispatch-only concern (its bias-removal value scales with design content, which is low at the simple end where inline operates), and **TDD + acceptance commands are the objective, unbiased check** ([DECISIONS 2026-07-17](../archive/DECISIONS.md), inline self-review). Trivial-tier precedent: acceptance commands are verification enough.
 - **Commit per task** — a clean checkpoint after each passed task (`git add -A && git commit`), so the working tree is clean between tasks.
 - **Clean-tree expectation** — inline assumes a clean tree between tasks, established by the per-task commit.
 - **Finding-handling — mirrors Claude's current model (the flaw):** the orchestrator resolves review/self-review findings itself, including decision-grade ones (over-resolution). This is **carried deliberately** and fixed in Phase 11 (gate the self-review; surface decision-grade findings). Phase 10 does not change it.

@@ -1,4 +1,10 @@
-# Phase 1 — Pipeline & document-contract skill edits
+# Phase 1 — Pipeline & document-contract skill edits — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/pipeline.md`](../../specs/pipeline.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 1 of the 2026-07 upgrade cycle ([ideation doc](../ideas/2026-07-02-upgrade-cycle.md)). Scope: text edits to three skills + README + release. No new files except this spec; no scripts; no Codex; planning-skill Execution section untouched (phase 2).
 

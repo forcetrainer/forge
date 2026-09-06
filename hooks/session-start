@@ -31,11 +31,137 @@ done
 # No signal: emit nothing.
 [ -z "$signal" ] && exit 0
 
-context="This project uses the forge flow: brainstorm -> spec (docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, with user approval gates between stages. Before feature work, read docs/forge/DECISIONS.md (logged decisions are constraints) and check docs/forge/ROADMAP.md for the current phase, if they exist. Log new decisions and deferrals per the forge:project-memory skill."
+flow="This project uses the forge flow: brainstorm -> spec (docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, with user approval gates between stages. Open GitHub issues are the work backlog; check them for the current phase."
+constraints_file="$signal/docs/forge/constraints.md"
 
 if [ -n "$legacy" ]; then
-    context="This project uses the forge flow via the legacy docs/theforge/ (or .theforge/) signal directory: brainstorm -> spec -> plan -> TDD execution, with user approval gates between stages. Before feature work, read the DECISIONS.md in the legacy directory (logged decisions are constraints) and check its ROADMAP.md for the current phase, if they exist. Log new decisions and deferrals per the forge:project-memory skill. Migration nudge: suggest renaming once via git mv docs/theforge docs/forge (relative links inside the tree keep working; this hook accepts both names)."
+    flow="This project uses the forge flow via the legacy docs/theforge/ (or .theforge/) signal directory: brainstorm -> spec -> plan -> TDD execution, with user approval gates between stages. Open GitHub issues are the work backlog; check them for the current phase. Migration nudge: suggest renaming once via git mv docs/theforge docs/forge (relative links inside the tree keep working; this hook accepts both names)."
+    constraints_file="$signal/docs/theforge/constraints.md"
 fi
 
-printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$context"
+# Locate scripts/forge_memory.py so constraints.md can be parsed with the
+# engine's own SCHEMA-driven `parse`, never a regex over its rendered
+# prose — a regex on "**Rule:**" is pattern-matching a format's current
+# shape, and it silently emits nothing the moment render()'s label or
+# spacing changes, with no test the wiser. This hook's own path is more
+# robust than an env var: CLAUDE_PLUGIN_ROOT may be unset when the hook
+# is invoked directly (as tests do), so it is only the fallback.
+self_path="$0"
+case "$self_path" in
+    /*) ;;
+    *) self_path="$PWD/$self_path" ;;
+esac
+hook_dir="$(cd "$(dirname "$self_path")" 2>/dev/null && pwd)" || hook_dir=""
+scripts_dir=""
+if [ -n "$hook_dir" ] && [ -f "$(dirname "$hook_dir")/scripts/forge_memory.py" ]; then
+    scripts_dir="$(dirname "$hook_dir")/scripts"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/scripts/forge_memory.py" ]; then
+    scripts_dir="$CLAUDE_PLUGIN_ROOT/scripts"
+fi
+
+# Constraints, if any, are read and embedded here -- never a raw printf
+# interpolation. A rule can legitimately contain a double quote or a
+# backslash, so building the JSON string by hand (as this hook used to)
+# would produce an invalid payload the moment one did; python3's
+# json.dumps is what actually guarantees valid JSON. This python3 spawn
+# only happens after the signal check above has already passed, so a
+# non-forge repo -- the overwhelming majority of invocations -- never
+# pays for it. Any failure inside the script (missing constraints file,
+# unreadable, not the expected record shape, forge_memory not importable)
+# degrades to the flow context alone; this hook must never fail a session
+# over a malformed constraints.md.
+output="$(python3 - "$flow" "$constraints_file" "$scripts_dir" <<'PYEOF'
+import json
+import os
+import sys
+
+flow, constraints_file, scripts_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+
+context = flow
+try:
+    if scripts_dir:
+        sys.path.insert(0, scripts_dir)
+    import forge_memory as fm
+
+    with open(constraints_file, encoding="utf-8") as f:
+        text = f.read()
+
+    records = fm.parse(text, "constraint")
+    if records:
+        lines = ["Constraints for this session (must not be broken):"]
+        for record in records:
+            cid = record.fields.get("id", "")
+            rule = record.fields.get("rule", "")
+            scope = record.fields.get("scope", "")
+            because = record.fields.get("because", "")
+            # `scope` is required and never empty; a non-"repo" scope is
+            # shown alongside its rule so an agent working outside that
+            # scope doesn't over-apply it, and one working inside it
+            # doesn't dismiss it as someone else's problem. "repo" is the
+            # common case and adds nothing a bare rule doesn't already
+            # say, so it is left off to keep this (session-every-time)
+            # context short.
+            head = cid
+            if scope and scope != "repo":
+                head = "{} [{}]".format(cid, scope)
+            # `id` and `because` are emitted for the reasons the fields
+            # exist. `because` is what stops an agent that does not
+            # understand a rule from routing around it while technically
+            # complying -- dropping it at the one moment the agent reads
+            # the rule leaves only the letter of it. `id` is what lets a
+            # "(constraint: parsers-fail-loud)" citation in the code
+            # resolve back to a rule. `source` is deliberately left out:
+            # it is a follow-it-when-you-need-it pointer, not read-time
+            # material worth carrying in every single session. The soft
+            # cap is what keeps this affordable -- at the cap this block is
+            # a few KB, which is the budget smallness buys.
+            lines.append("- {}: {} — because: {}".format(head, rule, because))
+        context = flow + "\n\n" + "\n".join(lines)
+except Exception:
+    pass
+
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": context,
+    }
+}))
+PYEOF
+)" || output=""
+
+# Never trust python3's exit code alone: a wrapped or shimmed python3 on
+# PATH could exit 0 while writing something other than JSON to stdout,
+# and printing that verbatim would hand the harness a corrupted
+# SessionStart payload. Confirm parseability against a literal sentinel
+# that only a real JSON parse can produce -- not just "python3 ran and
+# exited 0" -- so even a stub that unconditionally echoes fixed
+# non-JSON text and exits 0 is caught: it cannot also produce this
+# sentinel by accident.
+check="$(printf '%s' "$output" | python3 -c '
+import json
+import sys
+
+try:
+    json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+print("FORGE_SESSION_START_VALID_JSON")
+' 2>/dev/null)" || check=""
+
+if [ "$check" != "FORGE_SESSION_START_VALID_JSON" ]; then
+    output=""
+fi
+
+# python3 itself may be absent, broken, or producing unparseable output;
+# that must not take the session down either. Fall back to a plain
+# printf using $flow verbatim -- $flow is one of the two literal strings
+# above, never assembled from constraint text, so it is known ahead of
+# time to contain no double quote, backslash, or control character and
+# is safe to inline without escaping. This path invokes no python3 at
+# all, so it survives even a fully broken interpreter on PATH.
+if [ -z "$output" ]; then
+    output="$(printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$flow")"
+fi
+
+printf '%s\n' "$output"
 exit 0
