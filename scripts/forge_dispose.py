@@ -364,7 +364,14 @@ def derive_disposition(finding):
     run continues, and it is carried into the final review's discovery packet
     rather than halting this task over another task's work);
     pre-existing×contract-breaking → ``halt`` (a real scope decision); every
-    improvement → ``defer``."""
+    improvement → ``defer``. ``unverifiable`` collapses the provenance axis
+    deliberately — what the reviewer cannot settle from this diff is not a
+    question of where the code sits, so it routes to ``seed`` at every
+    provenance (including a null ``contract_ref``, which never applies to
+    this axis in the first place) rather than being downgraded like an
+    ungrounded contract-breaking claim."""
+    if finding.impact == "unverifiable":
+        return "seed"
     contract_breaking = (
         finding.impact == "contract-breaking" and finding.contract_ref is not None
     )

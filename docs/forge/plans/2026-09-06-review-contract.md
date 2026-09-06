@@ -62,7 +62,7 @@
 **Depends on:** Task 1, Task 8, Task 10.
 
 ### Task 3: Unverifiable impact dispositions to seed
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (accept `unverifiable` on finding `impact` and coverage `status`; `derive_disposition` routes it; `validate_coverage` exempts it from the backing-finding rule)

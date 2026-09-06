@@ -12,6 +12,11 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from _forge_support import *  # noqa: F401,F403 — sets up sys.path + loads forge_run
+import forge_common  # noqa: E402
+import forge_dispose  # noqa: E402 — derive_disposition, validate_coverage unit tests
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "forge_dispose.py")
 
@@ -369,6 +374,80 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]})
         result = self.run_dispose(self._base_args(v))
         self.assertNotEqual(result.returncode, 0)
+
+
+class UnverifiableDispositionTests(unittest.TestCase):
+    """Unit tests against derive_disposition/validate_coverage directly (Task
+    3: `unverifiable` seeds regardless of provenance, and asymmetrically
+    exempts a coverage entry from the backing-finding rule that still binds
+    `violated`)."""
+
+    def _finding(self, provenance, contract_ref="AC-1"):
+        return forge_common.Finding(
+            id="f1", summary="cannot tell from this diff alone", file="src.txt",
+            lines="2-2", provenance=provenance, impact="unverifiable",
+            contract_ref=contract_ref,
+        )
+
+    def test_unverifiable_seeds_in_diff(self):
+        self.assertEqual(
+            forge_dispose.derive_disposition(self._finding("in-diff")), "seed"
+        )
+
+    def test_unverifiable_seeds_in_run(self):
+        self.assertEqual(
+            forge_dispose.derive_disposition(self._finding("in-run")), "seed"
+        )
+
+    def test_unverifiable_seeds_pre_existing(self):
+        self.assertEqual(
+            forge_dispose.derive_disposition(self._finding("pre-existing")), "seed"
+        )
+
+    def test_unverifiable_seeds_with_null_contract_ref(self):
+        finding = self._finding("pre-existing", contract_ref=None)
+        self.assertEqual(forge_dispose.derive_disposition(finding), "seed")
+
+    def test_coverage_unverifiable_with_evidence_is_valid_no_backing_finding(self):
+        checklist = [{"id": "t3.a1"}]
+        verdict = forge_common.Verdict(
+            kind="findings",
+            findings=[],
+            coverage=[forge_common.CoverageEntry(
+                id="t3.a1", status="unverifiable",
+                evidence="the proof this needs lives outside this task's diff",
+            )],
+        )
+        defects = forge_dispose.validate_coverage(verdict, checklist)
+        self.assertEqual(defects, [])
+
+    def test_coverage_unverifiable_empty_evidence_is_defect(self):
+        checklist = [{"id": "t3.a1"}]
+        verdict = forge_common.Verdict(
+            kind="findings",
+            findings=[],
+            coverage=[forge_common.CoverageEntry(
+                id="t3.a1", status="unverifiable", evidence="   ",
+            )],
+        )
+        defects = forge_dispose.validate_coverage(verdict, checklist)
+        self.assertTrue(
+            any("empty evidence" in d and "t3.a1" in d for d in defects), defects
+        )
+
+    def test_coverage_violated_with_no_backing_finding_remains_defect(self):
+        checklist = [{"id": "t3.a1"}]
+        verdict = forge_common.Verdict(
+            kind="findings",
+            findings=[],
+            coverage=[forge_common.CoverageEntry(
+                id="t3.a1", status="violated", evidence="looks broken",
+            )],
+        )
+        defects = forge_dispose.validate_coverage(verdict, checklist)
+        self.assertTrue(
+            any("violated" in d and "t3.a1" in d for d in defects), defects
+        )
 
 
 if __name__ == "__main__":
