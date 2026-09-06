@@ -783,7 +783,16 @@ def main(argv=None):
         help="path to the checklist JSON (forge_checklist.py --format json "
              "output); when given, decision.json gains coverage_valid/"
              "coverage_defects. Omitted: decision.json is unchanged from "
-             "today's output.",
+             "today's output. Coverage validation only — never drives "
+             "contract_ref membership; see --citable.",
+    )
+    parser.add_argument(
+        "--citable", default=None,
+        help="path to a JSON array of citable ref id strings (forge_"
+             "checklist.citable_refs output — coverage items plus declared "
+             "spec:<slug> sections); when given, a finding's non-null "
+             "contract_ref outside this set is a defect. Omitted: contract_ref "
+             "membership is not enforced.",
     )
     args = parser.parse_args(argv)
 
@@ -814,6 +823,34 @@ def main(argv=None):
         state = ConvergenceState()
 
     acceptance_ok = args.acceptance_ok == "true"
+
+    checklist = None
+    if args.checklist:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                checklist = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+    citable = None
+    if args.citable:
+        try:
+            with open(args.citable, "r", encoding="utf-8") as f:
+                citable = set(json.load(f))
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read citable file {}: {}".format(
+                    args.citable, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
 
     verdict = None
     try:
@@ -846,6 +883,24 @@ def main(argv=None):
                         "reviewer verdict has invalid finding location(s): "
                         + "; ".join(location_defects)
                     )
+                # Membership enforcement (Task 4) reaches this CLI too, gated
+                # on --citable — the wider coverage-items-plus-declared-
+                # spec-sections union forge_checklist.citable_refs builds,
+                # not --checklist (coverage items only, coverage validation
+                # only: Contract checklist spec — covering and citing are
+                # different acts). Checked before classify_findings, same
+                # precedence as validate_locations above, so a
+                # contract-breaking claim citing a bogus ref never reaches a
+                # decision.
+                if citable:
+                    contract_ref_defects = validate_contract_refs(
+                        verdict, citable
+                    )
+                    if contract_ref_defects:
+                        raise RuntimeError(
+                            "reviewer verdict has invalid contract_ref(s): "
+                            + "; ".join(contract_ref_defects)
+                        )
                 diff_text = _run_git_diff(args.base)
                 verdict = classify_findings(verdict, diff_text)
             findings = verdict.findings
@@ -859,18 +914,7 @@ def main(argv=None):
     advance_state(state, findings, acceptance_ok)
 
     decision = _build_decision(action, halt_reason, findings, state)
-    if args.checklist and verdict is not None:
-        try:
-            with open(args.checklist, "r", encoding="utf-8") as f:
-                checklist = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            print(
-                "error: cannot read checklist file {}: {}".format(
-                    args.checklist, e
-                ),
-                file=sys.stderr,
-            )
-            return 1
+    if checklist is not None and verdict is not None:
         defects = validate_coverage(verdict, checklist)
         decision["coverage_valid"] = not defects
         decision["coverage_defects"] = defects

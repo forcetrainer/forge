@@ -273,7 +273,7 @@
 **Depends on:** nothing.
 
 ### Task 11: Membership enforcement reaches the Claude dispatch path
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (CLI `main()` validates contract refs before classifying)

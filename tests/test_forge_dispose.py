@@ -70,7 +70,8 @@ class ForgeDisposeCLITests(unittest.TestCase):
         )
 
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
-                    autofix="auto", state_path=None):
+                    autofix="auto", state_path=None, checklist_path=None,
+                    citable_path=None):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
@@ -80,6 +81,10 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]
         if state_path:
             args += ["--state", state_path]
+        if checklist_path:
+            args += ["--checklist", checklist_path]
+        if citable_path:
+            args += ["--citable", citable_path]
         return args
 
     # --- quadrant / decision.json shape -------------------------------------
@@ -448,6 +453,157 @@ class UnverifiableDispositionTests(unittest.TestCase):
         self.assertTrue(
             any("violated" in d and "t3.a1" in d for d in defects), defects
         )
+
+
+class ForgeDisposeCLIContractRefMembershipTests(unittest.TestCase):
+    """Task 11: the Claude dispatch path's own CLI (this module's ``main``)
+    enforces contract_ref membership before classifying, gated on a
+    dedicated ``--citable`` flag — a JSON array of citable ref id strings,
+    mirroring forge_checklist.citable_refs' output — mirroring forge-run.py's
+    ``_verdict_defects`` wiring. Task 4 wired ``validate_contract_refs`` into
+    the Codex runner only, so a bogus contract_ref still bought
+    contract-breaking on this path.
+
+    ``--citable`` is deliberately a separate flag from ``--checklist``:
+    ``--checklist`` carries coverage items only and drives coverage
+    validation alone (Contract checklist spec — covering and citing are
+    different acts); the citable set is wider (coverage items plus declared
+    ``spec:<slug>`` sections), so one flag cannot carry both without either
+    rejecting a legitimate spec-section citation or silently narrowing
+    membership to whatever a task's checklist happens to contain."""
+
+    setUp = ForgeDisposeCLITests.setUp
+    _git = ForgeDisposeCLITests._git
+    _git_output = ForgeDisposeCLITests._git_output
+    _write_json = ForgeDisposeCLITests._write_json
+    run_dispose = ForgeDisposeCLITests.run_dispose
+    _base_args = ForgeDisposeCLITests._base_args
+
+    def test_citable_bad_contract_ref_exits_nonzero_naming_finding_and_ref(self):
+        citable = self._write_json("citable.json", ["t3.a1", "spec:Foo"])
+        v = self._write_json("v-bad-ref.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-NOPE"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("f1", result.stderr)
+        self.assertIn("AC-NOPE", result.stderr)
+
+    def test_citable_bad_contract_ref_produces_no_decision_output(self):
+        citable = self._write_json("citable.json", ["t3.a1", "spec:Foo"])
+        v = self._write_json("v-bad-ref2.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-NOPE"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertEqual(result.stdout.strip(), "")
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(result.stdout)
+
+    def test_citable_ref_naming_coverage_item_id_unaffected(self):
+        citable = self._write_json("citable.json", ["t3.a1", "spec:Foo"])
+        v = self._write_json("v-good-ref.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "t3.a1"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+
+    def test_citable_ref_naming_declared_spec_section_unaffected(self):
+        """A finding citing a declared spec:<slug> section — outside the
+        coverage-item set but inside the wider citable set — is exactly the
+        legitimate case a --checklist-driven check would wrongly reject
+        (the halt behind this task: a real spec:<slug> ref bounced as
+        non-citable because --checklist only carries coverage items)."""
+        citable = self._write_json("citable.json", ["t3.a1", "spec:Foo"])
+        v = self._write_json("v-spec-ref.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "contradicts the declared spec section",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "spec:Foo"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+
+    def test_citable_null_contract_ref_unaffected(self):
+        citable = self._write_json("citable.json", ["t3.a1"])
+        v = self._write_json("v-null-ref.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "extract a helper",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "improvement"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "pass")
+        self.assertEqual([f["id"] for f in decision["findings"]["defer"]], ["f1"])
+
+    def test_checklist_without_citable_does_not_enforce_membership(self):
+        """--checklist alone (no --citable) must not enforce membership, even
+        for a ref absent from the checklist — --checklist drives coverage
+        validation only."""
+        checklist = self._write_json("checklist.json", [{"id": "AC-1"}])
+        v = self._write_json("v-checklist-only.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-NOPE"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, checklist_path=checklist)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+
+    def test_without_either_flag_bad_contract_ref_is_unaffected(self):
+        v = self._write_json("v-no-flags.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-NOPE"},
+        ]})
+        result = self.run_dispose(self._base_args(v))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+
+    def test_validate_locations_ordering_preserved_with_citable(self):
+        """An unlocated contract-breaking finding is still a location defect
+        raised before any contract_ref check — even when --citable is
+        supplied and the ref itself is fine — preserving validate_locations'
+        existing precedence ahead of classify_findings."""
+        citable = self._write_json("citable.json", ["t3.a1"])
+        v = self._write_json("v-bad-location.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "null check missing",
+             "location": {"file": "src.txt", "lines": "not-a-range"},
+             "impact": "contract-breaking", "contract_ref": "t3.a1"},
+        ]})
+        result = self.run_dispose(
+            self._base_args(v, citable_path=citable)
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("location", result.stderr)
+        self.assertNotIn("citable ref", result.stderr)
 
 
 if __name__ == "__main__":
