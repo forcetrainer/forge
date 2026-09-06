@@ -31,11 +31,11 @@ done
 # No signal: emit nothing.
 [ -z "$signal" ] && exit 0
 
-flow="This project uses the forge flow: brainstorm -> spec (docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, with user approval gates between stages. Check docs/forge/ROADMAP.md for the current phase, if it exists."
+flow="This project uses the forge flow: brainstorm -> spec (docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, with user approval gates between stages. Open GitHub issues are the work backlog; check them for the current phase."
 constraints_file="$signal/docs/forge/constraints.md"
 
 if [ -n "$legacy" ]; then
-    flow="This project uses the forge flow via the legacy docs/theforge/ (or .theforge/) signal directory: brainstorm -> spec -> plan -> TDD execution, with user approval gates between stages. Check its ROADMAP.md for the current phase, if it exists. Migration nudge: suggest renaming once via git mv docs/theforge docs/forge (relative links inside the tree keep working; this hook accepts both names)."
+    flow="This project uses the forge flow via the legacy docs/theforge/ (or .theforge/) signal directory: brainstorm -> spec -> plan -> TDD execution, with user approval gates between stages. Open GitHub issues are the work backlog; check them for the current phase. Migration nudge: suggest renaming once via git mv docs/theforge docs/forge (relative links inside the tree keep working; this hook accepts both names)."
     constraints_file="$signal/docs/theforge/constraints.md"
 fi
 

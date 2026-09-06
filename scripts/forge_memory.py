@@ -816,7 +816,7 @@ def cmd_defer(args, repo_root):
     return 0
 
 
-def cmd_resolve_deferral(args, repo_root):
+def cmd_resolve(args, repo_root):
     try:
         store = fms.select_store(repo_root, "deferral")
         store.retire(args.ref, reason=args.reason)
@@ -1276,10 +1276,10 @@ def build_parser():
     )
     p.set_defaults(func=cmd_defer)
 
-    p = sub.add_parser("resolve-deferral")
+    p = sub.add_parser("resolve")
     p.add_argument("--ref", required=True)
     p.add_argument("--reason", required=True)
-    p.set_defaults(func=cmd_resolve_deferral)
+    p.set_defaults(func=cmd_resolve)
 
     p = sub.add_parser("add-program")
     p.add_argument("--name", required=True)

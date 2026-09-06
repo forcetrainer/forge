@@ -35,7 +35,7 @@ what it is for — the CLI files and closes, it never lists issues back:
 forge_memory.py defer --title "Skipped retry backoff on the sync client" \
   --why "Single-user, local network; failures are rare and manual retry is fine." \
   --from "docs/forge/plans/2026-06-10-sync.md, Task 3" --by agent
-forge_memory.py resolve-deferral --ref 123 --reason "fixed in Phase 4"
+forge_memory.py resolve --ref 123 --reason "fixed in Phase 4"
 ```
 
 `title` (≤80 chars), `why` (≤300 chars), and `from` (plan path plus the

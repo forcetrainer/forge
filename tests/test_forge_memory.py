@@ -536,7 +536,7 @@ class SubcommandSurfaceTests(CLITestCase):
         )
         self.assertEqual(set(sub_action.choices), {
             "add-constraint", "update-constraint", "retire-constraint",
-            "list-constraints", "defer", "resolve-deferral", "fmt",
+            "list-constraints", "defer", "resolve", "fmt",
             "install-guards", "add-program", "add-phase", "audit-issues",
         })
 
@@ -564,7 +564,7 @@ class SubcommandSurfaceTests(CLITestCase):
         # deliberately.
         "defer": {"title", "why", "by", "from_", "run", "finding_id",
                   "occurrence"},
-        "resolve-deferral": {"ref", "reason"},
+        "resolve": {"ref", "reason"},
         "fmt": {"check", "write", "paths"},
         "install-guards": {"pre_commit", "ci"},
         # No --by on either: origin is by:human unconditionally for both
@@ -993,7 +993,7 @@ class DeferCLITests(CLITestCase):
             "defer", "--title", "improve-x", "--why", "polish", "--by", "human",
         ])
         code, out, err = _run_cli([
-            "resolve-deferral", "--ref", "improve-x", "--reason", "done",
+            "resolve", "--ref", "improve-x", "--reason", "done",
         ])
         self.assertEqual(code, 0, err)
         path = os.path.join(self.tmp, "docs", "forge", "deferrals.md")
@@ -2865,7 +2865,7 @@ class ScriptEntrypointIdentityTests(unittest.TestCase):
         )
 
         proc = self._run_script([
-            "resolve-deferral", "--ref", "anything", "--reason", "done",
+            "resolve", "--ref", "anything", "--reason", "done",
         ])
 
         self.assertNotEqual(proc.returncode, 0)
@@ -3129,7 +3129,7 @@ class MalformedConfigCLITests(CLITestCase):
         ])
 
     def test_resolve_deferral(self):
-        self._assert_named(["resolve-deferral", "--ref", "7", "--reason", "done"])
+        self._assert_named(["resolve", "--ref", "7", "--reason", "done"])
 
     def test_fmt_still_names_the_file(self):
         code, out, err = _run_cli(["fmt", "--check"])
@@ -3144,7 +3144,7 @@ class MalformedConfigCLITests(CLITestCase):
         commands = [
             fm.cmd_add_constraint, fm.cmd_retire_constraint,
             fm.cmd_list_constraints, fm.cmd_defer,
-            fm.cmd_resolve_deferral,
+            fm.cmd_resolve,
         ]
         for func in commands:
             with self.subTest(command=func.__name__):
@@ -3419,7 +3419,7 @@ class SessionStartHookTests(unittest.TestCase):
         "with user approval gates between stages."
     )
     ROADMAP_SENTENCE = (
-        "Check docs/forge/ROADMAP.md for the current phase, if it exists."
+        "Open GitHub issues are the work backlog; check them for the current phase."
     )
     LEGACY_FLOW_SENTENCE = (
         "This project uses the forge flow via the legacy docs/theforge/ "
@@ -3427,7 +3427,7 @@ class SessionStartHookTests(unittest.TestCase):
         "TDD execution, with user approval gates between stages."
     )
     LEGACY_ROADMAP_SENTENCE = (
-        "Check its ROADMAP.md for the current phase, if it exists."
+        "Open GitHub issues are the work backlog; check them for the current phase."
     )
 
     def setUp(self):
@@ -3480,6 +3480,7 @@ class SessionStartHookTests(unittest.TestCase):
         context = self._get_context(out)
         self.assertIn(self.FLOW_SENTENCE, context)
         self.assertIn(self.ROADMAP_SENTENCE, context)
+        self.assertNotIn("ROADMAP", context)
 
     def test_legacy_flow_and_roadmap_sentences_survive_unchanged(self):
         self._mkforge(legacy=True)
@@ -3488,6 +3489,7 @@ class SessionStartHookTests(unittest.TestCase):
         context = self._get_context(out)
         self.assertIn(self.LEGACY_FLOW_SENTENCE, context)
         self.assertIn(self.LEGACY_ROADMAP_SENTENCE, context)
+        self.assertNotIn("ROADMAP", context)
 
     def test_constraints_present_includes_each_rule(self):
         forge_dir = self._mkforge()

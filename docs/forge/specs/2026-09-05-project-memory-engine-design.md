@@ -80,7 +80,7 @@ forge_memory.py list-constraints [--scope <glob>] [--json]
 
 forge_memory.py defer --title <text> --why <text> --follow-up <val> [--from <ref>]
 forge_memory.py list-deferrals [--json]
-forge_memory.py resolve-deferral --ref <issue-number|slug> --reason <text>
+forge_memory.py resolve --ref <issue-number|slug> --reason <text>
 
 forge_memory.py fmt [--check | --write] [PATH ...]
 
@@ -199,3 +199,4 @@ the rest of `docs/forge/specs/`.
 2026-09-05: added `install-guards` to the CLI surface — layers 2 and 3 required an
 explicit installation path that the original CLI list omitted (planning, issue #43).
 2026-09-05: constraint record amended by Phase 3 — `added` removed (it supported retirement deliberation, and a constraint that stops being true is deleted rather than annotated, so there is none); `source` is user-supplied and required via `--source`, replacing the machine-set `--issue`/`--spec`, which could not express a PR and let a required field be satisfied by the placeholder `user`; `scope` and `source` gained budgets; `update-constraint` added (issue #45).
+2026-09-05: renamed `resolve-deferral` subcommand to `resolve` — a phase and a deferral are both issues, so the deferral-shaped verb was the only thing suggesting otherwise (issue #46).

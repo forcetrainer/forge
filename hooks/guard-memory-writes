@@ -205,7 +205,7 @@ def main():
         if file_backed:
             emit_deny(
                 "docs/forge/deferrals.md is machine-managed. Use "
-                "scripts/forge_memory.py defer or resolve-deferral "
+                "scripts/forge_memory.py defer or resolve "
                 "instead of editing it directly."
             )
         return
