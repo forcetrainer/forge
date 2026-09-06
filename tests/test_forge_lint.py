@@ -70,6 +70,8 @@ def _base_plan(**overrides):
     task2_heading = overrides.get("task2_heading", "### Task 2: Second thing")
     task2_depends = overrides.get("task2_depends", "**Depends on:** Task 1.")
     task2_tier = overrides.get("task2_tier", "**Tier:** `standard`")
+    task1_tests = overrides.get("task1_tests", "")
+    task2_tests = overrides.get("task2_tests", "")
 
     return """# Plan header
 
@@ -92,6 +94,7 @@ def _base_plan(**overrides):
 
 {task1_depends}
 
+{task1_tests}
 
 # Task 2
 
@@ -108,6 +111,8 @@ def _base_plan(**overrides):
 {task2_tier}
 
 {task2_depends}
+
+{task2_tests}
 """.format(
         goal=goal,
         gc=gc,
@@ -116,9 +121,11 @@ def _base_plan(**overrides):
         task1_acceptance=task1_acceptance,
         task1_tier=task1_tier,
         task1_depends=task1_depends,
+        task1_tests=task1_tests,
         task2_heading=task2_heading,
         task2_depends=task2_depends,
         task2_tier=task2_tier,
+        task2_tests=task2_tests,
     )
 
 
@@ -225,6 +232,86 @@ class ForgeLintTests(unittest.TestCase):
         )
         errors = self._errors(defects)
         self.assertTrue(any("cycle" in d.message for d in errors))
+
+    # --- tests grammar ----------------------------------------------------
+
+    def test_tests_bulleted_form_no_defect(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:**\n- case one\n- case two"
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_tests_none_form_no_defect(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:** none — covered by acceptance"
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_tests_absent_field_no_defect(self):
+        defects = self._lint(_base_plan(task1_tests=""), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_tests_inline_joined_form_named(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:** case one; case two"
+        ), spec_path=self.spec_path)
+        errors = self._errors(defects)
+        self.assertTrue(any(
+            d.where == "task 1" and "Tests" in d.message for d in errors
+        ))
+
+    def test_tests_marker_with_neither_bullets_nor_none_named(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:**\nsome prose that is not a bullet"
+        ), spec_path=self.spec_path)
+        errors = self._errors(defects)
+        self.assertTrue(any(
+            d.where == "task 1" and "Tests" in d.message for d in errors
+        ))
+
+    def test_tests_every_offending_task_reported_in_one_run(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:** case one; case two",
+            task2_tests="**Tests:** case three; case four",
+        ), spec_path=self.spec_path)
+        errors = self._errors(defects)
+        self.assertTrue(any(
+            d.where == "task 1" and "Tests" in d.message for d in errors
+        ))
+        self.assertTrue(any(
+            d.where == "task 2" and "Tests" in d.message for d in errors
+        ))
+
+    def test_tests_defect_severity_is_error(self):
+        defects = self._lint(_base_plan(
+            task1_tests="**Tests:** case one; case two"
+        ), spec_path=self.spec_path)
+        matching = [d for d in defects if d.where == "task 1" and "Tests" in d.message]
+        self.assertTrue(matching)
+        self.assertTrue(all(d.severity == "error" for d in matching))
+
+    def test_lint_task_fields_reports_tests_defect_directly(self):
+        # Exercises fl._lint_task_fields in isolation, bypassing lint_plan
+        # entirely (so _lint_checklists's indirect parse_test_cases call
+        # via build_task_checklist never runs) — this is the only test that
+        # would fail if the direct **Tests:** check were removed from
+        # _lint_task_fields, since every other Tests test above goes
+        # through lint_plan and would still pass via that indirect path.
+        block = (
+            "### Task 1: First thing\n"
+            "- [ ] Done\n\n"
+            "**Files:**\n"
+            "- Create: `foo.py`\n\n"
+            "**Tests:** case one; case two\n\n"
+            "**Acceptance:** `python3 -m pytest -q tests/test_a.py`\n\n"
+            "**Tier:** `standard`\n\n"
+            "**Depends on:** nothing.\n"
+        )
+        defects, _ = fl._lint_task_fields([("task 1", 1, block)], None)
+        errors = [d for d in defects if d.severity == "error"]
+        self.assertTrue(any(
+            d.where == "task 1" and "Tests" in d.message for d in errors
+        ))
 
     # --- acceptance -----------------------------------------------------
 

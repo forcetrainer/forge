@@ -138,6 +138,7 @@ Claude the orchestrator invokes the CLI.
 | `**Spec:**` single line, no parenthetical or `;`, every name resolving uniquely in the spec | names the unresolvable or ambiguous heading |
 | `**Depends on:**` references existing task numbers, no cycles | names the missing task or the cycle |
 | `**Acceptance:**` present per task | names the task |
+| `**Tests:**` parses — bulleted form, or `none — <reason>` | names the task and quotes the offending line |
 | checklist generates for every task and for `--final` | names the task; an empty checklist is a **warning**, not an error |
 | every **changed** spec section is named by some task's `**Spec:**` line | names the unclaimed section |
 
@@ -829,6 +830,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-06: Plan lint's check table gains the `**Tests:**` grammar row (#60)
 2026-09-06: spec-coverage lint reads the merge base, not HEAD; Risks / constraints joins Changelog as exempt (#60)
 2026-09-06: coverage items and citable refs are separate sets — spec sections stay citable, only coverage narrowed (#60)
 2026-09-06: reviewers report every finding regardless of provenance; the runner derives disposition (#63)

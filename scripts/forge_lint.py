@@ -350,11 +350,17 @@ def _parse_task_tier(block, where, num):
 
 
 def _lint_task_fields(blocks, spec_lines):
-    """Per-task Tier, Acceptance-present, and Spec checks against every
-    locatable block (canonical, duplicate, or wrong-level — see
+    """Per-task Tier, Acceptance-present, Tests, and Spec checks against
+    every locatable block (canonical, duplicate, or wrong-level — see
     ``_lint_heading_structure``); also returns each canonical task's parsed
     ``Depends on`` numbers (via ``forge_plan``'s regex reader, which never
-    raises) for the cross-task check in ``_lint_depends``."""
+    raises) for the cross-task check in ``_lint_depends``.
+
+    Tests grammar reuses ``eb.parse_test_cases`` exactly like the Spec check
+    reuses ``eb.parse_spec_names``: a raise (inline joined cases, or a
+    marker followed by neither bullets nor ``none``) becomes an ``error``
+    defect naming the task, never a silent empty checklist. A task with no
+    ``**Tests:**`` field returns ``[]`` from the parser and is legal."""
     defects = []
     depends_map = {}
     for where, num, block in blocks:
@@ -365,6 +371,11 @@ def _lint_task_fields(blocks, spec_lines):
 
         if forge_plan._field_value(block_lines, block_mask, "Acceptance") is None:
             defects.append(_error(where, "missing **Acceptance:** line"))
+
+        try:
+            eb.parse_test_cases(block)
+        except RuntimeError as e:
+            defects.append(_error(where, str(e)))
 
         try:
             spec_names = eb.parse_spec_names(block)

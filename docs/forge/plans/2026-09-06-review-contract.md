@@ -224,7 +224,7 @@
 **Depends on:** nothing.
 
 ### Task 9: Plan lint checks the Tests grammar
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_lint.py` (add the `**Tests:**` grammar check to `lint_plan`)
