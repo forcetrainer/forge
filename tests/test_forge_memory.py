@@ -1581,6 +1581,33 @@ class GitHubStorePrimitivesTests(unittest.TestCase):
         self.assertEqual(post[:3], ["gh", "api", "repos/{owner}/{repo}/issues/9/sub_issues"])
         self.assertIn("sub_issue_id=555", post)
 
+    def test_edge_ids_are_sent_as_typed_integers_not_strings(self):
+        # Both endpoints type their id param as an integer and reject the
+        # string `-f` sends (HTTP 422). Live filing caught this; a stub
+        # cannot know the API's type rules, so the flag itself is pinned.
+        for method, args, path_id, body_key in (
+            ("attach_sub_issue", (9, 10), 10, "sub_issue_id"),
+            ("add_blocked_by", (4, 5), 5, "issue_id"),
+        ):
+            with self.subTest(method=method):
+                calls = []
+
+                def fake_run(args_, **kwargs):
+                    calls.append(args_)
+                    if args_[:3] == [
+                        "gh", "api",
+                        "repos/{{owner}}/{{repo}}/issues/{}".format(path_id),
+                    ]:
+                        return _completed(returncode=0, stdout=json.dumps({"id": 777}))
+                    return _completed(returncode=0, stdout="{}")
+
+                with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+                    getattr(self.store, method)(*args)
+                post = next(a for a in calls if "--method" in a)
+                self.assertIn("-F", post)
+                self.assertNotIn("-f", post)
+                self.assertIn("{}=777".format(body_key), post)
+
     def test_add_blocked_by_resolves_id_then_posts_once(self):
         calls = []
 

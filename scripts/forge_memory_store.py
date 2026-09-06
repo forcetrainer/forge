@@ -479,12 +479,14 @@ class GitHubStore(Store):
     def attach_sub_issue(self, epic, number):
         """Make ``number`` a real GitHub sub-issue of ``epic``. The body
         param GitHub expects is ``number``'s ``id``, not its number —
-        resolved via ``_issue_id`` rather than assumed."""
+        resolved via ``_issue_id`` rather than assumed. Sent with ``-F``,
+        not ``-f``: the endpoint types ``sub_issue_id`` as an integer and
+        rejects the string ``-f`` would send (HTTP 422)."""
         sub_id = self._issue_id(number)
         proc = self._run([
             "api", self._issue_path(epic, "/sub_issues"),
             "--method", "POST",
-            "-f", "sub_issue_id={}".format(sub_id),
+            "-F", "sub_issue_id={}".format(sub_id),
         ])
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)
@@ -492,12 +494,13 @@ class GitHubStore(Store):
     def add_blocked_by(self, number, blocker):
         """Record that ``number`` is blocked by ``blocker``. Same id-vs-
         number distinction as ``attach_sub_issue``: the body param is
-        ``blocker``'s ``id``, resolved via ``_issue_id``."""
+        ``blocker``'s ``id``, resolved via ``_issue_id``, and sent with
+        ``-F`` so it types as an integer rather than a string."""
         blocker_id = self._issue_id(blocker)
         proc = self._run([
             "api", self._issue_path(number, "/dependencies/blocked_by"),
             "--method", "POST",
-            "-f", "issue_id={}".format(blocker_id),
+            "-F", "issue_id={}".format(blocker_id),
         ])
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)
