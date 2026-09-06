@@ -152,10 +152,22 @@ otherwise land `pre-existing × contract-breaking` and halt for a human round-tr
 what is really a syntax error.
 
 **Spec coverage is that same argument applied one level up.** The flow amends a spec
-before the plan is written, on the same branch, so lint reads the spec against its
-committed version and requires every section whose content changed to be named by at
-least one task's `**Spec:**` line. `## Changelog` is exempt; a spec with no committed
-version — a genuinely new system — treats every section as changed. An unclaimed
+before the plan is written **and commits it**, so the baseline is the branch's **merge
+base with the default branch**, never `HEAD`: against `HEAD` the amendment is already
+committed by the time lint runs, nothing reads as changed, and the rule is inert in the
+exact flow it exists for. Every section whose content changed since the merge base must
+be named by at least one task's `**Spec:**` line. When no merge base resolves — the
+default branch itself, an unborn or detached HEAD — the baseline falls back to `HEAD`
+and the rule degrades to inert rather than failing loudly, since a plan is not wrong
+merely because lint cannot establish what the branch changed. A spec with no committed
+version — a genuinely new system — treats every section as changed.
+
+**`## Changelog` and `## Risks / constraints` are exempt.** Both are structurally
+unbuildable: every other section states a requirement a task can deliver, while these
+two record history and judgment. No task is ever assigned to add a changelog line or a
+risk entry, so demanding they be claimed would train the reader to ignore the rule. The
+exemption is that principle, not a list to extend — a section is exempt because nothing
+in it can be built, never because claiming it is inconvenient. An unclaimed
 changed section means the plan cannot deliver what the spec now asserts, and that gap
 is not discoverable from any single task's diff: it surfaces mid-run as a reviewer
 finding against code that is doing exactly what its task asked. Catching it before the
@@ -817,6 +829,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-06: spec-coverage lint reads the merge base, not HEAD; Risks / constraints joins Changelog as exempt (#60)
 2026-09-06: coverage items and citable refs are separate sets — spec sections stay citable, only coverage narrowed (#60)
 2026-09-06: reviewers report every finding regardless of provenance; the runner derives disposition (#63)
 2026-09-06: a task's checklist is its own promises (Tests + Acceptance + globals); spec sections are final-review-only and packet context per task; `contract_ref` must name a checklist id; `unverifiable` added to coverage status and finding impact, seeding to final review; plan lint requires every changed spec section to be claimed by a task (#60)

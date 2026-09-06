@@ -153,13 +153,16 @@
 
 **Spec:** Plan lint
 
-**Interface:** the check reads the spec file's committed version via `git show HEAD:<path>` from `repo_root`, compares section bodies by heading, and emits one `error` defect per changed section named by no task's `**Spec:**` line. `## Changelog` is exempt. A spec with no committed version treats every section as changed. A spec path outside a git repo, or a git read that fails, emits no defect.
+**Interface:** the check reads the spec file's committed version at the branch's **merge base with the default branch** (`git merge-base HEAD <default>`), compares section bodies by heading, and emits one `error` defect per changed section named by no task's `**Spec:**` line. When no merge base resolves — the default branch itself, an unborn or detached HEAD — the baseline falls back to `HEAD`. `## Changelog` and `## Risks / constraints` are exempt. A spec with no committed version treats every section as changed. A spec path outside a git repo, or a git read that fails, emits no defect.
 
 **Tests:**
 - a changed section claimed by a task yields no defect
 - a changed section claimed by no task yields an error defect naming the section
 - an unchanged section claimed by no task yields no defect
 - a changed `## Changelog` yields no defect
+- a changed `## Risks / constraints` yields no defect
+- a section changed earlier on the branch and already committed still yields a defect when claimed by no task, proving the baseline is the merge base and not `HEAD`
+- a repository with no resolvable merge base falls back to `HEAD` and emits no defect rather than failing
 - a spec with no committed version requires every non-changelog section to be claimed
 - a spec outside a git repo yields no defect
 - the defect carries severity `error`
