@@ -25,7 +25,7 @@ is dropped — redundant inside `specs/`.
 | `execution` | phase7 scope-autonomy, phase10 codex-inline, phase11 inline-finding-process, phase12b claude-dispatch-parity, tier-policy-recalibration, halt-precision, review-continuity |
 | `project-memory` | project-memory-engine, deferrals-as-issues, constraints, retire-roadmap |
 | `codex-runner` | phase3 codex-dual-harness, codex-exec-runner, forge-run-monitor |
-| `pipeline` | phase1 pipeline-skill-edits, phase2 execution-efficiency |
+| `pipeline` | phase1 pipeline-skill-edits, phase2 execution-efficiency, this spec (see Self-migration) |
 
 Four is the whole set. A fifth document requires a genuinely new system, not a new
 change to an existing one.
