@@ -33,7 +33,7 @@ plan/spec parsing and packet assembly — no duplicated heading grammar. Tier ->
 model/effort mapping lives in exactly one table (``TIER_MAP``). All parse
 failures raise loudly naming the cause (constraint: parsers-fail-loud);
 ``ultra`` reasoning effort is never emitted (spec:
-docs/forge/specs/2026-07-13-codex-exec-runner-design.md).
+docs/forge/specs/codex-runner.md).
 """
 import argparse
 import datetime

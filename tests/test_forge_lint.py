@@ -499,7 +499,7 @@ class ForgeLintCLITests(unittest.TestCase):
 
     def test_real_phase14_plan_lints_clean(self):
         plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-08-21-phase14-halt-precision.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/specs/2026-08-21-halt-precision-design.md")
+        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-08-21-halt-precision-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
             capture_output=True, text=True,
@@ -508,7 +508,7 @@ class ForgeLintCLITests(unittest.TestCase):
 
     def test_real_phase12b_plan_lints_clean(self):
         plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-07-17-phase12b-claude-dispatch-parity.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md")
+        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
             capture_output=True, text=True,
@@ -720,17 +720,16 @@ class ForgeLintLivingSpecTests(unittest.TestCase):
 
 
 class ForgeLintRealSpecCorpusTests(unittest.TestCase):
-    """The pre-migration corpus in docs/forge/specs/ is expected to be
-    non-compliant right now — the migration to living specs is a later
-    task. This is the acceptance criterion, not a regression."""
+    """docs/forge/specs/ now holds only the four migrated living specs — the
+    dated corpus was archived under docs/forge/archive/specs/. This is the
+    post-migration acceptance criterion."""
 
-    def test_real_specs_dir_reports_non_compliant_pre_migration(self):
+    def test_real_specs_dir_is_compliant_post_migration(self):
         result = subprocess.run(
             [sys.executable, SCRIPT, "--specs", "--repo-root", REPO_ROOT],
             capture_output=True, text=True,
         )
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertTrue(result.stdout.strip(), "expected corpus defects on stdout")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

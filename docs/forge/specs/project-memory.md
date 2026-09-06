@@ -1,10 +1,10 @@
 ---
 system: project-memory
 supersedes:
-  - specs/2026-09-05-project-memory-engine-design.md
-  - specs/2026-09-05-deferrals-as-issues-design.md
-  - specs/2026-09-05-constraints-design.md
-  - specs/2026-09-05-retire-roadmap-design.md
+  - archive/specs/2026-09-05-project-memory-engine-design.md
+  - archive/specs/2026-09-05-deferrals-as-issues-design.md
+  - archive/specs/2026-09-05-constraints-design.md
+  - archive/specs/2026-09-05-retire-roadmap-design.md
 ---
 
 # Project memory

@@ -1,9 +1,9 @@
 ---
 system: codex-runner
 supersedes:
-  - specs/2026-07-03-phase3-codex-dual-harness-design.md
-  - specs/2026-07-13-codex-exec-runner-design.md
-  - specs/2026-07-15-forge-run-monitor-design.md
+  - archive/specs/2026-07-03-phase3-codex-dual-harness-design.md
+  - archive/specs/2026-07-13-codex-exec-runner-design.md
+  - archive/specs/2026-07-15-forge-run-monitor-design.md
 ---
 
 # Codex runner

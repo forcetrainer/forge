@@ -1,9 +1,9 @@
 ---
 system: pipeline
 supersedes:
-  - specs/2026-07-02-phase1-pipeline-skill-edits-design.md
-  - specs/2026-07-02-phase2-execution-efficiency-design.md
-  - specs/2026-09-05-living-specs-design.md
+  - archive/specs/2026-07-02-phase1-pipeline-skill-edits-design.md
+  - archive/specs/2026-07-02-phase2-execution-efficiency-design.md
+  - archive/specs/2026-09-05-living-specs-design.md
 ---
 
 # Pipeline

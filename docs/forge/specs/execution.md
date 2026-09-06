@@ -1,13 +1,13 @@
 ---
 system: execution
 supersedes:
-  - specs/2026-07-16-phase7-scope-autonomy-design.md
-  - specs/2026-07-16-tier-policy-recalibration-design.md
-  - specs/2026-07-17-phase10-codex-inline-design.md
-  - specs/2026-07-17-phase11-inline-finding-process-design.md
-  - specs/2026-07-17-phase12b-claude-dispatch-parity-design.md
-  - specs/2026-08-21-halt-precision-design.md
-  - specs/2026-08-21-review-continuity-design.md
+  - archive/specs/2026-07-16-phase7-scope-autonomy-design.md
+  - archive/specs/2026-07-16-tier-policy-recalibration-design.md
+  - archive/specs/2026-07-17-phase10-codex-inline-design.md
+  - archive/specs/2026-07-17-phase11-inline-finding-process-design.md
+  - archive/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md
+  - archive/specs/2026-08-21-halt-precision-design.md
+  - archive/specs/2026-08-21-review-continuity-design.md
 ---
 
 # Execution

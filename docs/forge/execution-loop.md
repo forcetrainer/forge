@@ -5,9 +5,9 @@ and how the system decides — on its own — what to fix, what to let go, and w
 to stop and ask a human about. It's the same model on both harnesses; only the
 *substrate* that enforces it differs (see [Per-harness](#per-harness--same-model-different-substrate)).
 
-The precise contract lives in the [scope-autonomy spec](specs/2026-07-16-phase7-scope-autonomy-design.md);
-the *why* behind each choice is in that spec's changelog and in the PR that made
-the change. This page is the readable explanation.
+The precise contract lives in the [execution spec](specs/execution.md); the *why*
+behind each choice is in that spec's changelog and in the PR that made the change.
+This page is the readable explanation.
 
 ## The cycle
 
