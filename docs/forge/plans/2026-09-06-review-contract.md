@@ -303,7 +303,7 @@
 **Depends on:** Task 4.
 
 ### Task 12: The resolved label is honored on the Claude path
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (CLI `main()` passes the prior attempt's carried set into `classify_findings`)

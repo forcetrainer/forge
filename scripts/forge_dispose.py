@@ -902,7 +902,9 @@ def main(argv=None):
                             + "; ".join(contract_ref_defects)
                         )
                 diff_text = _run_git_diff(args.base)
-                verdict = classify_findings(verdict, diff_text)
+                verdict = classify_findings(
+                    verdict, diff_text, carried_ids=state.carried_ids
+                )
             findings = verdict.findings
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)

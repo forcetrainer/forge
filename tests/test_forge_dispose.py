@@ -275,6 +275,127 @@ class ForgeDisposeCLITests(unittest.TestCase):
         self.assertEqual(d2["action"], "halt")
         self.assertEqual(d2["halt_reason"], "stuck")
 
+    # --- resolved label honored on the Claude path (carried_ids wiring) -----
+
+    def test_resolved_label_in_carried_set_is_dropped_not_a_fix(self):
+        v1 = self._write_json("ve1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+        r1 = self.run_dispose(self._base_args(v1, attempt=1))
+        d1 = json.loads(r1.stdout)
+        self.assertEqual(d1["action"], "rework")
+        state_path = self._write_json("state.json", d1["state"])
+
+        v2 = self._write_json("ve2.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug, now resolved",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "convergence": "resolved"},
+        ]})
+        r2 = self.run_dispose(
+            self._base_args(v2, attempt=2, state_path=state_path)
+        )
+        d2 = json.loads(r2.stdout)
+        self.assertEqual(d2["findings"]["fix"], [])
+        self.assertEqual(d2["action"], "pass")
+
+    def test_resolved_label_without_state_dispositions_normally(self):
+        v = self._write_json("vf1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "convergence": "resolved"},
+        ]})
+        result = self.run_dispose(self._base_args(v, attempt=1))
+        decision = json.loads(result.stdout)
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+        self.assertEqual(decision["action"], "rework")
+
+    def test_resolved_label_absent_from_carried_set_dispositions_normally(self):
+        v1 = self._write_json("vg1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+        r1 = self.run_dispose(self._base_args(v1, attempt=1))
+        d1 = json.loads(r1.stdout)
+        state_path = self._write_json("state.json", d1["state"])
+
+        # f2 was never in the carried set (only f1 was) — a self-labelled
+        # "resolved" on it is meaningless and must not be honored.
+        v2 = self._write_json("vg2.json", {"verdict": "findings", "findings": [
+            {"id": "f2", "summary": "different bug, self-labelled resolved",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "convergence": "resolved"},
+        ]})
+        r2 = self.run_dispose(
+            self._base_args(v2, attempt=2, state_path=state_path)
+        )
+        d2 = json.loads(r2.stdout)
+        self.assertEqual([f["id"] for f in d2["findings"]["fix"]], ["f2"])
+
+    def test_carried_from_id_honored_where_own_id_is_not(self):
+        v1 = self._write_json("vh1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+        r1 = self.run_dispose(self._base_args(v1, attempt=1))
+        d1 = json.loads(r1.stdout)
+        state_path = self._write_json("state.json", d1["state"])
+
+        v2 = self._write_json("vh2.json", {"verdict": "findings", "findings": [
+            {"id": "f2", "carried_from": "f1", "summary": "bug, now resolved",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "convergence": "resolved"},
+        ]})
+        r2 = self.run_dispose(
+            self._base_args(v2, attempt=2, state_path=state_path)
+        )
+        d2 = json.loads(r2.stdout)
+        self.assertEqual(d2["findings"]["fix"], [])
+        self.assertEqual(d2["action"], "pass")
+
+    def test_second_attempt_only_legitimately_resolved_finding_passes(self):
+        v1 = self._write_json("vi1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+        r1 = self.run_dispose(self._base_args(v1, attempt=1))
+        d1 = json.loads(r1.stdout)
+        state_path = self._write_json("state.json", d1["state"])
+
+        v2 = self._write_json("vi2.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug, now resolved",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "convergence": "resolved"},
+        ]})
+        r2 = self.run_dispose(
+            self._base_args(v2, attempt=2, state_path=state_path)
+        )
+        d2 = json.loads(r2.stdout)
+        # Without the label honored, this halts "stuck" — the false halt
+        # this task fixes.
+        self.assertEqual(d2["action"], "pass")
+        self.assertIsNone(d2["halt_reason"])
+
+    def test_attempt_one_empty_carried_set_byte_identical(self):
+        v = self._write_json("vj1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "bug",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+        result = self.run_dispose(self._base_args(v, attempt=1))
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+
     def test_backstop_halts_at_attempt_five(self):
         # Each attempt surfaces a *different* fix id, so it never goes
         # stuck/regression — it just reworks until the backstop trips.
