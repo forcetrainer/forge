@@ -150,7 +150,7 @@ def cmd_audit_issues(args, repo_root): ...   # CLI: audit-issues  (no flags)
 
 **Tests:** existing `resolve-deferral` tests move to `resolve` unchanged in behavior; the subcommand-surface test shows `resolve` and no `resolve-deferral`.
 
-**Acceptance:** `python3 -m pytest tests/test_forge_memory.py -q` passes; `grep -rn "resolve-deferral" --exclude-dir=.git --exclude-dir=archive --exclude-dir=plans .` returns nothing.
+**Acceptance:** `python3 -m pytest tests/test_forge_memory.py -q` passes; `grep -rn "resolve-deferral" scripts/ hooks/ skills/ tests/` returns nothing (docs are excluded deliberately: both specs record the rename by name, and the archive is frozen).
 
 **Tier:** trivial — one subcommand name, three literal call sites and a docstring; no logic or flag changes.
 
