@@ -264,6 +264,16 @@ identical contract.
 
 - `provenance` as emitted is two-valued. The runner recomputes it and may resolve it to
   `in-run`, a value the reviewer never emits.
+- **Reporting is unconditional on provenance.** Every finding the reviewer sees is
+  emitted; the runner derives the disposition. A reviewer must never withhold a finding
+  because the code predates this diff — `pre-existing × contract-breaking` is a real cell
+  whose whole purpose is to halt for a human, and it can only fire on a finding that was
+  reported. Withholding also loses the finding outright rather than downgrading it: the
+  runner parses the verdict JSON and discards surrounding prose, so a defect mentioned
+  only in commentary reaches no receipt, no deferral, and no gate. Observed 2026-09-06 —
+  a reviewer correctly identified an unchecked-enum defect, judged it out of scope
+  itself, and omitted it from the verdict; it survived only because a human read the
+  chat transcript (#63).
 - `impact` is `contract-breaking` only when `contract_ref` names **a checklist id
   supplied in this review's packet**. A null `contract_ref`, or one naming anything that
   is not a checklist id, downgrades the finding to `improvement` regardless of the
@@ -785,6 +795,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-06: reviewers report every finding regardless of provenance; the runner derives disposition (#63)
 2026-09-06: a task's checklist is its own promises (Tests + Acceptance + globals); spec sections are final-review-only and packet context per task; `contract_ref` must name a checklist id; `unverifiable` added to coverage status and finding impact, seeding to final review; plan lint requires every changed spec section to be claimed by a task (#60)
 
 2026-09-05: consolidated from seven dated specs — phase7 scope-autonomy, tier-policy-recalibration, phase10 codex-inline, phase11 inline-finding-process, phase12b claude-dispatch-parity, halt-precision, review-continuity (#47)

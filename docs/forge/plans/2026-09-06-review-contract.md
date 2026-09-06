@@ -122,7 +122,7 @@
 
 **Spec:** Reviewer verdict contract
 
-**Interface:** no signature change; the instruction string gains the `unverifiable` status and impact values, states that `contract_ref` must name a checklist id supplied in the packet, and states that `unverifiable` requires a reason but obliges no backing finding.
+**Interface:** no signature change; the instruction string gains the `unverifiable` status and impact values, states that `contract_ref` must name a checklist id supplied in the packet, states that `unverifiable` requires a reason but obliges no backing finding, and states that every finding is reported regardless of provenance — the runner derives the disposition, so a reviewer never withholds a finding on the grounds that the code predates this diff.
 
 **Tests:**
 - the instruction names `unverifiable` as a coverage status
@@ -130,6 +130,7 @@
 - the instruction states the checklist-id requirement for `contract_ref`
 - the instruction states that unverifiable obliges no backing finding
 - the instruction no longer describes `contract_ref` as any acceptance criterion or spec section
+- the instruction states that findings are reported regardless of provenance
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_review.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -175,11 +176,11 @@
 
 **Spec:** Reviewer verdict contract, The disposition matrix, Contract checklist
 
-**Interface:** no code. The two agent contracts replace the bare `"Can't verify from diff" is a valid verdict` sentence with one naming `impact: "unverifiable"` as where that answer goes. The two skill documents restate the amended checklist sources, the `contract_ref` membership rule, and the matrix's `unverifiable` column.
+**Interface:** no code. The two agent contracts replace the bare `"Can't verify from diff" is a valid verdict` sentence with one naming `impact: "unverifiable"` as where that answer goes, and extend `Report every finding with a severity; do not silently fix anything.` to say that this holds regardless of provenance — the runner decides the disposition. The two skill documents restate the amended checklist sources, the `contract_ref` membership rule, and the matrix's `unverifiable` column.
 
 **Tests:** none — prose.
 
-**Acceptance:** `grep -c 'unverifiable' agents/forge-standard.md agents/forge-deep.md skills/planning/SKILL.md skills/planning/codex-execution.md` reports a non-zero count for each of the four files; `grep -n 'spec section named on a' skills/planning/SKILL.md` returns nothing, confirming the task-checklist source list was updated; `python3 scripts/forge_lint.py --specs` exits zero; `python3 -m pytest -q` shows no regression.
+**Acceptance:** `grep -c 'unverifiable' agents/forge-standard.md agents/forge-deep.md skills/planning/SKILL.md skills/planning/codex-execution.md` reports a non-zero count for each of the four files; `grep -c 'provenance' agents/forge-standard.md agents/forge-deep.md` reports a non-zero count for each; `grep -n 'spec section named on a' skills/planning/SKILL.md` returns nothing, confirming the task-checklist source list was updated; `python3 scripts/forge_lint.py --specs` exits zero; `python3 -m pytest -q` shows no regression.
 
 **Tier:** standard
 
