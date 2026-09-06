@@ -1,4 +1,15 @@
-# Roadmap
+# Roadmap — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Phases of larger systems now live as GitHub issues — an epic per program
+(`add-program`), a sub-issue per phase (`add-phase`), linked with native
+sub-issue and blocked-by edges. Open/closed is the only status forge reads.
+
+This file is kept because every line below records a phase this project
+already shipped or explicitly abandoned; none of it is live work. Every
+entry is `[done]` except Phase 8, which records its own decomposition into
+Phases 10–12.
 
 ## Upgrade cycle — 2026-07 ([ideation doc](ideas/2026-07-02-upgrade-cycle.md))
 

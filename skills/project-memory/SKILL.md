@@ -1,11 +1,11 @@
 ---
 name: project-memory
-description: Use when authoring a constraint, recording deferred work, or updating the project roadmap — and as the format reference for docs/forge/constraints.md, ROADMAP.md, and deferral issues (via scripts/forge_memory.py).
+description: Use when authoring a constraint, recording deferred work, or filing a program or phase — and as the format reference for docs/forge/constraints.md and GitHub issues (via scripts/forge_memory.py).
 ---
 
 # Project Memory
 
-One append-friendly file under `docs/forge/` (ROADMAP.md), one CLI-managed file (constraints.md), plus GitHub issues for deferred work give the project durable memory across sessions. Entries are terse, newest first where order applies. Create each markdown file on its first entry — no empty scaffolds. Commit memory updates with the work that produced them.
+One CLI-managed file (constraints.md) plus GitHub issues — for deferred work and for programs/phases — give the project durable memory across sessions. Entries are terse, newest first where order applies. Create constraints.md on its first entry — no empty scaffold. Commit memory updates with the work that produced them.
 
 ## constraints.md — what must not be broken, right now
 
@@ -69,17 +69,42 @@ edits, or drops each; only accepted ones are filed. A deferral the user asks
 for mid-session files **immediately**, with `from: user`, no gate. List
 filed deferrals' issue numbers in the end-of-plan summary.
 
-## ROADMAP.md — phases of larger systems
+## Programs and phases
 
-Created **only** when brainstorming decomposes work into multiple sub-projects or phases. One line each:
+Filed **only** when brainstorming decomposes work into multiple sub-projects or
+phases. A program is a GitHub epic; each phase is one of its sub-issues, linked
+by two native edges — sub-issue (phase belongs to program) and blocked-by
+(phase N+1 is blocked by phase N). Both edges are real GitHub links, not text.
 
-```markdown
-- [in-progress] Phase 2: Sync engine — bidirectional sync with conflict log ([spec](specs/...), [plan](plans/...))
-- [planned] Phase 3: Sharing — read-only share links
+```bash
+forge_memory.py add-program --name "Sync engine" \
+  --why "Bidirectional sync needs staged rollout." --kind feature
+forge_memory.py add-phase --epic 210 --seq 1 --of 3 \
+  --title "Conflict log" --why "Foundation the rest of sync builds on." \
+  --kind feature
 ```
 
-Statuses: `planned | in-progress | done | deferred`. Planning marks a phase `in-progress` at kickoff and `done` at completion.
+`add-program` takes `--name`, `--why` (≤300 chars), and `--kind` — one of
+`feature | defect | debt | risk`, required, no default: the engine never
+infers what kind of work something is. `add-phase` takes `--epic` (the
+program's issue number), `--seq` (1-based, must equal the epic's current
+sub-issue count plus one — out-of-order filing is a caller error, never
+reordered silently), `--of` (total phase count, for the title only), `--title`,
+`--why`, and the same required `--kind`. `add-phase` only files new phases; it
+never adopts issues that already exist.
+
+A phase's issue title renders as `<program name> <seq>/<of>: <title>` —
+nothing parses the sequence back out of it; the render happens once, at
+filing. Origin is unconditionally `by:human` — no flag, because filing a
+program or phase is a human decision, unlike a `defer`, which either harness
+can call.
+
+**Status is not forge's.** Open/closed is the only status forge reads or
+writes — no `planned | in-progress | done`. Ordering and priority live on the
+human's GitHub Projects board, which forge never calls. Planning closes the
+phase issue with a reason at plan completion; it never marks a phase
+`in-progress` at kickoff.
 
 ## Legacy
 
-A repo with `docs/superpowers/` and no `docs/forge/`: offer a one-time `git mv docs/superpowers docs/forge` rather than reading both paths forever.
+A repo with `docs/superpowers/` and no `docs/forge/`: offer a one-time `git mv docs/superpowers docs/forge` rather than reading both paths forever. A `ROADMAP.md` found in an existing repo is an unread file — its phases belong in issues, not a migration script.

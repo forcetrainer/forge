@@ -1368,10 +1368,11 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
 # mirroring REVIEW_VERDICT_INSTRUCTION's split.
 DOC_SYNC_INSTRUCTION = (
     "Reconcile EXISTING documentation to the shipped whole-plan diff below: "
-    "update stale references, changed signatures/behavior, spec changelog "
-    "entries, and ROADMAP status that the diff made inaccurate. Edit only docs "
+    "update stale references, changed signatures/behavior, and spec changelog "
+    "entries that the diff made inaccurate. Edit only docs "
     "that already exist and that the diff affects — never author new "
-    "documentation, and never touch code. If you find a documentation/contract "
+    "documentation, never touch code, and never reconcile issue status. If "
+    "you find a documentation/contract "
     "contradiction you cannot mechanically reconcile (a doc asserts something "
     "the shipped code now contradicts, and choosing the correct side is a human "
     "decision), make no edit and end your message with exactly one JSON object "
@@ -1486,8 +1487,9 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
                       timeout=DEFAULT_TIMEOUT):
     """Terminal doc-sync stage (Terminal doc-sync stage spec): one ``codex exec``
     dispatch that reconciles EXISTING documentation to the shipped whole-plan
-    ``diff`` — stale references, changed signatures/behavior, spec changelog,
-    ROADMAP status — never authoring new docs and never touching code. Runs only
+    ``diff`` — stale references, changed signatures/behavior, spec changelog —
+    never authoring new docs, never touching code, and never reconciling issue
+    status. Runs only
     after final review passes (the caller's guard). Returns a DocSyncResult:
 
     - the worker names an unreconcilable doc/contract contradiction -> ``halt``

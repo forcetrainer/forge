@@ -150,9 +150,10 @@ field apply.
 **Terminal doc-sync stage:** once final review passes, the runner dispatches
 one more `codex exec` call that reconciles **existing** documentation to the
 shipped whole-plan diff — stale references, changed signatures/behavior, spec
-changelog entries, ROADMAP status. It never authors new docs (that would be
-the gold-plating the disposition matrix already forbids) and never touches
-code. Landed edits commit as `docs: sync`; no drift found → no commit. A
+changelog entries. It never authors new docs (that would be the gold-plating
+the disposition matrix already forbids), never touches code, and never
+reconciles issue status — closing an issue is planning's job, not doc-sync's.
+Landed edits commit as `docs: sync`; no drift found → no commit. A
 doc/contract contradiction it can't mechanically reconcile halts the run for
 a human decision, named in `run.json`'s `doc_sync.contradiction`.
 

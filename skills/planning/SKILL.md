@@ -150,4 +150,4 @@ The four original cells are unchanged. `in-run × contract-breaking` → **seed*
 
 Plans written before this fork (embedded implementation code, subagent-driven-development headers) execute fine under this section: treat embedded code as a suggestion to re-derive via TDD, not text to paste.
 
-When all tasks are done: run the full test suite, mark the roadmap phase `done` if a roadmap exists, then follow the branch-finishing preferences in CLAUDE.md. The end-of-plan summary leads with failures, deviations, deferrals — not achievements. Recurring "wouldn't have done it that way" review calls become written conventions in CLAUDE.md.
+When all tasks are done: run the full test suite, close the plan's phase issue with a reason if it belongs to one, then follow the branch-finishing preferences in CLAUDE.md. The end-of-plan summary leads with failures, deviations, deferrals — not achievements. Recurring "wouldn't have done it that way" review calls become written conventions in CLAUDE.md.
