@@ -53,7 +53,7 @@ The five rules, and nothing beyond them: no `YYYY-MM-DD` filename prefix; frontm
 
 **Spec:** Systems, Merge method, Frontmatter, Section accounting
 
-**Interface:** anchor is `2026-07-02-phase2-execution-efficiency-design.md`; folds `2026-07-02-phase1-pipeline-skill-edits-design.md`, plus this phase's own `2026-09-05-living-specs-design.md` (Self-migration). Frontmatter `system: pipeline`, `supersedes` listing all three archive paths.
+**Interface:** anchor is `2026-07-02-phase2-execution-efficiency-design.md`; folds `2026-07-02-phase1-pipeline-skill-edits-design.md`, plus this phase's own `2026-09-05-living-specs-design.md` (Self-migration). Frontmatter `system: pipeline`, `supersedes` listing all three sources at their CURRENT paths (`specs/<dated-name>`), so rule 3 resolves the moment the file is written. Task 6 rewrites them to `archive/specs/...` as part of the move — lint stays green at every task boundary rather than being knowingly red for four tasks.
 
 Deliberate exception to the newest-is-anchor rule: `living-specs-design` is the newest source but covers only the spec-document convention, so it contributes a section rather than the document's spine. State the exception in the changelog rather than leaving a reader to infer it.
 
@@ -74,7 +74,7 @@ Deliberate exception to the newest-is-anchor rule: `living-specs-design` is the 
 
 **Spec:** Systems, Merge method, Frontmatter, Section accounting
 
-**Interface:** anchor is `2026-07-15-forge-run-monitor-design.md`; folds `2026-07-13-codex-exec-runner-design.md` and `2026-07-03-phase3-codex-dual-harness-design.md`. Frontmatter `system: codex-runner`.
+**Interface:** anchor is `2026-07-15-forge-run-monitor-design.md`; folds `2026-07-13-codex-exec-runner-design.md` and `2026-07-03-phase3-codex-dual-harness-design.md`. Frontmatter `system: codex-runner`, `supersedes` at the sources' CURRENT `specs/<dated-name>` paths (Task 6 rewrites them on the move).
 
 Known trap: the runner spec's §Session awareness describes `--notify` and the `UserPromptSubmit` hook, both of which were later REMOVED (see the archived decision log, 2026-07-14 entries). Do not carry a removed feature into a living document as though it ships.
 
@@ -95,7 +95,7 @@ Known trap: the runner spec's §Session awareness describes `--notify` and the `
 
 **Spec:** Systems, Merge method, Frontmatter, Section accounting
 
-**Interface:** anchor is `2026-09-05-retire-roadmap-design.md`; folds `2026-09-05-project-memory-engine-design.md`, `2026-09-05-deferrals-as-issues-design.md`, `2026-09-05-constraints-design.md`. Frontmatter `system: project-memory`.
+**Interface:** anchor is `2026-09-05-retire-roadmap-design.md`; folds `2026-09-05-project-memory-engine-design.md`, `2026-09-05-deferrals-as-issues-design.md`, `2026-09-05-constraints-design.md`. Frontmatter `system: project-memory`, `supersedes` at the sources' CURRENT `specs/<dated-name>` paths (Task 6 rewrites them on the move).
 
 Known trap: each of the four names the others' work in its "Out of scope (later phases)" section. Those sections describe a sequencing that no longer exists — all four phases shipped — and must not survive as if the work were still pending.
 
@@ -116,7 +116,7 @@ Known trap: each of the four names the others' work in its "Out of scope (later 
 
 **Spec:** Systems, Merge method, Frontmatter, Section accounting
 
-**Interface:** anchor is `2026-08-21-halt-precision-design.md`; folds `2026-08-21-review-continuity-design.md`, `2026-07-17-phase12b-claude-dispatch-parity-design.md`, `2026-07-17-phase11-inline-finding-process-design.md`, `2026-07-17-phase10-codex-inline-design.md`, `2026-07-16-phase7-scope-autonomy-design.md`, `2026-07-16-tier-policy-recalibration-design.md`. Frontmatter `system: execution`.
+**Interface:** anchor is `2026-08-21-halt-precision-design.md`; folds `2026-08-21-review-continuity-design.md`, `2026-07-17-phase12b-claude-dispatch-parity-design.md`, `2026-07-17-phase11-inline-finding-process-design.md`, `2026-07-17-phase10-codex-inline-design.md`, `2026-07-16-phase7-scope-autonomy-design.md`, `2026-07-16-tier-policy-recalibration-design.md`. Frontmatter `system: execution`, `supersedes` at the sources' CURRENT `specs/<dated-name>` paths (Task 6 rewrites them on the move).
 
 Known traps: the disposition matrix is stated in three sources at different widths — the three-way-provenance version in halt-precision is current. The terminal doc-sync stage exists on Codex only and is open work on Claude (issue #52); it must not read as shipped on both. Phase 10 documents inline finding-handling that Phase 11 replaced.
 
@@ -133,6 +133,7 @@ Known traps: the disposition matrix is stated in three sources at different widt
 
 **Files:**
 - Modify: the seventeen dated specs (sixteen pre-existing, plus this phase's own) → `docs/forge/archive/specs/` via `git mv`, with the non-authoritative header
+- Modify: the four living specs' `supersedes` lists — `specs/<dated-name>` → `archive/specs/<dated-name>`, in the same commit as the move, so rule 3 never resolves against a path that stopped existing
 - Modify: `docs/forge/constraints.md` — two `Source:` fields, **only** through `python3 scripts/forge_memory.py update-constraint` (direct edits are hook-denied)
 - Modify: `docs/forge/execution-loop.md`, `docs/forge/running-on-codex.md` (spec links)
 - Modify: `scripts/forge_common.py` (3 references), `scripts/forge-run.py` (1)
