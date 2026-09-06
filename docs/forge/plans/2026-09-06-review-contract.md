@@ -281,14 +281,16 @@
 
 **Spec:** Reviewer verdict contract
 
-**Interface:** `main()` calls `validate_contract_refs` before `classify_findings`, gated on `--checklist` being supplied, mirroring `forge-run.py`'s per-task wiring. A defect exits non-zero naming the offending finding id and ref, and writes no decision. Without `--checklist`, behavior is unchanged.
+**Interface:** a new `--citable <path>` flag takes a JSON array of citable ref id strings (`forge_checklist.citable_refs` output). `main()` calls `validate_contract_refs` against that set before `classify_findings`, gated on `--citable` being supplied. A defect exits non-zero naming the offending finding id and ref, and writes no decision. `--checklist` keeps its existing meaning — coverage items, for coverage validation only — and never drives membership. Without `--citable`, membership is not enforced and behavior is unchanged.
 
 **Tests:**
-- a CLI run with `--checklist` and a `contract_ref` outside the citable set exits non-zero naming the finding id and the bad ref
+- a CLI run with `--citable` and a `contract_ref` outside the citable set exits non-zero naming the finding id and the bad ref
 - that run produces no decision output, rather than a decision carrying a contract-breaking disposition
-- a CLI run with `--checklist` and a `contract_ref` inside the citable set is unaffected
-- a CLI run with `--checklist` and a null `contract_ref` is unaffected
-- a CLI run without `--checklist` behaves exactly as before
+- a CLI run with `--citable` and a `contract_ref` naming a coverage item id is unaffected
+- a CLI run with `--citable` and a `contract_ref` naming a declared `spec:<slug>` section is unaffected
+- a CLI run with `--citable` and a null `contract_ref` is unaffected
+- a CLI run with `--checklist` but no `--citable` does not enforce membership, even for a ref absent from the checklist
+- a CLI run with neither flag behaves exactly as before
 - the existing `validate_locations` ordering before `classify_findings` is preserved
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
