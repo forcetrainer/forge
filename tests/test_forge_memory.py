@@ -537,7 +537,7 @@ class SubcommandSurfaceTests(CLITestCase):
         self.assertEqual(set(sub_action.choices), {
             "add-constraint", "update-constraint", "retire-constraint",
             "list-constraints", "defer", "resolve-deferral", "fmt",
-            "install-guards", "add-program", "add-phase",
+            "install-guards", "add-program", "add-phase", "audit-issues",
         })
 
     # This is an ALLOW-list, not a denylist, and must stay one: a denylist
@@ -572,6 +572,9 @@ class SubcommandSurfaceTests(CLITestCase):
         # brainstorming gate), so there is no flag to guess wrong.
         "add-program": {"name", "why", "kind"},
         "add-phase": {"epic", "seq", "of", "title", "why", "kind"},
+        # audit-issues takes no flags: it walks every open issue, no
+        # selector to narrow or guess at.
+        "audit-issues": set(),
     }
 
     def test_no_subcommand_accepts_a_free_form_body_argument(self):
@@ -1261,6 +1264,155 @@ class AddPhaseCLITests(CLITestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("21", err)
         self.assertIn("blocked", err.lower())
+
+
+_GH_WRITE_MARKERS = (
+    ("issue", "edit"), ("issue", "close"), ("label", "create"),
+    ("label", "edit"), ("label", "delete"),
+)
+
+
+def _assert_no_gh_write(args):
+    """Raise if ``args`` (a ``gh`` invocation) is any write subcommand
+    audit-issues must never reach: issue edit/close, or label
+    create/edit/delete. Used as a hard assertion inside the stub, not a
+    comment, so a regression that adds a write call fails the test."""
+    for noun, verb in _GH_WRITE_MARKERS:
+        if noun in args and verb in args:
+            raise AssertionError(
+                "audit-issues invoked a gh WRITE subcommand: {}".format(args)
+            )
+
+
+def _open_issues_fake_run(issues):
+    """A ``subprocess.run`` stub answering exactly the one call
+    ``GitHubStore.open_issues`` makes (``gh issue list --state open
+    --json ... --limit ...``), asserting every invocation is read-only.
+    ``issues`` is a list of ``{"number", "title", "labels"}`` with
+    ``labels`` a plain list of label name strings."""
+    def fake_run(args, **kwargs):
+        _assert_no_gh_write(args)
+        if args[:3] == ["gh", "issue", "list"]:
+            return _completed(returncode=0, stdout=json.dumps([
+                {
+                    "number": issue["number"],
+                    "title": issue["title"],
+                    "labels": [{"name": name} for name in issue["labels"]],
+                }
+                for issue in issues
+            ]))
+        raise AssertionError("unexpected gh invocation: {}".format(args))
+
+    return fake_run
+
+
+class AuditIssuesCLITests(CLITestCase):
+    def _run(self, issues):
+        fake_run = _open_issues_fake_run(issues)
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            return _run_cli(["audit-issues"])
+
+    def test_no_kind_label_is_reported(self):
+        code, out, err = self._run([
+            {"number": 1, "title": "No kind", "labels": ["by:human"]},
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("#1", out)
+        self.assertIn("kind label count 0", out)
+
+    def test_two_kind_labels_is_reported(self):
+        code, out, err = self._run([
+            {"number": 1, "title": "Two kinds",
+             "labels": ["by:human", "feature", "defect"]},
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("kind label count 2", out)
+
+    def test_exactly_one_kind_label_is_not_reported(self):
+        code, out, err = self._run([
+            {"number": 1, "title": "Clean", "labels": ["by:human", "feature"]},
+        ])
+        self.assertEqual(code, 0)
+        self.assertNotIn("#1", out)
+
+    def test_missing_origin_label_is_reported(self):
+        code, out, err = self._run([
+            {"number": 2, "title": "No origin", "labels": ["feature"]},
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("#2", out)
+        self.assertIn("origin label count 0", out)
+
+    def test_each_retired_label_is_reported_by_name(self):
+        for retired in fm.RETIRED_LABELS:
+            code, out, err = self._run([
+                {"number": 3, "title": "Retired",
+                 "labels": ["by:human", "feature", retired]},
+            ])
+            self.assertEqual(code, 1, retired)
+            self.assertIn(retired, out, retired)
+
+    def test_one_issue_failing_several_checks_produces_one_line_naming_all(self):
+        code, out, err = self._run([
+            {"number": 4, "title": "Multi-fail",
+             "labels": ["forge:deferral", "forge:backlog"]},
+        ])
+        self.assertEqual(code, 1)
+        lines = [line for line in out.splitlines() if line.startswith("#4")]
+        self.assertEqual(len(lines), 1, out)
+        line = lines[0]
+        self.assertIn("kind label count 0", line)
+        self.assertIn("origin label count 0", line)
+        self.assertIn("forge:deferral", line)
+        self.assertIn("forge:backlog", line)
+
+    def test_clean_issue_set_exits_0_with_a_single_all_clear_line(self):
+        code, out, err = self._run([
+            {"number": 5, "title": "Clean one", "labels": ["by:human", "feature"]},
+            {"number": 6, "title": "Clean two", "labels": ["by:agent", "debt"]},
+        ])
+        self.assertEqual(code, 0)
+        lines = [line for line in out.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, out)
+
+    def test_any_offender_exits_1(self):
+        code, out, err = self._run([
+            {"number": 5, "title": "Clean", "labels": ["by:human", "feature"]},
+            {"number": 6, "title": "Bad", "labels": []},
+        ])
+        self.assertEqual(code, 1)
+
+    def test_no_gh_write_subcommand_is_ever_invoked(self):
+        # The stub itself asserts this on every call (_assert_no_gh_write);
+        # this test additionally proves the run actually exercised gh at
+        # all, so a vacuously-passing no-op path can't hide behind it.
+        calls = []
+        issues = [{"number": 1, "title": "x", "labels": ["by:human", "feature"]}]
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return _open_issues_fake_run(issues)(args, **kwargs)
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli(["audit-issues"])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(calls)
+        for args in calls:
+            _assert_no_gh_write(args)
+
+    def test_more_than_30_open_issues_are_all_examined(self):
+        issues = [
+            {"number": n, "title": "Issue {}".format(n), "labels": ["by:human"]}
+            for n in range(1, 36)
+        ]
+        code, out, err = self._run(issues)
+        self.assertEqual(code, 1)
+        offending_numbers = {
+            line.split()[0] for line in out.splitlines() if line.startswith("#")
+        }
+        self.assertEqual(len(offending_numbers), 35, out)
 
 
 def _deferral_record():

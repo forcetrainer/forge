@@ -939,6 +939,65 @@ def cmd_add_phase(args, repo_root):
     return 0
 
 
+# Labels that predate the current kind/origin scheme (Phase 2's
+# ``forge:deferral``, and three others retired alongside it). None of them
+# is ever applied by this engine any more, but an issue that still carries
+# one is a leftover audit-issues must surface rather than silently ignore.
+RETIRED_LABELS = ("forge:deferral", "forge:backlog", "via:reported", "via:implementation")
+
+
+def cmd_audit_issues(args, repo_root):
+    """Read-only sweep of every OPEN issue (closed issues are out of
+    scope — see the spec) checking exactly the label-hygiene invariants
+    this engine depends on: exactly one kind label, exactly one origin
+    label, and no retired label. Never calls a `gh` write subcommand —
+    ``GitHubStore.open_issues`` is the only network call this makes, and
+    it is `gh issue list`, which mutates nothing.
+
+    Needs no forge marker precisely because it examines every open issue,
+    including ones filed by people who have never heard of forge — see
+    the module docstring's note on why Phase 2 could drop the
+    ``forge:deferral`` read-back check."""
+    store = fms.GitHubStore(repo_root)
+    try:
+        issues = store.open_issues()
+    except (fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    kind_labels = set(fms.GitHubStore.KIND_LABELS)
+    origin_labels = set(fms.GitHubStore.ORIGIN_LABELS.values())
+
+    offending_lines = []
+    for issue in issues:
+        labels = issue["labels"]
+        failed = []
+
+        kind_count = sum(1 for name in labels if name in kind_labels)
+        if kind_count != 1:
+            failed.append("kind label count {} (expected 1)".format(kind_count))
+
+        origin_count = sum(1 for name in labels if name in origin_labels)
+        if origin_count != 1:
+            failed.append("origin label count {} (expected 1)".format(origin_count))
+
+        for retired in RETIRED_LABELS:
+            if retired in labels:
+                failed.append("retired label {!r} present".format(retired))
+
+        if failed:
+            offending_lines.append(
+                "#{} {!r}: {}".format(issue["number"], issue["title"], "; ".join(failed))
+            )
+
+    if offending_lines:
+        _print_lines(offending_lines, sys.stdout)
+        return 1
+
+    print("audit-issues: all {} open issue(s) clean.".format(len(issues)))
+    return 0
+
+
 def cmd_fmt(args, repo_root):
     """Two branches: explicit paths, or no PATH (every managed local file).
 
@@ -1266,6 +1325,9 @@ def build_parser():
     fg.add_argument("--write", action="store_true")
     p.add_argument("paths", nargs="*", metavar="PATH")
     p.set_defaults(func=cmd_fmt)
+
+    p = sub.add_parser("audit-issues")
+    p.set_defaults(func=cmd_audit_issues)
 
     p = sub.add_parser("install-guards")
     p.add_argument("--pre-commit", action="store_true", dest="pre_commit")
