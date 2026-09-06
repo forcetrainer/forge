@@ -497,6 +497,17 @@ class ForgeLintCLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[warning]", result.stdout)
 
+    def _detached_repo_root(self):
+        """A repo root the fixtures do not live under, so the spec-coverage
+        check has no git history to read here. Without this the fixture tests
+        would silently depend on this repo's own branch state — the fixtures
+        were themselves added on a branch, so against its merge base every
+        fixture section reads as new — which is the very coupling owned
+        fixtures exist to remove."""
+        root = tempfile.mkdtemp(prefix="forge-lint-fixture-root-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
     def test_fixture_phase14_plan_lints_clean(self):
         # Owned fixture, not the live docs/forge/plans document: a plan-grammar
         # change elsewhere must never break this test for a reason unrelated
@@ -504,7 +515,8 @@ class ForgeLintCLITests(unittest.TestCase):
         plan = os.path.join(REPO_ROOT, "tests/fixtures/plans/legacy-halt-precision.md")
         spec = os.path.join(REPO_ROOT, "tests/fixtures/specs/legacy-halt-precision-design.md")
         result = subprocess.run(
-            [sys.executable, SCRIPT, plan, "--spec", spec],
+            [sys.executable, SCRIPT, plan, "--spec", spec,
+             "--repo-root", self._detached_repo_root()],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -513,7 +525,8 @@ class ForgeLintCLITests(unittest.TestCase):
         plan = os.path.join(REPO_ROOT, "tests/fixtures/plans/legacy-dispatch-parity.md")
         spec = os.path.join(REPO_ROOT, "tests/fixtures/specs/legacy-dispatch-parity-design.md")
         result = subprocess.run(
-            [sys.executable, SCRIPT, plan, "--spec", spec],
+            [sys.executable, SCRIPT, plan, "--spec", spec,
+             "--repo-root", self._detached_repo_root()],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -536,7 +549,8 @@ class ForgeLintCLITests(unittest.TestCase):
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(broken_text)
             result = subprocess.run(
-                [sys.executable, SCRIPT, broken_path, "--spec", spec],
+                [sys.executable, SCRIPT, broken_path, "--spec", spec,
+                 "--repo-root", self._detached_repo_root()],
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -759,6 +773,251 @@ class ForgeLintRealSpecCorpusTests(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+COVERAGE_SPEC = """# Spec
+
+## Alpha section
+
+Alpha content.
+
+## Beta section
+
+Beta content.
+
+## Risks / constraints
+
+Risk content.
+
+## Changelog
+
+2026-01-01: created.
+"""
+
+
+def _coverage_plan(*spec_values):
+    """One task per given **Spec:** value; ``None`` declares no **Spec:**."""
+    blocks = []
+    for i, value in enumerate(spec_values, 1):
+        spec_line = "**Spec:** {}\n\n".format(value) if value else ""
+        blocks.append(
+            "### Task {n}: Thing {n}\n"
+            "- [ ] Done\n\n"
+            "**Files:**\n- Create: `f{n}.py`\n\n"
+            "{spec}"
+            "**Acceptance:** `python3 -m pytest -q`\n\n"
+            "**Tier:** `standard`\n\n"
+            "**Depends on:** nothing.\n".format(n=i, spec=spec_line)
+        )
+    return "# Plan header\n\n**Goal:** Ship the thing.\n\n" + "\n".join(
+        "# Task {}\n\n{}".format(i, b) for i, b in enumerate(blocks, 1)
+    )
+
+
+class ForgeLintChangedSpecCoverageTests(unittest.TestCase):
+    """Every **changed** spec section must be named by some task's
+    ``**Spec:**`` line — the coverage gap that no single task's diff can
+    reveal, caught before the first line is written rather than mid-run."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="forge-lint-covrepo-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.spec_path = os.path.join(self.repo, "spec.md")
+        self.plan_path = os.path.join(self.repo, "plan.md")
+
+    # --- fixtures -------------------------------------------------------
+
+    def _git(self, *args):
+        env = dict(os.environ)
+        env.update({
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+        })
+        result = subprocess.run(
+            ["git", "-C", self.repo] + list(args),
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _init_repo(self, branch="main"):
+        self._git("init", "-q", "-b", branch)
+
+    def _commit(self, name, text):
+        _write(os.path.join(self.repo, name), text)
+        self._git("add", name)
+        self._git("commit", "-qm", "add " + name)
+
+    def _commit_spec(self, text=COVERAGE_SPEC):
+        self._init_repo()
+        self._commit("spec.md", text)
+
+    def _coverage(self, plan_text, spec_text=None, repo_root=None):
+        if spec_text is not None:
+            _write(self.spec_path, spec_text)
+        _write(self.plan_path, plan_text)
+        defects = fl.lint_plan(
+            self.plan_path, self.spec_path, repo_root=repo_root or self.repo,
+        )
+        return [d for d in defects if d.where == "spec coverage"]
+
+    # --- the rule -------------------------------------------------------
+
+    def test_changed_section_claimed_yields_no_defect(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace("Alpha content.", "Alpha content, revised.")
+        self.assertEqual(self._coverage(_coverage_plan("Alpha section"), changed), [])
+
+    def test_changed_section_claimed_by_no_task_is_an_error_naming_it(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace("Beta content.", "Beta content, revised.")
+        defects = self._coverage(_coverage_plan("Alpha section"), changed)
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta section", defects[0].message)
+        self.assertEqual(defects[0].severity, "error")
+
+    def test_unchanged_section_claimed_by_no_task_yields_no_defect(self):
+        self._commit_spec()
+        self.assertEqual(self._coverage(_coverage_plan(None), COVERAGE_SPEC), [])
+
+    def test_changed_changelog_is_exempt(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace(
+            "2026-01-01: created.", "2026-01-01: created.\n2026-01-02: amended.",
+        )
+        self.assertEqual(self._coverage(_coverage_plan(None), changed), [])
+
+    def test_spec_with_no_committed_version_requires_every_section_claimed(self):
+        self._init_repo()
+        self._commit("README.md", "hello\n")  # HEAD exists; spec.md does not
+        defects = self._coverage(_coverage_plan("Alpha section"), COVERAGE_SPEC)
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta section", defects[0].message)
+
+    def test_spec_outside_a_git_repo_yields_no_defect(self):
+        outside = tempfile.mkdtemp(prefix="forge-lint-nogit-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        self.spec_path = os.path.join(outside, "spec.md")
+        self.plan_path = os.path.join(outside, "plan.md")
+        self.assertEqual(
+            self._coverage(_coverage_plan(None), COVERAGE_SPEC, repo_root=outside), [],
+        )
+
+    def test_failed_git_read_yields_no_defect(self):
+        # A repo with an unborn HEAD: `git show HEAD:spec.md` cannot answer,
+        # and an unanswerable git read must never manufacture a defect.
+        self._init_repo()
+        self.assertEqual(self._coverage(_coverage_plan(None), COVERAGE_SPEC), [])
+
+    def test_every_unclaimed_changed_section_reported_in_one_run(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace(
+            "Alpha content.", "Alpha content, revised.",
+        ).replace("Beta content.", "Beta content, revised.")
+        defects = self._coverage(_coverage_plan(None), changed)
+        self.assertEqual(len(defects), 2, defects)
+        self.assertTrue(any("Alpha section" in d.message for d in defects))
+        self.assertTrue(any("Beta section" in d.message for d in defects))
+
+    # --- the comparison unit --------------------------------------------
+
+    def test_reflow_alone_is_not_a_change(self):
+        self._commit_spec()
+        reflowed = COVERAGE_SPEC.replace(
+            "Beta content.", "Beta\ncontent.",
+        ).replace("Alpha content.", "   Alpha content.   ")
+        self.assertEqual(self._coverage(_coverage_plan(None), reflowed), [])
+
+    def test_renamed_heading_reads_as_changed(self):
+        self._commit_spec()
+        renamed = COVERAGE_SPEC.replace("## Beta section", "## Beta area")
+        defects = self._coverage(_coverage_plan(None), renamed)
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta area", defects[0].message)
+
+    def test_change_in_a_subsection_does_not_mark_its_parent_changed(self):
+        spec = (
+            "# Spec\n\n## Alpha section\n\nAlpha content.\n\n"
+            "### Alpha detail\n\nDetail content.\n\n"
+            "## Beta section\n\nBeta content.\n"
+        )
+        self._commit_spec(spec)
+        changed = spec.replace("Detail content.", "Detail content, revised.")
+        defects = self._coverage(_coverage_plan(None), changed)
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Alpha detail", defects[0].message)
+
+    def test_claiming_a_parent_claims_its_changed_subsection(self):
+        spec = (
+            "# Spec\n\n## Alpha section\n\nAlpha content.\n\n"
+            "### Alpha detail\n\nDetail content.\n\n"
+            "## Beta section\n\nBeta content.\n"
+        )
+        self._commit_spec(spec)
+        changed = spec.replace("Detail content.", "Detail content, revised.")
+        self.assertEqual(self._coverage(_coverage_plan("Alpha section"), changed), [])
+
+    def test_unresolvable_spec_name_does_not_suppress_the_coverage_check(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace("Beta content.", "Beta content, revised.")
+        defects = self._coverage(_coverage_plan("Nonexistent section"), changed)
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta section", defects[0].message)
+
+    def test_changed_risks_and_constraints_is_exempt(self):
+        self._commit_spec()
+        changed = COVERAGE_SPEC.replace("Risk content.", "Risk content, revised.")
+        self.assertEqual(self._coverage(_coverage_plan(None), changed), [])
+
+    # --- the baseline is the merge base, not HEAD ------------------------
+
+    def test_section_changed_and_committed_on_the_branch_still_reported(self):
+        # The flow amends a spec *and commits it* before the plan is written.
+        # Against HEAD the amendment reads as unchanged and the rule is inert
+        # in the exact flow it exists for; against the merge base it fires.
+        self._commit_spec()
+        self._git("checkout", "-q", "-b", "feature")
+        _write(self.spec_path, COVERAGE_SPEC.replace("Beta content.", "Beta content, revised."))
+        self._git("add", "spec.md")
+        self._git("commit", "-qm", "amend spec")
+        defects = self._coverage(_coverage_plan(None))
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta section", defects[0].message)
+        self.assertEqual(defects[0].severity, "error")
+
+    def test_no_resolvable_merge_base_falls_back_to_head(self):
+        # No default branch to resolve and no remote: the baseline degrades to
+        # HEAD and the rule goes inert, rather than failing a plan because
+        # lint cannot establish what the branch changed.
+        self._init_repo(branch="odd-branch")
+        self._commit("spec.md", COVERAGE_SPEC)
+        self._commit("spec.md", COVERAGE_SPEC.replace("Beta content.", "Beta content, revised."))
+        self.assertEqual(self._coverage(_coverage_plan(None)), [])
+
+    def test_dangling_origin_head_falls_through_to_a_resolvable_default(self):
+        # A dangling refs/remotes/origin/HEAD is ordinary after a
+        # default-branch rename or a partial clone. Taking its answer
+        # unverified would make merge-base fail and the rule go permanently,
+        # silently inert while a resolvable default branch sits one rung
+        # down — lint reporting clean because it cannot see.
+        self._commit_spec()
+        self._git("symbolic-ref", "refs/remotes/origin/HEAD",
+                  "refs/remotes/origin/renamed-away")
+        self._git("checkout", "-q", "-b", "feature")
+        _write(self.spec_path, COVERAGE_SPEC.replace("Beta content.", "Beta content, revised."))
+        self._git("add", "spec.md")
+        self._git("commit", "-qm", "amend spec")
+        defects = self._coverage(_coverage_plan(None))
+        self.assertEqual(len(defects), 1, defects)
+        self.assertIn("Beta section", defects[0].message)
+
+    def test_committed_change_against_the_default_branch_itself_is_inert(self):
+        # On the default branch, merge-base HEAD <default> is HEAD, so a
+        # committed amendment reads as unchanged — the documented degradation.
+        self._commit_spec()
+        self._commit("spec.md", COVERAGE_SPEC.replace("Beta content.", "Beta content, revised."))
+        self.assertEqual(self._coverage(_coverage_plan(None)), [])
 
 
 if __name__ == "__main__":

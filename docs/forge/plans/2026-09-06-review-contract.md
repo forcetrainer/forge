@@ -145,7 +145,7 @@
 **Depends on:** Task 4.
 
 ### Task 6: Plan lint requires changed spec sections to be claimed
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_lint.py` (add the changed-section mapping check to `lint_plan`)

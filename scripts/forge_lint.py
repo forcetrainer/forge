@@ -30,6 +30,7 @@ class identity across the runner and this module.
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -497,6 +498,255 @@ def check_memory_files(repo_root):
     return [_error("memory", msg) for msg in forge_memory.fmt_check(paths)]
 
 
+# --- Changed-section coverage ----------------------------------------------
+#
+# The baseline is the branch's merge base with the default branch, not
+# ``HEAD`` — see ``_baseline_ref``. The comparison unit is a heading keyed
+# by its stripped, lowercased text —
+# the same identity ``**Spec:**`` names resolve through — mapped to that
+# heading's **own** body: the lines from the heading to the next heading of
+# any level, with every whitespace run collapsed to a single space. Two
+# consequences, both deliberate:
+#
+#   * Reflow is invisible. Living specs get rewrapped constantly, and a rule
+#     that fired on a rewrap would be ignored within a week.
+#   * A change confined to a subsection implicates that subsection only, not
+#     every ancestor up to the h1. Body text is *own* body rather than
+#     subtree precisely so a one-line fix in a leaf doesn't mark half the
+#     document changed.
+#
+# Claiming, by contrast, is subtree-aware: naming a parent claims its
+# descendants, because ``eb.find_spec_sections`` — what actually builds the
+# brief — hands a task naming the parent the child's text too. Resolution
+# reuses that same function rather than re-deriving prefix-match grammar.
+#
+# A heading whose own body is empty (a pure container like ``# Spec``) is
+# never reported: there is nothing in it for a task to deliver, so demanding
+# a claim would be noise. A heading present in the new spec but not the
+# committed one — including a *renamed* heading — reads as changed: the spec
+# now asserts something under a name no committed version carried, and a
+# plan that doesn't name it cannot be shown to deliver it.
+
+_GIT_UNREADABLE = object()
+# Exempt because nothing in them can be built: every other section states a
+# requirement a task can deliver, while these two record history and
+# judgment — no task is ever assigned to add a changelog line or a risk
+# entry, so demanding they be claimed would train the reader to ignore the
+# rule. That principle is the membership test, not convenience: a section
+# joins this set only when it is structurally unbuildable.
+_EXEMPT_KEYS = frozenset({"changelog", "risks / constraints"})
+
+
+def _normalize_body(text):
+    """Whitespace-insensitive body text — reflow must not read as change."""
+    return " ".join(text.split())
+
+
+def _spec_headings(spec_lines):
+    """``[(level, raw_text, key, start_index)]`` for every unfenced heading,
+    in document order — the same heading grammar ``eb.find_spec_sections``
+    uses, so a section's identity here is the identity ``**Spec:**`` names."""
+    mask = eb.fence_mask(spec_lines)
+    headings = []
+    for i, line in enumerate(spec_lines):
+        if mask[i]:
+            continue
+        m = eb.HEADING_RE.match(line)
+        if m:
+            raw = m.group(2).strip()
+            key = _normalize_body(eb.strip_heading_text(raw).lower())
+            headings.append((len(m.group(1)), raw, key, i))
+    return headings
+
+
+def _section_bodies(spec_lines):
+    """``{key: normalized own-body text}``. Duplicate heading texts (which
+    ``**Spec:**`` resolution already calls ambiguous) are joined under the
+    one key, so a change in either still registers."""
+    headings = _spec_headings(spec_lines)
+    bodies = {}
+    for n, (_level, _raw, key, start) in enumerate(headings):
+        end = headings[n + 1][3] if n + 1 < len(headings) else len(spec_lines)
+        body = _normalize_body("".join(spec_lines[start + 1:end]))
+        bodies[key] = (bodies[key] + " " + body).strip() if key in bodies else body
+    return bodies
+
+
+def _git(repo_root, *args):
+    """``subprocess.run`` of a git command in ``repo_root``, or ``None`` when
+    git itself could not be run."""
+    try:
+        return subprocess.run(
+            ["git", "-C", repo_root] + list(args), capture_output=True,
+        )
+    except OSError:
+        return None
+
+
+def _ok(result):
+    return result is not None and result.returncode == 0
+
+
+def _default_branch(repo_root):
+    """The repo's default branch ref, or ``None``.
+
+    Asked in descending order of authority, never hardcoded to one name:
+    the remote's own declaration (``refs/remotes/origin/HEAD``), then this
+    repo's configured ``init.defaultBranch``, then the two conventional
+    names as a last resort. A repo that answers none of these has no default
+    branch to merge-base against, and the caller degrades to ``HEAD``.
+
+    Every rung — the first included — must actually resolve to a commit
+    before it is accepted. ``symbolic-ref`` reports what
+    ``refs/remotes/origin/HEAD`` *points at* without checking that anything
+    is there, and a dangling one is ordinary after a default-branch rename
+    or a partial clone. Returning that name unverified would make
+    ``merge-base`` fail and the rule go permanently and silently inert while
+    a resolvable default branch sits one rung down — lint reporting clean
+    because it cannot see, which is worse than crying wolf since nothing
+    announces that it stopped working. So an unverified answer falls
+    through to the next candidate; it never returns early."""
+    candidates = []
+    head = _git(repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if _ok(head) and head.stdout.strip():
+        candidates.append(head.stdout.decode("utf-8", "replace").strip())
+
+    configured = _git(repo_root, "config", "--get", "init.defaultBranch")
+    if _ok(configured) and configured.stdout.strip():
+        name = configured.stdout.decode("utf-8", "replace").strip()
+        candidates += ["origin/" + name, name]
+    candidates += ["origin/main", "origin/master", "main", "master"]
+
+    for cand in candidates:
+        if _ok(_git(repo_root, "rev-parse", "--verify", "--quiet", cand + "^{commit}")):
+            return cand
+    return None
+
+
+def _baseline_ref(repo_root):
+    """The commit the spec is compared against: the branch's merge base with
+    the default branch.
+
+    ``HEAD`` is the wrong baseline for this rule and the reason it exists:
+    the flow amends a spec **and commits it** before the plan is written, so
+    against ``HEAD`` the amendment is already in history by the time lint
+    runs, nothing reads as changed, and the check is inert in exactly the
+    flow it was built for. The merge base is what the branch started from,
+    which is what "changed on this branch" means.
+
+    Where no merge base resolves — the default branch itself, an unborn or
+    detached HEAD, a repo with no recognizable default branch — this falls
+    back to ``HEAD``, which makes the rule *inert*, not *failing*: a plan is
+    not wrong merely because lint cannot establish what the branch changed.
+    That is deliberately a different outcome from ``_GIT_UNREADABLE``, which
+    means git could not answer at all."""
+    default = _default_branch(repo_root)
+    if default:
+        base = _git(repo_root, "merge-base", "HEAD", default)
+        if _ok(base) and base.stdout.strip():
+            return base.stdout.decode("utf-8", "replace").strip()
+    return "HEAD"
+
+
+def _committed_spec_lines(spec_path, repo_root):
+    """The spec's baseline version as lines, ``None`` when the spec has no
+    committed version at all, or ``_GIT_UNREADABLE`` when git cannot answer.
+
+    The two failure shapes are kept apart on purpose: "absent from the
+    baseline" means a genuinely new system and every section is changed,
+    while "git could not answer" (no repo, unborn HEAD, path outside the
+    repo, an undecodable blob, no git binary) must emit nothing. Absence is
+    established by ``ls-tree`` succeeding with empty output — never by
+    ``git show`` failing, which cannot tell a missing path from a broken
+    repo."""
+    rel = os.path.relpath(
+        os.path.abspath(spec_path), os.path.abspath(repo_root)
+    ).replace(os.sep, "/")
+    if rel == ".." or rel.startswith("../"):
+        return _GIT_UNREADABLE
+
+    baseline = _baseline_ref(repo_root)
+    listed = _git(repo_root, "ls-tree", "-z", baseline, "--", rel)
+    if not _ok(listed):
+        return _GIT_UNREADABLE
+    if not listed.stdout.strip():
+        return None  # no committed version — a genuinely new spec
+
+    shown = _git(repo_root, "show", baseline + ":" + rel)
+    if not _ok(shown):
+        return _GIT_UNREADABLE
+    try:
+        return shown.stdout.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return _GIT_UNREADABLE
+
+
+def _claimed_keys(blocks, spec_lines):
+    """Every section key claimed by some task's ``**Spec:**`` line, each
+    claimed name pulling in its whole subtree. A name that doesn't resolve
+    (or resolves ambiguously) is skipped here — ``_lint_task_fields``
+    already reports it, and swallowing the coverage check over it would let
+    one typo hide every gap."""
+    headings = _spec_headings(spec_lines)
+    by_raw = {}
+    for n, (level, raw, _key, _start) in enumerate(headings):
+        by_raw.setdefault(raw, n)
+
+    claimed = set()
+    for _where, _num, block in blocks:
+        try:
+            names = eb.parse_spec_names(block)
+        except RuntimeError:
+            continue
+        for name in names:
+            try:
+                sections = eb.find_spec_sections(spec_lines, [name])
+            except RuntimeError:
+                continue
+            n = by_raw.get(sections[0][0])
+            if n is None:
+                continue
+            level = headings[n][0]
+            claimed.add(headings[n][2])
+            for m in range(n + 1, len(headings)):
+                if headings[m][0] <= level:
+                    break
+                claimed.add(headings[m][2])
+    return claimed
+
+
+def _lint_spec_coverage(spec_path, spec_lines, blocks, repo_root):
+    """Every spec section changed since the branch's merge base with the
+    default branch is named by some task's ``**Spec:**`` line. ``##
+    Changelog`` and ``## Risks / constraints`` are exempt; a spec with no
+    committed version has every section changed; a git read that cannot
+    answer emits nothing. Every unclaimed section is reported, never the
+    first only."""
+    committed = _committed_spec_lines(spec_path, repo_root)
+    if committed is _GIT_UNREADABLE:
+        return []
+
+    old_bodies = {} if committed is None else _section_bodies(committed)
+    new_bodies = _section_bodies(spec_lines)
+    claimed = _claimed_keys(blocks, spec_lines)
+
+    defects = []
+    seen = set()
+    for _level, raw, key, _start in _spec_headings(spec_lines):
+        if key in seen or key in _EXEMPT_KEYS or key in claimed:
+            continue
+        body = new_bodies.get(key, "")
+        if not body or body == old_bodies.get(key):
+            continue
+        seen.add(key)
+        defects.append(_error(
+            "spec coverage",
+            'changed spec section "{}" in {} is named by no task\'s '
+            "**Spec:** line".format(raw, spec_path),
+        ))
+    return defects
+
+
 def lint_plan(plan_path, spec_path=None, *, repo_root):
     """Every documented-grammar defect in ``plan_path`` (and ``spec_path``
     when given), never short-circuiting on the first — including when the
@@ -549,6 +799,9 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
     defects.extend(_lint_checklists(
         plan_path, spec_path, task_numbers, structural_clean=not heading_defects,
     ))
+
+    if spec_lines is not None:
+        defects.extend(_lint_spec_coverage(spec_path, spec_lines, blocks, repo_root))
 
     return _dedup(defects)
 
