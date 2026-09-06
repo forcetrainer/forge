@@ -240,7 +240,7 @@
 **Depends on:** Task 1.
 
 ### Task 10: Owned lint fixtures replace live plan documents
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Create: `tests/fixtures/plans/legacy-dispatch-parity.md`

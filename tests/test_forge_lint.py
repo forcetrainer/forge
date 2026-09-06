@@ -497,23 +497,52 @@ class ForgeLintCLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[warning]", result.stdout)
 
-    def test_real_phase14_plan_lints_clean(self):
-        plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-08-21-phase14-halt-precision.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-08-21-halt-precision-design.md")
+    def test_fixture_phase14_plan_lints_clean(self):
+        # Owned fixture, not the live docs/forge/plans document: a plan-grammar
+        # change elsewhere must never break this test for a reason unrelated
+        # to lint itself.
+        plan = os.path.join(REPO_ROOT, "tests/fixtures/plans/legacy-halt-precision.md")
+        spec = os.path.join(REPO_ROOT, "tests/fixtures/specs/legacy-halt-precision-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_real_phase12b_plan_lints_clean(self):
-        plan = os.path.join(REPO_ROOT, "docs/forge/plans/2026-07-17-phase12b-claude-dispatch-parity.md")
-        spec = os.path.join(REPO_ROOT, "docs/forge/archive/specs/2026-07-17-phase12b-claude-dispatch-parity-design.md")
+    def test_fixture_phase12b_plan_lints_clean(self):
+        plan = os.path.join(REPO_ROOT, "tests/fixtures/plans/legacy-dispatch-parity.md")
+        spec = os.path.join(REPO_ROOT, "tests/fixtures/specs/legacy-dispatch-parity-design.md")
         result = subprocess.run(
             [sys.executable, SCRIPT, plan, "--spec", spec],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fixture_phase14_plan_tier_justification_removed_errors(self):
+        # Proves the fixture still exercises real lint rules rather than
+        # passing vacuously: strip Task 3's trivial-tier justification and
+        # lint must report it as an error.
+        plan = os.path.join(REPO_ROOT, "tests/fixtures/plans/legacy-halt-precision.md")
+        spec = os.path.join(REPO_ROOT, "tests/fixtures/specs/legacy-halt-precision-design.md")
+        with open(plan, encoding="utf-8") as f:
+            text = f.read()
+        broken_text = text.replace(
+            "**Tier:** `trivial` — version strings and one status word; no logic, no design content.",
+            "**Tier:** `trivial`",
+        )
+        self.assertNotEqual(text, broken_text, "fixture's trivial-tier line not found to break")
+        fd, broken_path = tempfile.mkstemp(suffix=".md")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(broken_text)
+            result = subprocess.run(
+                [sys.executable, SCRIPT, broken_path, "--spec", spec],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("justification", result.stdout)
+        finally:
+            os.remove(broken_path)
 
 
 def _spec_text(system="execution", supersedes=None, changelog=None, extra=""):
