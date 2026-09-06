@@ -537,7 +537,7 @@ class SubcommandSurfaceTests(CLITestCase):
         self.assertEqual(set(sub_action.choices), {
             "add-constraint", "update-constraint", "retire-constraint",
             "list-constraints", "defer", "resolve-deferral", "fmt",
-            "install-guards",
+            "install-guards", "add-program", "add-phase",
         })
 
     # This is an ALLOW-list, not a denylist, and must stay one: a denylist
@@ -567,6 +567,11 @@ class SubcommandSurfaceTests(CLITestCase):
         "resolve-deferral": {"ref", "reason"},
         "fmt": {"check", "write", "paths"},
         "install-guards": {"pre_commit", "ci"},
+        # No --by on either: origin is by:human unconditionally for both
+        # (a decomposition exists only because a human approved it at a
+        # brainstorming gate), so there is no flag to guess wrong.
+        "add-program": {"name", "why", "kind"},
+        "add-phase": {"epic", "seq", "of", "title", "why", "kind"},
     }
 
     def test_no_subcommand_accepts_a_free_form_body_argument(self):
@@ -994,6 +999,270 @@ class DeferCLITests(CLITestCase):
         self.assertNotIn("improve-x", text)
 
 
+class AddProgramCLITests(CLITestCase):
+    def test_prints_issue_number_alone_on_last_line_and_applies_labels(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
+            return _completed(
+                returncode=0, stdout="https://github.com/o/r/issues/42\n",
+            )
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-program", "--name", "Structured memory",
+                "--why", "Track work across phases.", "--kind", "feature",
+            ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip().splitlines()[-1], "42")
+
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        title_idx = create.index("--title")
+        self.assertEqual(create[title_idx + 1], "Structured memory")
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:human", "feature"])
+
+    def test_missing_kind_exits_nonzero(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-program", "--name", "x", "--why", "y",
+            ])
+
+    def test_no_by_flag(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-program", "--name", "x", "--why", "y", "--kind", "feature",
+                "--by", "human",
+            ])
+
+    def test_overbudget_name_rejected_before_any_network_call(self):
+        with mock.patch.object(
+            fms.subprocess, "run",
+            side_effect=AssertionError("gh must not be invoked"),
+        ):
+            code, out, err = _run_cli([
+                "add-program", "--name", "x" * 81, "--why", "y",
+                "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("name", err)
+
+    def test_overbudget_why_rejected_before_any_network_call(self):
+        with mock.patch.object(
+            fms.subprocess, "run",
+            side_effect=AssertionError("gh must not be invoked"),
+        ):
+            code, out, err = _run_cli([
+                "add-program", "--name", "x", "--why", "y" * 301,
+                "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("why", err)
+
+
+def _phase_gh_fake_run(calls, epic, program_title, sub_issues,
+                        new_issue_number, attach_fails=False, block_fails=False):
+    """A ``subprocess.run`` stub covering everything ``add-phase`` calls
+    through ``gh``: auth, label preflight, the epic's sub-issues and title
+    reads, issue creation, and the two hierarchy-edge POSTs (each of which
+    first resolves an issue number to its REST id via a GET)."""
+    epic_issue_path = "repos/{owner}/{repo}/issues/" + str(epic)
+    new_issue_path = "repos/{owner}/{repo}/issues/" + str(new_issue_number)
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["gh", "auth"]:
+            return _completed(returncode=0, stdout="Logged in")
+        label = _gh_label_preflight(args)
+        if label is not None:
+            return label
+        if args[:3] == ["gh", "api", epic_issue_path + "/sub_issues"] and "--method" not in args:
+            return _completed(returncode=0, stdout=json.dumps(sub_issues))
+        if args[:3] == ["gh", "api", epic_issue_path] and "--method" not in args:
+            return _completed(
+                returncode=0,
+                stdout=json.dumps({"id": 1000 + epic, "title": program_title}),
+            )
+        if args[:2] == ["gh", "issue"] and "create" in args:
+            return _completed(
+                returncode=0,
+                stdout="https://github.com/o/r/issues/{}\n".format(new_issue_number),
+            )
+        if args[:3] == ["gh", "api", epic_issue_path + "/sub_issues"] and "--method" in args:
+            return (
+                _completed(returncode=1, stderr="boom") if attach_fails
+                else _completed(returncode=0, stdout="{}")
+            )
+        if (args[:3] == ["gh", "api", new_issue_path + "/dependencies/blocked_by"]
+                and "--method" in args):
+            return (
+                _completed(returncode=1, stderr="boom") if block_fails
+                else _completed(returncode=0, stdout="{}")
+            )
+        if args[:3] == ["gh", "api", new_issue_path] and "--method" not in args:
+            return _completed(
+                returncode=0,
+                stdout=json.dumps({"id": 2000 + new_issue_number, "title": "n/a"}),
+            )
+        for entry in sub_issues:
+            blocker_path = "repos/{owner}/{repo}/issues/" + str(entry["number"])
+            if args[:3] == ["gh", "api", blocker_path] and "--method" not in args:
+                return _completed(
+                    returncode=0,
+                    stdout=json.dumps({"id": 3000 + entry["number"], "title": "n/a"}),
+                )
+        raise AssertionError("unexpected gh invocation: {}".format(args))
+
+    return fake_run
+
+
+class AddPhaseCLITests(CLITestCase):
+    def test_seq_1_renders_title_and_files_no_blocked_by_edge(self):
+        calls = []
+        fake_run = _phase_gh_fake_run(
+            calls, epic=5, program_title="Structured memory",
+            sub_issues=[], new_issue_number=20,
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "Read path removal", "--why", "w", "--kind", "feature",
+            ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip().splitlines()[-1], "20")
+
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        title_idx = create.index("--title")
+        self.assertEqual(
+            create[title_idx + 1], "Structured memory 1/5: Read path removal",
+        )
+        self.assertFalse(
+            [a for a in calls if "dependencies/blocked_by" in " ".join(a)],
+            "seq 1 must file no blocked-by edge",
+        )
+
+    def test_seq_2_blocks_on_the_epics_last_sub_issue(self):
+        calls = []
+        fake_run = _phase_gh_fake_run(
+            calls, epic=5, program_title="Structured memory",
+            sub_issues=[{"number": 20}], new_issue_number=21,
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "2", "--of", "5",
+                "--title", "Second phase", "--why", "w", "--kind", "feature",
+            ])
+        self.assertEqual(code, 0, err)
+        block_post = next(
+            a for a in calls if "dependencies/blocked_by" in " ".join(a)
+        )
+        self.assertIn("issue_id=3020", block_post)
+
+    def test_seq_mismatch_exits_nonzero_naming_both_numbers_creates_no_issue(self):
+        calls = []
+        fake_run = _phase_gh_fake_run(
+            calls, epic=5, program_title="Structured memory",
+            sub_issues=[{"number": 20}], new_issue_number=21,
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "9", "--of", "5",
+                "--title", "Second phase", "--why", "w", "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("9", err)
+        self.assertIn("2", err)
+        self.assertFalse(
+            [a for a in calls if a[:2] == ["gh", "issue"] and "create" in a],
+            "a seq mismatch must create no issue",
+        )
+
+    def test_missing_kind_exits_nonzero(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "t", "--why", "w",
+            ])
+
+    def test_no_by_flag(self):
+        with self.assertRaises(SystemExit):
+            fm.main([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "t", "--why", "w", "--kind", "feature",
+                "--by", "human",
+            ])
+
+    def test_overbudget_title_rejected_before_any_network_call(self):
+        with mock.patch.object(
+            fms.subprocess, "run",
+            side_effect=AssertionError("gh must not be invoked"),
+        ):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "x" * 81, "--why", "w", "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("title", err)
+
+    def test_overbudget_why_rejected_before_any_network_call(self):
+        with mock.patch.object(
+            fms.subprocess, "run",
+            side_effect=AssertionError("gh must not be invoked"),
+        ):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "t", "--why", "y" * 301, "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("why", err)
+
+    def test_failing_attach_sub_issue_after_creation_reports_created_number(self):
+        calls = []
+        fake_run = _phase_gh_fake_run(
+            calls, epic=5, program_title="Structured memory",
+            sub_issues=[], new_issue_number=20, attach_fails=True,
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "1", "--of", "5",
+                "--title", "Read path removal", "--why", "w", "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("20", err)
+        self.assertIn("attach", err.lower())
+
+    def test_failing_add_blocked_by_after_attach_reports_created_number(self):
+        calls = []
+        fake_run = _phase_gh_fake_run(
+            calls, epic=5, program_title="Structured memory",
+            sub_issues=[{"number": 20}], new_issue_number=21, block_fails=True,
+        )
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            code, out, err = _run_cli([
+                "add-phase", "--epic", "5", "--seq", "2", "--of", "5",
+                "--title", "Second phase", "--why", "w", "--kind", "feature",
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertIn("21", err)
+        self.assertIn("blocked", err.lower())
+
+
 def _deferral_record():
     return fm.Record("deferral", {"title": "t", "why": "w", "from": "user"})
 
@@ -1051,6 +1320,61 @@ class GitHubStorePrimitivesTests(unittest.TestCase):
         )
         labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
         self.assertEqual(labels, ["by:human"])
+
+    def test_create_uses_the_identifying_field_for_a_program_title(self):
+        # A program's heading field is "name", not "title" — create() must
+        # read the issue title from record type's identifying field
+        # (SCHEMA[type][0]) rather than the literal key "title", or a
+        # program would be filed with an empty title.
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/12\n")
+
+        record = fm.Record("program", {"name": "Structured memory", "why": "w"})
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.store.create(record, by="human", kind="feature")
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        title_idx = create.index("--title")
+        self.assertEqual(create[title_idx + 1], "Structured memory")
+
+    def test_create_still_uses_title_field_for_deferral_and_phase(self):
+        # The fix above must not change behavior for the two types that
+        # already used "title".
+        for record_type in ("deferral", "phase"):
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                if args[:2] == ["gh", "auth"]:
+                    return _completed(returncode=0, stdout="Logged in")
+                label = _gh_label_preflight(args)
+                if label is not None:
+                    return label
+                return _completed(
+                    returncode=0, stdout="https://github.com/o/r/issues/13\n",
+                )
+
+            record = fm.Record(record_type, {"title": "A real title", "why": "w"})
+            if record_type == "deferral":
+                record.fields["from"] = "user"
+            with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+                 mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+                self.store.create(record, by="human")
+            create = next(
+                a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+            )
+            title_idx = create.index("--title")
+            self.assertEqual(create[title_idx + 1], "A real title", record_type)
 
     def test_create_with_unknown_kind_raises_before_any_network_call(self):
         with mock.patch.object(fms.subprocess, "run", side_effect=AssertionError(

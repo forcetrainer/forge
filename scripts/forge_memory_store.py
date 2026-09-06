@@ -381,7 +381,14 @@ class GitHubStore(Store):
             )
         _gh_ready(self.repo_root)
         body = forge_memory.render(record)
-        title = record.fields.get("title", "")
+        # The issue title is the record type's IDENTIFYING field — SCHEMA
+        # lists it first for every type — never the literal key "title".
+        # "deferral" and "phase" both happen to name that field "title", so
+        # their behaviour is unchanged; "program"'s heading field is "name",
+        # and reading the literal key "title" for a program would file an
+        # empty title (a program record has no "title" key at all).
+        heading_field = forge_memory.SCHEMA[record.type][0].name
+        title = record.fields.get(heading_field, "")
         self._ensure_label(label, self._ORIGIN_DESCRIPTIONS[label])
         labels = [label]
         if kind is not None:

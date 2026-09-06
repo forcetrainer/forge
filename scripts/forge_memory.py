@@ -92,6 +92,22 @@ SCHEMA: dict[str, list[FieldSpec]] = {
         FieldSpec("why", 300, True, None),
         FieldSpec("from", None, True, None),
     ],
+    # "program" and "phase" are GitHub-only (GitHubStore, always — see
+    # forge_memory_store.select_store) and carry no local render/parse
+    # path: they never appear in a FileStore-managed file, so there is no
+    # "program"/"phase" branch in fmt_check/fmt_write or _infer_type. They
+    # are here so validate() enforces the same per-field character budgets
+    # on them as every other record type, and so GitHubStore.create can
+    # find each type's identifying field (SCHEMA[type][0]) rather than
+    # assuming the literal key "title".
+    "program": [
+        FieldSpec("name", 80, True, None),
+        FieldSpec("why", 300, True, None),
+    ],
+    "phase": [
+        FieldSpec("title", 80, True, None),
+        FieldSpec("why", 300, True, None),
+    ],
 }
 
 
@@ -810,6 +826,119 @@ def cmd_resolve_deferral(args, repo_root):
     return 0
 
 
+def cmd_add_program(args, repo_root):
+    # A program IS an epic issue, filed with its title set to --name
+    # verbatim — no rendering, unlike a phase's "<program> seq/of: title".
+    record = Record(type="program", fields={
+        "name": args.name,
+        "why": args.why,
+    })
+    defects = validate(record)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
+
+    try:
+        store = fms.select_store(repo_root, "program")
+        number = store.create(record, by="human", kind=args.kind)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    print(number)
+    return 0
+
+
+def cmd_add_phase(args, repo_root):
+    # Pre-network budget check: an over-budget --title/--why is rejected
+    # here, before sub_issues/issue_title/create ever touch the network.
+    # This checks the RAW --title against the schema's 80-char budget —
+    # the same budget the eventually-rendered "<program> seq/of: title"
+    # is held to, and the rendered form is only ever longer, so a raw
+    # title that already fails this can never be salvaged by rendering.
+    record = Record(type="phase", fields={
+        "title": args.title,
+        "why": args.why,
+    })
+    defects = validate(record)
+    if defects:
+        _print_lines(defects, sys.stderr)
+        return 1
+
+    try:
+        store = fms.select_store(repo_root, "phase")
+        sub_issues = store.sub_issues(args.epic)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    expected_seq = len(sub_issues) + 1
+    if args.seq != expected_seq:
+        print(
+            "add-phase: --seq {} does not match epic #{}'s existing "
+            "sub-issue count ({}) — expected --seq {}. Out-of-order "
+            "filing is a caller error and is never reordered silently; "
+            "no issue was created.".format(
+                args.seq, args.epic, len(sub_issues), expected_seq,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        program_name = store.issue_title(args.epic)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    # Nothing parses a sequence back out of a title — this prefix is
+    # rendered once, here, and is never read back as an input.
+    rendered_title = "{} {}/{}: {}".format(
+        program_name, args.seq, args.of, args.title,
+    )
+    render_record = Record(type="phase", fields={
+        "title": rendered_title,
+        "why": args.why,
+    })
+
+    try:
+        number = store.create(render_record, by="human", kind=args.kind)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    try:
+        store.attach_sub_issue(args.epic, number)
+    except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+        print(
+            "add-phase: issue #{} was created, but attaching it as a "
+            "sub-issue of #{} failed ({}). No edges landed — attach it by "
+            "hand, or re-run the attach step.".format(number, args.epic, e),
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.seq != 1:
+        blocker = sub_issues[-1]["number"]
+        try:
+            store.add_blocked_by(number, blocker)
+        except (SchemaError, fms.StoreUnavailable, fms.ConfigError) as e:
+            print(
+                "add-phase: issue #{} was created and attached as a "
+                "sub-issue of #{}, but recording that it is blocked by "
+                "#{} failed ({}). The sub-issue edge landed; the "
+                "blocked-by edge did not — add it by hand, or re-run the "
+                "blocked-by step.".format(
+                    number, args.epic, blocker, e,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+    print(number)
+    return 0
+
+
 def cmd_fmt(args, repo_root):
     """Two branches: explicit paths, or no PATH (every managed local file).
 
@@ -1092,6 +1221,44 @@ def build_parser():
     p.add_argument("--ref", required=True)
     p.add_argument("--reason", required=True)
     p.set_defaults(func=cmd_resolve_deferral)
+
+    p = sub.add_parser("add-program")
+    p.add_argument("--name", required=True)
+    p.add_argument("--why", required=True)
+    p.add_argument(
+        "--kind", required=True, choices=fms.GitHubStore.KIND_LABELS,
+        help="What kind of work this program is. Required, with no "
+             "default — this engine never infers whether something is a "
+             "feature/defect/debt/risk; that is a human judgment.",
+    )
+    p.set_defaults(func=cmd_add_program)
+
+    p = sub.add_parser("add-phase")
+    p.add_argument(
+        "--epic", required=True, type=int,
+        help="Issue number of the program (epic) this phase belongs to.",
+    )
+    p.add_argument(
+        "--seq", required=True, type=int,
+        help="This phase's 1-based position among the epic's phases. Must "
+             "equal the epic's current sub-issue count plus one — "
+             "out-of-order filing is a caller error, never reordered "
+             "silently.",
+    )
+    p.add_argument(
+        "--of", required=True, type=int,
+        help="Total phase count, for the rendered title only "
+             "('<program> seq/of: title'). Not validated against sibling "
+             "titles.",
+    )
+    p.add_argument("--title", required=True)
+    p.add_argument("--why", required=True)
+    p.add_argument(
+        "--kind", required=True, choices=fms.GitHubStore.KIND_LABELS,
+        help="What kind of work this phase is. Required, with no default "
+             "— see add-program --kind.",
+    )
+    p.set_defaults(func=cmd_add_phase)
 
     p = sub.add_parser("fmt")
     fg = p.add_mutually_exclusive_group(required=True)
