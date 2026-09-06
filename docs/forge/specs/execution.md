@@ -209,6 +209,25 @@ The task's `**Spec:**` line is unchanged and still pulls its sections into the w
 brief and the review packet — as **context** the reviewer reads, never as an item it
 must return a verdict on.
 
+**Covering and citing are different acts, and only covering was ever the problem.**
+Two sets exist per review:
+
+| set | what it is | what it governs |
+|---|---|---|
+| **coverage items** | the task's own promises (`t<N>.t<M>`, `t<N>.a<M>`, `g<N>`) | every id the reviewer must return a `coverage` verdict on |
+| **citable refs** | the coverage items **plus** the `spec:<slug>` id of every section the task's `**Spec:**` line names | every id a finding's `contract_ref` may cite |
+
+The coverage set is what a reviewer is *obliged to answer for*, and posing a whole spec
+section there is what manufactured findings. The citable set is what a finding may
+*point at* as the obligation it violates, and narrowing that was a mistake: a reviewer
+that finds real code contradicting the spec must be able to say which section, or the
+named-evidence rule downgrades it to an improvement and a genuine defect is deferred
+instead of halting. Observed 2026-09-06 — a reviewer correctly identified a
+`pre-existing` contract-breaking defect, had no citable id for it, emitted
+`contract_ref: null`, and the finding dispositioned to `defer` rather than reaching the
+human gate it was written for. In the final review the two sets coincide, since spec
+sections are coverage items there.
+
 CLI: `forge_checklist.py <plan.md> --spec <spec.md> [--task N | --final] [--out
 <path>]` → JSON `[{"id", "source", "text"}]` plus a rendered `## Contract checklist`
 markdown section. Codex's `review-packet.py` imports the module; the Claude
@@ -274,13 +293,16 @@ identical contract.
   a reviewer correctly identified an unchecked-enum defect, judged it out of scope
   itself, and omitted it from the verdict; it survived only because a human read the
   chat transcript (#63).
-- `impact` is `contract-breaking` only when `contract_ref` names **a checklist id
-  supplied in this review's packet**. A null `contract_ref`, or one naming anything that
-  is not a checklist id, downgrades the finding to `improvement` regardless of the
-  reviewer's label — the named-evidence rule, mirroring the tier-policy floor.
-  Membership, not non-nullness, is the test: a bare presence check costs the reviewer
-  one arbitrary string, which makes the strongest disposition in the matrix the cheapest
-  claim to assert.
+- `impact` is `contract-breaking` only when `contract_ref` names **a citable ref for
+  this review** — a coverage item, or a `spec:<slug>` section the task declares (Contract
+  checklist, above). A null `contract_ref`, or one naming anything outside that set,
+  downgrades the finding to `improvement` regardless of the reviewer's label — the
+  named-evidence rule, mirroring the tier-policy floor. Membership, not non-nullness, is
+  the test: a bare presence check costs the reviewer one arbitrary string, which makes
+  the strongest disposition in the matrix the cheapest claim to assert. The citable set
+  is deliberately wider than the coverage set, so a finding against code that
+  contradicts the spec can still name what it breaks without the reviewer being asked
+  to certify the whole section.
 - `impact: "unverifiable"` is the honest verdict for a finding the reviewer cannot
   settle from the diff in front of it — the agent contract has always called that a
   valid answer, and until now the schema had nowhere to put it. It requires a reason in
@@ -323,8 +345,8 @@ proposes, the runner decides:
   defect;
 - every `violated` id is named by the `contract_ref` of at least one finding in the same
   verdict; a `violated` with no backing finding is a defect;
-- every finding's non-null `contract_ref` is a checklist id supplied in this packet; one
-  naming anything else is a defect. Together with the `violated` rule above this closes
+- every finding's non-null `contract_ref` is a citable ref for this review — a coverage
+  item or a declared `spec:<slug>` section; one naming anything else is a defect. Together with the `violated` rule above this closes
   the loop in both directions — a violated item must have a finding, and a finding must
   cite a real item;
 - `evidence` is non-empty on every entry. `n/a` requires a reason in `evidence` — it is
@@ -795,6 +817,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-06: coverage items and citable refs are separate sets — spec sections stay citable, only coverage narrowed (#60)
 2026-09-06: reviewers report every finding regardless of provenance; the runner derives disposition (#63)
 2026-09-06: a task's checklist is its own promises (Tests + Acceptance + globals); spec sections are final-review-only and packet context per task; `contract_ref` must name a checklist id; `unverifiable` added to coverage status and finding impact, seeding to final review; plan lint requires every changed spec section to be claimed by a task (#60)
 

@@ -92,22 +92,28 @@
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (add `validate_contract_refs`)
-- Modify: `scripts/forge-run.py` (`_verdict_defects` calls it when a checklist is present)
+- Modify: `scripts/forge_checklist.py` (add `citable_refs`)
+- Modify: `scripts/forge-run.py` (`_verdict_defects` passes the citable set)
 - Test: `tests/test_forge_coverage.py`
+- Test: `tests/test_forge_checklist.py`
 
 **Spec:** Reviewer verdict contract
 
-**Interface:** `validate_contract_refs(verdict, checklist) -> list[str]` — one human-readable defect string per finding whose non-null `contract_ref` is not a checklist id. Returns `[]` when `checklist` is falsy.
+**Interface:** `citable_refs(plan_path, spec_path, task_number) -> set[str]` in `scripts/forge_checklist.py` — the task's coverage item ids plus the `spec:<slug>` id of every section its `**Spec:**` line names. `validate_contract_refs(verdict, citable) -> list[str]` in `scripts/forge_dispose.py` — one human-readable defect string per finding whose non-null `contract_ref` is outside `citable`. Returns `[]` when `citable` is falsy. `forge-run.py`'s `_verdict_defects` passes the citable set, not the checklist.
 
 **Tests:**
-- a finding citing a real checklist id yields no defect
+- a finding citing a coverage item id yields no defect
+- a finding citing a `spec:<slug>` section the task declares yields no defect
+- a finding citing a `spec:<slug>` section the task does NOT declare yields a defect
 - a finding citing an unknown string yields a defect naming the finding id and the bad ref
 - a finding with a null `contract_ref` yields no defect
-- an empty checklist yields no defects regardless of refs
+- an empty citable set yields no defects regardless of refs
+- `citable_refs` returns the coverage ids plus the declared spec ids, and no others
+- `citable_refs` returns only coverage ids for a task declaring no `**Spec:**`
 - the defect routes through the existing one-retry-then-contract-error path rather than raising directly
 - a contract-breaking finding whose ref is rejected downgrades to improvement at disposition
 
-**Acceptance:** `python3 -m pytest -q tests/test_forge_coverage.py tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
+**Acceptance:** `python3 -m pytest -q tests/test_forge_coverage.py tests/test_forge_dispose.py tests/test_forge_checklist.py` passes; `python3 -m pytest -q` shows no regression.
 
 **Tier:** standard
 
