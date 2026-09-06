@@ -12,6 +12,7 @@ invokes the CLI.
 | ``spec:<id>``  | each spec section named on a ``**Spec:**`` line (task's own,  |
 |                | or union across all tasks for ``--final``)                    |
 | ``g<N>``       | each clause of the plan header's ``**Global Constraints:**``  |
+| ``t<N>.t<M>``  | each test case listed on task N's ``**Tests:**`` line         |
 | ``t<N>.a<M>``  | each ``;``-separated clause of task N's ``**Acceptance:**``   |
 |                | line that isn't solely an inline-code command                 |
 | ``t<N>``       | final review only: task N's title, as an integration item     |
@@ -132,6 +133,18 @@ def _global_constraint_items(gc_block):
     ]
 
 
+def _test_items(task_block, task_number):
+    cases = eb.parse_test_cases(task_block)
+    return [
+        ChecklistItem(
+            id="t{}.t{}".format(task_number, i),
+            source="tests",
+            text=case,
+        )
+        for i, case in enumerate(cases, start=1)
+    ]
+
+
 def _acceptance_items(task_block, task_number):
     block_lines = task_block.splitlines()
     block_mask = eb.fence_mask(block_lines)
@@ -157,27 +170,42 @@ def _require_spec_path(task_number, spec_names, spec_path):
 
 
 def build_task_checklist(plan_path, spec_path, task_number):
-    """The task's own **Spec:** sections + plan **Global Constraints:**
-    clauses + that task's **Acceptance:** prose clauses."""
+    """That task's own promises: plan **Global Constraints:** clauses + the
+    task's **Tests:** cases + the task's **Acceptance:** prose clauses.
+
+    Spec sections are a final-review-only source (see ``build_final_checklist``)
+    — a task is allocated only a slice of a spec section by the plan, and
+    nothing here says which slice, so a per-task checklist never asks a
+    reviewer to render a verdict on the whole section. The task's
+    ``**Spec:**`` line is still validated (an unresolvable name still raises)
+    since it continues to pull context into the worker brief and review
+    packet — it just contributes no checklist item here.
+    """
     lines = eb.read_lines(plan_path)
     task_block = eb.extract_task_block(lines, task_number)
     if task_block is None:
         raise RuntimeError(eb.diagnose_missing_task(lines, task_number, plan_path))
     _, gc_block = eb.extract_header(lines)
 
-    items = []
     spec_names = eb.parse_spec_names(task_block)
     _require_spec_path(task_number, spec_names, spec_path)
     if spec_names:
+        # The task's **Spec:** line still pulls context into the worker
+        # brief and review packet, so an unresolvable/ambiguous name is
+        # still a defect to surface here — even though it contributes no
+        # checklist item (spec: items are a final-review-only source).
         spec_lines = eb.read_lines(spec_path)
-        items.extend(_spec_items(spec_lines, spec_names))
+        eb.find_spec_sections(spec_lines, spec_names)
+
+    items = []
     items.extend(_global_constraint_items(gc_block))
+    items.extend(_test_items(task_block, task_number))
     items.extend(_acceptance_items(task_block, task_number))
 
     if not items:
         raise RuntimeError(
-            "checklist for task {} is empty — no spec sections, global "
-            "constraints, or acceptance clauses were found".format(task_number)
+            "checklist for task {} is empty — no global constraints, test "
+            "cases, or acceptance clauses were found".format(task_number)
         )
     return items
 

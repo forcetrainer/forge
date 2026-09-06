@@ -36,7 +36,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Task checklist drops spec sections, gains tests
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_checklist.py` (add `_test_items`; `build_task_checklist` drops `_spec_items`; `build_final_checklist` unchanged)

@@ -825,7 +825,12 @@ class RunnerCoverageWiringTests(unittest.TestCase):
         with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
             packet = f.read()
         self.assertIn("## Contract checklist", packet)
-        self.assertIn("spec:Some Section", packet)
+        # A task's checklist is the task's own promises, not the spec's
+        # assertions: spec: items are a final-review-only source (Contract
+        # checklist spec). "Some Section" still reaches the packet as spec
+        # context, just not as a coverage item.
+        self.assertNotIn("spec:Some Section", packet)
+        self.assertIn("t1.a1", packet)
 
     def test_incomplete_coverage_triggers_one_retry_naming_missing_ids(self):
         plan = self._plan(PLAN_NONEMPTY_CHECKLIST)

@@ -35,6 +35,10 @@ PLAN_MD = """# Plan header
 
 **Spec:** Alpha section, Beta section
 
+**Tests:**
+- the foo does the thing
+- the foo handles the edge case
+
 **Acceptance:** `python3 -m pytest -q tests/test_foo.py` all pass; `python3 foo.py`
 
 **Tier:** `standard`
@@ -92,8 +96,10 @@ class ForgeChecklistTests(unittest.TestCase):
     def test_task_checklist_ids_and_sources(self):
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
         ids = [it.id for it in items]
-        self.assertIn("spec:Alpha section", ids)
-        self.assertIn("spec:Beta section", ids)
+        # a task checklist drops spec: items even when **Spec:** is declared
+        self.assertNotIn("spec:Alpha section", ids)
+        self.assertNotIn("spec:Beta section", ids)
+        self.assertFalse(any(i.startswith("spec:") for i in ids))
         self.assertIn("g1", ids)
         self.assertIn("g2", ids)
         self.assertIn("g3", ids)
@@ -105,8 +111,28 @@ class ForgeChecklistTests(unittest.TestCase):
 
         by_id = {it.id: it for it in items}
         self.assertEqual(by_id["g1"].source, "global")
-        self.assertEqual(by_id["spec:Alpha section"].source, "spec")
         self.assertEqual(by_id["t1.a1"].source, "acceptance")
+
+    # --- test items ----------------------------------------------------------
+
+    def test_task_checklist_has_one_test_item_per_test_case(self):
+        items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
+        test_items = [it for it in items if it.source == "tests"]
+        self.assertEqual(len(test_items), 2)
+
+    def test_test_item_ids_are_1_based_in_document_order(self):
+        items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
+        test_items = [it for it in items if it.source == "tests"]
+        self.assertEqual([it.id for it in test_items], ["t1.t1", "t1.t2"])
+        self.assertEqual(test_items[0].text, "the foo does the thing")
+        self.assertEqual(test_items[1].text, "the foo handles the edge case")
+
+    def test_task_checklist_still_has_globals_and_acceptance_alongside_tests(self):
+        items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
+        ids = [it.id for it in items]
+        self.assertIn("g1", ids)
+        self.assertIn("t1.a1", ids)
+        self.assertIn("t1.t1", ids)
 
     def test_numbering_token_stripped_and_whitespace_collapsed(self):
         # Reuse the plan but point task 1's Spec at the numbered/irregularly
@@ -117,7 +143,7 @@ class ForgeChecklistTests(unittest.TestCase):
                 "**Spec:** Alpha section, Beta section",
                 "**Spec:** Gamma",
             ))
-        items = fc.build_task_checklist(plan_path, self.spec_path, 1)
+        items = fc.build_final_checklist(plan_path, self.spec_path)
         ids = [it.id for it in items]
         self.assertIn("spec:Gamma Section", ids)
 
@@ -249,6 +275,31 @@ class ForgeChecklistTests(unittest.TestCase):
             )
         with self.assertRaises(RuntimeError) as ctx:
             fc.build_task_checklist(plan_path, None, 1)
+        msg = str(ctx.exception)
+        self.assertIn("task 1", msg)
+        self.assertIn("empty", msg)
+
+    def test_no_tests_no_globals_command_only_acceptance_raises(self):
+        # A **Spec:** declaration no longer keeps a task checklist non-empty
+        # — dropping spec: as a task source, this is now reachable via a
+        # task with no **Tests:**, no **Global Constraints:**, and an
+        # **Acceptance:** of nothing but inline-code commands.
+        plan_path = os.path.join(self.tmp, "plan_no_contract.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(
+                "# Plan header\n\n"
+                "**Goal:** Do nothing much.\n\n"
+                "# Task 1\n\n"
+                "### Task 1: Command-only task\n"
+                "- [ ] Done\n\n"
+                "**Files:**\n- Create: `x.py`\n\n"
+                "**Spec:** Alpha section\n\n"
+                "**Acceptance:** `python3 x.py`\n\n"
+                "**Tier:** `standard`\n\n"
+                "**Depends on:** nothing.\n"
+            )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_task_checklist(plan_path, self.spec_path, 1)
         msg = str(ctx.exception)
         self.assertIn("task 1", msg)
         self.assertIn("empty", msg)
