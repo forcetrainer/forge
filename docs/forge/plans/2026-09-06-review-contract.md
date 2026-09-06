@@ -88,7 +88,7 @@
 **Depends on:** nothing.
 
 ### Task 4: contract_ref must name a checklist id
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (add `validate_contract_refs`)

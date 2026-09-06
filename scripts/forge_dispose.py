@@ -353,6 +353,51 @@ def validate_finding_ids(verdict):
     ]
 
 
+def validate_contract_refs(verdict, citable):
+    """Validate that every finding's non-null ``contract_ref`` names a
+    citable ref for this review — a coverage item, or (per-task review only)
+    a ``spec:<slug>`` section the task declares (Contract checklist: covering
+    and citing are different acts). Returns a list of human-readable defect
+    strings — empty means valid — in the same shape as ``validate_coverage``/
+    ``validate_locations``/``validate_finding_ids``, so it feeds the same
+    retry-once-then-contract-error mechanism (``forge-run.py``'s ``_review_
+    with_coverage``).
+
+    ``citable`` is the caller-assembled set/list of ids a finding may cite —
+    for a per-task review, ``forge_checklist.citable_refs``' coverage-items-
+    plus-declared-spec-sections union; for the final review, the checklist
+    itself, since spec sections are already coverage items there. Returns
+    ``[]`` when ``citable`` is falsy: with nothing supplied for this task
+    there is nothing to check membership against, mirroring ``validate_
+    coverage``'s empty-checklist skip.
+
+    Membership, not non-nullness, is the test (Reviewer verdict contract):
+    a null ``contract_ref`` is not a defect here — that is the named-evidence
+    downgrade to ``improvement`` handled at disposition (``derive_
+    disposition``) — but a non-null ref naming anything outside the citable
+    set is, and is exactly what let a `contract-breaking` claim cost the
+    reviewer one arbitrary string."""
+    if not citable:
+        return []
+    if verdict.kind != "findings":
+        return []
+    citable_id_set = (
+        citable if isinstance(citable, (set, frozenset))
+        else {_checklist_id(it) for it in citable}
+    )
+    defects = []
+    for finding in verdict.findings or []:
+        if finding.contract_ref is None:
+            continue
+        if finding.contract_ref not in citable_id_set:
+            defects.append(
+                "finding {!r} contract_ref {!r} is not a citable ref".format(
+                    finding.id, finding.contract_ref
+                )
+            )
+    return defects
+
+
 def derive_disposition(finding):
     """Disposition matrix over (verified provenance × contract-gated impact).
     Impact is ``contract-breaking`` only when the reviewer named the violated

@@ -413,6 +413,175 @@ class ValidateFindingIdsUnitTests(unittest.TestCase):
         self.assertIn("f1", str(ctx.exception))
 
 
+class ValidateContractRefsUnitTests(unittest.TestCase):
+    """validate_contract_refs (Task 4, widened): a finding's non-null
+    contract_ref must name a citable ref for this review — membership, not
+    non-nullness, is the test. The citable set is wider than the coverage
+    checklist a reviewer must render `coverage` on: it also admits a
+    `spec:<slug>` id the task declares, so a finding can name the spec
+    section it breaks without being asked to certify the whole section
+    (Contract checklist: covering and citing are different acts). Mirrors
+    ValidateLocationsUnitTests'/ValidateFindingIdsUnitTests' shape: same
+    defect-string contract, same retry-once-then-contract-error mechanism."""
+
+    def _finding(self, **kw):
+        base = dict(
+            id="f1", summary="x", file="a.py", lines="12-20",
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="spec:A",
+        )
+        base.update(kw)
+        return forge_common.Finding(**base)
+
+    def test_coverage_item_ref_is_no_defect(self):
+        citable = _checklist(["t1.a1", "spec:A"])
+        v = forge_common.Verdict(
+            kind="findings", findings=[self._finding(contract_ref="t1.a1")],
+        )
+        self.assertEqual(forge_dispose.validate_contract_refs(v, citable), [])
+
+    def test_declared_spec_ref_is_no_defect(self):
+        # The citable set is wider than coverage: a spec:<slug> the task
+        # declares is citable even though it is never a coverage item a
+        # per-task reviewer renders `coverage` on.
+        citable = {"t1.a1", "spec:Alpha section"}
+        v = forge_common.Verdict(
+            kind="findings",
+            findings=[self._finding(contract_ref="spec:Alpha section")],
+        )
+        self.assertEqual(forge_dispose.validate_contract_refs(v, citable), [])
+
+    def test_undeclared_spec_ref_is_a_defect(self):
+        # "spec:Beta section" is not among what this task declared citable
+        # (only "spec:Alpha section" is) — narrowing to the declared set is
+        # the whole point: a reviewer can't cite a section it was never
+        # allocated.
+        citable = {"t1.a1", "spec:Alpha section"}
+        v = forge_common.Verdict(
+            kind="findings",
+            findings=[self._finding(contract_ref="spec:Beta section")],
+        )
+        defects = forge_dispose.validate_contract_refs(v, citable)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+        self.assertIn("spec:Beta section", defects[0])
+
+    def test_unknown_ref_is_a_defect_naming_finding_and_ref(self):
+        citable = _checklist(["spec:A"])
+        v = forge_common.Verdict(
+            kind="findings",
+            findings=[self._finding(contract_ref="spec:BOGUS")],
+        )
+        defects = forge_dispose.validate_contract_refs(v, citable)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f1", defects[0])
+        self.assertIn("spec:BOGUS", defects[0])
+
+    def test_null_contract_ref_is_no_defect(self):
+        citable = _checklist(["spec:A"])
+        v = forge_common.Verdict(kind="findings", findings=[
+            self._finding(impact="improvement", contract_ref=None),
+        ])
+        self.assertEqual(forge_dispose.validate_contract_refs(v, citable), [])
+
+    def test_empty_citable_set_is_no_defect_regardless_of_refs(self):
+        v = forge_common.Verdict(
+            kind="findings",
+            findings=[self._finding(contract_ref="spec:BOGUS")],
+        )
+        self.assertEqual(forge_dispose.validate_contract_refs(v, []), [])
+        self.assertEqual(forge_dispose.validate_contract_refs(v, None), [])
+        self.assertEqual(forge_dispose.validate_contract_refs(v, set()), [])
+
+    def test_routes_through_existing_retry_then_contract_error_path(self):
+        citable = _checklist(["spec:A"])
+        bad_msg = json.dumps({
+            "verdict": "findings",
+            "coverage": [{"id": "spec:A", "status": "satisfied",
+                          "evidence": "a.py:1"}],
+            "findings": [{
+                "id": "f1", "summary": "broken",
+                "impact": "contract-breaking", "contract_ref": "spec:BOGUS",
+                "location": {"file": "a.py", "lines": "12-20"},
+            }],
+        })
+
+        def dispatch_call(packet_path):
+            return forge_run.parse_verdict(bad_msg)
+
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            with self.assertRaises(RuntimeError) as ctx:
+                forge_run._review_with_coverage(
+                    dispatch_call, packet_path, checklist=None, run_dir=d,
+                    label="task-1", review_kind="verification",
+                    citable=citable,
+                )
+        self.assertIn("still invalid after one retry", str(ctx.exception))
+        self.assertIn("spec:BOGUS", str(ctx.exception))
+
+    def test_rejected_ref_downgrades_to_defer_at_disposition(self):
+        # The first verdict's contract-breaking claim cites a ref outside
+        # the packet's citable set; the retry-defect path forces a
+        # re-dispatch, and a well-behaved reviewer's fixed verdict nulls the
+        # ref rather than inventing a real one. validate_contract_refs
+        # accepts a null ref (no membership claim left to check), and
+        # derive_disposition's unchanged named-evidence rule — non-null
+        # contract_ref required for contract-breaking — then defers it
+        # exactly like an `improvement` finding, never reaching
+        # fix/seed/halt.
+        citable = _checklist(["spec:A"])
+        bad_msg = json.dumps({
+            "verdict": "findings",
+            "coverage": [{"id": "spec:A", "status": "satisfied",
+                          "evidence": "a.py:1"}],
+            "findings": [{
+                "id": "f1", "summary": "broken",
+                "impact": "contract-breaking", "contract_ref": "spec:BOGUS",
+                "location": {"file": "a.py", "lines": "12-20"},
+            }],
+        })
+        fixed_msg = json.dumps({
+            "verdict": "findings",
+            "coverage": [{"id": "spec:A", "status": "satisfied",
+                          "evidence": "a.py:1"}],
+            "findings": [{
+                "id": "f1", "summary": "broken",
+                "impact": "contract-breaking", "contract_ref": None,
+                "location": {"file": "a.py", "lines": "12-20"},
+            }],
+        })
+        calls = []
+
+        def dispatch_call(packet_path):
+            calls.append(packet_path)
+            return forge_run.parse_verdict(bad_msg if len(calls) == 1 else fixed_msg)
+
+        diff_text = (
+            "diff --git a/a.py b/a.py\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -10,3 +12,10 @@ def f():\n"
+            " context\n"
+            "+added\n"
+            " context\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            packet_path = os.path.join(d, "packet.md")
+            with open(packet_path, "w") as f:
+                f.write("packet body")
+            verdict, retried = forge_run._review_with_coverage(
+                dispatch_call, packet_path, checklist=None, run_dir=d,
+                label="task-1", review_kind="verification", citable=citable,
+            )
+        self.assertTrue(retried)
+        classified = forge_dispose.classify_findings(verdict, diff_text)
+        self.assertEqual(classified.findings[0].disposition, "defer")
+
+
 class ReviewKindGatingTests(unittest.TestCase):
     """Coverage on discovery only (Task 6): _verdict_defects/_review_with_
     coverage validate coverage only when review_kind="discovery"; a

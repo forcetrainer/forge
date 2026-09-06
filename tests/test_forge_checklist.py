@@ -391,5 +391,49 @@ class ForgeChecklistTests(unittest.TestCase):
         self.assertIn("Nope", result.stderr)
 
 
+class CitableRefsTests(unittest.TestCase):
+    """citable_refs (Task 4): the wider set a per-task review's findings may
+    cite — this task's coverage item ids plus the spec:<slug> id of every
+    section its **Spec:** line names — and no others (Contract checklist:
+    covering and citing are different acts)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-checklist-citable-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.plan_path = os.path.join(self.tmp, "plan.md")
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD)
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_MD)
+
+    def test_citable_refs_is_coverage_ids_plus_declared_spec_ids_and_no_others(self):
+        refs = fc.citable_refs(self.plan_path, self.spec_path, 1)
+        coverage_ids = {it.id for it in
+                        fc.build_task_checklist(self.plan_path, self.spec_path, 1)}
+        self.assertEqual(
+            refs, coverage_ids | {"spec:Alpha section", "spec:Beta section"},
+        )
+
+    def test_citable_refs_is_only_coverage_ids_with_no_spec_declared(self):
+        plan_path = os.path.join(self.tmp, "plan_no_spec.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD.replace(
+                "**Spec:** Alpha section, Beta section\n\n", "",
+            ))
+        refs = fc.citable_refs(plan_path, self.spec_path, 1)
+        coverage_ids = {it.id for it in
+                        fc.build_task_checklist(plan_path, self.spec_path, 1)}
+        self.assertEqual(refs, coverage_ids)
+        self.assertFalse(any(r.startswith("spec:") for r in refs))
+
+    def test_citable_refs_scoped_to_the_declaring_task_only(self):
+        # Task 2 declares only "Beta section" — Task 1's "Alpha section" is
+        # not citable from task 2's review.
+        refs = fc.citable_refs(self.plan_path, self.spec_path, 2)
+        self.assertIn("spec:Beta section", refs)
+        self.assertNotIn("spec:Alpha section", refs)
+
+
 if __name__ == "__main__":
     unittest.main()

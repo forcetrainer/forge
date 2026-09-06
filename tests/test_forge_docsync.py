@@ -222,7 +222,7 @@ class DocSyncRunPlanGatingTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},  # task 1 review
             {"exit": 0, "msg": _fix_findings_msg(   # final review: pre-existing halt
                 "untouched.py", "5", "legacy bug",
-                contract_ref="Spec §X", repair_task=repair)},
+                contract_ref="t1", repair_task=repair)},
         ])
         self.assertEqual(res.returncode, 2, res.stderr)
         self.assertNotIn("docs: sync", self._log_subjects())

@@ -210,6 +210,41 @@ def build_task_checklist(plan_path, spec_path, task_number):
     return items
 
 
+def citable_refs(plan_path, spec_path, task_number):
+    """The set of ids a per-task review's findings may cite as
+    ``contract_ref``: this task's own coverage item ids (``build_task_
+    checklist``'s ``g<N>``/``t<N>.t<M>``/``t<N>.a<M>``) plus the
+    ``spec:<slug>`` id of every section this task's ``**Spec:**`` line names
+    (Contract checklist: covering and citing are different acts). Coverage
+    items are what the reviewer must render a verdict on; the citable set is
+    deliberately wider, so a finding against code that contradicts the spec
+    can still name which section it breaks without being asked to certify
+    the whole section as covered.
+
+    Unlike ``build_task_checklist``, an empty result here is never a defect
+    to raise on — the citable set is a wider superset used only to validate
+    ``contract_ref`` membership, and ``validate_contract_refs`` already
+    treats a falsy citable set as nothing to check.
+    """
+    lines = eb.read_lines(plan_path)
+    task_block = eb.extract_task_block(lines, task_number)
+    if task_block is None:
+        raise RuntimeError(eb.diagnose_missing_task(lines, task_number, plan_path))
+    _, gc_block = eb.extract_header(lines)
+
+    spec_names = eb.parse_spec_names(task_block)
+    _require_spec_path(task_number, spec_names, spec_path)
+
+    refs = set()
+    refs.update(item.id for item in _global_constraint_items(gc_block))
+    refs.update(item.id for item in _test_items(task_block, task_number))
+    refs.update(item.id for item in _acceptance_items(task_block, task_number))
+    if spec_names:
+        spec_lines = eb.read_lines(spec_path)
+        refs.update(item.id for item in _spec_items(spec_lines, spec_names))
+    return refs
+
+
 def build_final_checklist(plan_path, spec_path):
     """Union of every task's **Spec:** sections + global constraints + every
     task's acceptance prose clauses + one t<N> integration item per task."""

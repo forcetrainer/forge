@@ -504,7 +504,7 @@ def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
     return path
 
 
-def _verdict_defects(verdict, checklist, review_kind="discovery"):
+def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
     empty-checklist skip case, Contract checklist spec — OR when
@@ -525,34 +525,52 @@ def _verdict_defects(verdict, checklist, review_kind="discovery"):
     every review kind, with or without a checklist, because the id is the
     runner's only handle on a finding (carried/resolved convergence
     tracking, and the staged deferrals `defer --finding-id` selects
-    from)."""
+    from).
+
+    ``validate_contract_refs`` (Task 4) is likewise checked on both review
+    kinds, not gated to discovery like the full coverage sweep. It validates
+    against ``citable`` — the wider citable-refs set (coverage items plus
+    declared spec sections; Contract checklist: covering and citing are
+    different acts), not ``checklist`` — because a per-task checklist no
+    longer carries spec items at all, yet a finding must still be able to
+    name the spec section it breaks. ``citable`` defaults to ``checklist``
+    when the caller has nothing wider to offer (the final review, where the
+    two sets coincide since spec sections are coverage items there). The
+    function itself is the presence gate: it returns no defects when
+    ``citable`` is falsy, exactly like ``validate_coverage``'s
+    empty-checklist skip, so calling it unconditionally here is safe on a
+    checklist-less task too."""
     defects = (
         list(forge_dispose.validate_coverage(verdict, checklist))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)
     defects += forge_dispose.validate_finding_ids(verdict)
+    defects += forge_dispose.validate_contract_refs(
+        verdict, citable if citable is not None else checklist
+    )
     return defects
 
 
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
-                           review_kind="discovery"):
+                           review_kind="discovery", citable=None):
     """Dispatch a review and validate its verdict against ``checklist``
-    (coverage, discovery only) and its findings' locations (both kinds) via
-    ``_verdict_defects``. Validate the first verdict; on any defects,
-    re-dispatch **exactly once** with the defects named in the retry
-    packet's prompt; a second invalid verdict is a contract error (raised,
-    uncaught — same class as an unparseable verdict, never a halt). This is
-    not a rework attempt: the caller must not advance the convergence
-    attempt counter or touch ConvergenceState for the retry. Returns
-    ``(verdict, retried)``."""
+    (coverage, discovery only), its findings' locations (both kinds), and its
+    findings' ``contract_ref`` membership against ``citable`` (both kinds;
+    defaults to ``checklist`` — see ``_verdict_defects``) via ``_verdict_
+    defects``. Validate the first verdict; on any defects, re-dispatch
+    **exactly once** with the defects named in the retry packet's prompt; a
+    second invalid verdict is a contract error (raised, uncaught — same class
+    as an unparseable verdict, never a halt). This is not a rework attempt:
+    the caller must not advance the convergence attempt counter or touch
+    ConvergenceState for the retry. Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
-    defects = _verdict_defects(verdict, checklist, review_kind)
+    defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
     verdict = dispatch_call(retry_path)
-    defects = _verdict_defects(verdict, checklist, review_kind)
+    defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if defects:
         raise RuntimeError(
             "reviewer verdict still invalid after one retry: {}".format(
@@ -752,6 +770,16 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 forge_checklist.build_task_checklist, plan_path, spec_path,
                 task.number,
             )
+            # citable_refs is wider than checklist: this task's coverage
+            # items plus the spec:<slug> id of every section its **Spec:**
+            # line names — a finding may cite a spec section it must never
+            # be asked to render coverage on (Contract checklist: covering
+            # and citing are different acts). Never raises "is empty" (no
+            # skip semantics needed — validate_contract_refs already treats
+            # a falsy citable set as nothing to check).
+            citable = forge_checklist.citable_refs(
+                plan_path, spec_path, task.number,
+            )
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
             # separate reviewer (constraint: discovery-review-is-cold);
@@ -832,7 +860,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             verdict, coverage_retry = _review_with_coverage(
                 _reviewer_dispatch_call,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
-                review_kind=packet_review_kind,
+                review_kind=packet_review_kind, citable=citable,
             )
             review_attempts += 1
             run_diff_text = _git_diff(cwd, run_base) if run_base else None
