@@ -61,6 +61,183 @@ def _warning(where, message):
     return LintDefect(severity="warning", where=where, message=message)
 
 
+# --- Living-spec grammar (Phase 14/5) --------------------------------------
+#
+# A living spec's frontmatter is a fixed, two-key grammar (``system:`` a
+# scalar, ``supersedes:`` a ``  - path`` list) — not general YAML, so it is
+# parsed by hand rather than pulling in a third-party library
+# (stdlib-only binds). A file with no frontmatter at all is simply a spec
+# that hasn't been migrated yet — that's a rule-2 defect (system missing),
+# reported like any other rule violation, never a raise. Once a frontmatter
+# block has been *opened* (the file's first line is ``---``), anything
+# inside it that isn't valid grammar — no closing ``---``, a line that is
+# neither ``key: value`` nor a ``supersedes`` list item — can't be
+# reinterpreted as "no frontmatter"; guessing intent there is exactly what
+# fail-loud forbids, so it raises instead, naming the line.
+
+DATED_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
+_FRONTMATTER_KEY_RE = re.compile(r"^(system|supersedes):\s*(.*)$")
+_SUPERSEDES_ITEM_RE = re.compile(r"^  - (\S.*)$")
+CHANGELOG_HEADING_RE = re.compile(r"^## Changelog\s*$")
+CHANGELOG_ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}: \S.*$")
+AMENDED_BY_RE = re.compile(r"amended by \[([^\]]*)\]")
+ARCHIVE_PREFIX = "docs/forge/archive/"
+
+
+def parse_frontmatter(lines):
+    """``lines`` -> ``(dict, body_start_index)``.
+
+    Grammar: exactly two possible keys. ``system: <value>`` is a scalar;
+    ``supersedes:`` (no inline value) introduces zero or more ``  - path``
+    lines. No frontmatter at all (first line isn't ``---``) is not an
+    error — it returns ``({}, 0)`` so the caller can report it as a normal
+    rule-2 defect. Anything else that goes wrong once a block has been
+    opened raises ``RuntimeError`` naming the 1-based line number; the
+    caller (which knows the path) is responsible for naming the file too.
+    """
+    if not lines or lines[0].rstrip("\n") != "---":
+        return {}, 0
+
+    data = {}
+    n = len(lines)
+    i = 1
+    while i < n and lines[i].rstrip("\n") != "---":
+        raw = lines[i].rstrip("\n")
+        if not raw.strip():
+            i += 1
+            continue
+        m = _FRONTMATTER_KEY_RE.match(raw)
+        if not m:
+            raise RuntimeError(
+                "line {}: not a 'key: value' line: {!r}".format(i + 1, raw)
+            )
+        key, value = m.group(1), m.group(2).strip()
+        if key == "system":
+            data["system"] = value
+            i += 1
+        else:  # supersedes
+            if value:
+                raise RuntimeError(
+                    "line {}: 'supersedes:' takes a list, not an inline "
+                    "value".format(i + 1)
+                )
+            items = []
+            i += 1
+            while i < n and _SUPERSEDES_ITEM_RE.match(lines[i].rstrip("\n")):
+                items.append(_SUPERSEDES_ITEM_RE.match(lines[i].rstrip("\n")).group(1).strip())
+                i += 1
+            data["supersedes"] = items
+
+    if i >= n:
+        raise RuntimeError("line {}: unterminated frontmatter block".format(n))
+
+    return data, i + 1
+
+
+def _is_archived(path, repo_root):
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(repo_root))
+    return rel.replace(os.sep, "/").startswith(ARCHIVE_PREFIX)
+
+
+def lint_living_spec(path, *, repo_root):
+    """The five living-spec rules against ``path``, as a list of defect
+    strings — every rule broken, never just the first. A file under
+    ``docs/forge/archive/`` is never linted: the archive is frozen and its
+    documents are dated, frontmatter-less records by design, not living
+    specs. Malformed (as opposed to absent) frontmatter still raises, via
+    ``parse_frontmatter`` — see that function's docstring."""
+    if _is_archived(path, repo_root):
+        return []
+
+    defects = []
+    filename = os.path.basename(path)
+    stem = os.path.splitext(filename)[0]
+
+    if DATED_FILENAME_RE.match(filename):
+        defects.append("{}: filename carries a YYYY-MM-DD prefix".format(path))
+
+    lines = eb.read_lines(path)
+    try:
+        frontmatter, body_start = parse_frontmatter(lines)
+    except RuntimeError as e:
+        raise RuntimeError("{}: {}".format(path, e))
+
+    system = frontmatter.get("system")
+    if system is None:
+        defects.append("{}: no frontmatter 'system:' key found".format(path))
+    elif system != stem:
+        defects.append(
+            "{}: system '{}' disagrees with filename stem '{}'".format(
+                path, system, stem
+            )
+        )
+
+    docs_forge_dir = os.path.join(repo_root, "docs", "forge")
+    for sup in frontmatter.get("supersedes", []):
+        if not os.path.isfile(os.path.join(docs_forge_dir, sup)):
+            defects.append(
+                "{}: supersedes path does not resolve: {}".format(path, sup)
+            )
+
+    changelog_idx = None
+    for i in range(body_start, len(lines)):
+        if CHANGELOG_HEADING_RE.match(lines[i].rstrip("\n")):
+            changelog_idx = i
+            break
+
+    if changelog_idx is None:
+        defects.append("{}: missing '## Changelog' section".format(path))
+    else:
+        for i in range(changelog_idx + 1, len(lines)):
+            line = lines[i].rstrip("\n")
+            if line.startswith("## "):
+                break
+            if not line.strip():
+                continue
+            if not CHANGELOG_ENTRY_RE.match(line.strip()):
+                defects.append(
+                    "{}: line {}: malformed changelog entry: {!r}".format(
+                        path, i + 1, line.strip()
+                    )
+                )
+
+    systems = _existing_systems(repo_root)
+    for m in AMENDED_BY_RE.finditer("".join(lines)):
+        system_id = m.group(1)
+        if system_id not in systems:
+            defects.append(
+                "{}: 'amended by [{}]' names a system that does not exist".format(
+                    path, system_id
+                )
+            )
+
+    return defects
+
+
+def _existing_systems(repo_root):
+    """Systems recognized by rule 5, derived from the filenames actually
+    present in ``docs/forge/specs/`` — never a hardcoded list, so a system
+    can't drift out of sync with the corpus that defines it."""
+    specs_dir = os.path.join(repo_root, "docs", "forge", "specs")
+    try:
+        names = os.listdir(specs_dir)
+    except OSError:
+        return set()
+    return {os.path.splitext(n)[0] for n in names if n.endswith(".md")}
+
+
+def lint_spec_corpus(repo_root):
+    """Every living-spec defect across every file in ``docs/forge/specs/``,
+    in one run — never just the first offending spec."""
+    specs_dir = os.path.join(repo_root, "docs", "forge", "specs")
+    defects = []
+    for name in sorted(os.listdir(specs_dir)):
+        if not name.endswith(".md"):
+            continue
+        defects.extend(lint_living_spec(os.path.join(specs_dir, name), repo_root=repo_root))
+    return defects
+
+
 def _slice_block(lines, mask, start):
     """Block text from ``start`` through the next h1–h3 heading or EOF — the
     same terminator rule as ``eb.extract_task_block``, needed here because
@@ -378,8 +555,12 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="forge_lint.py")
-    parser.add_argument("plan")
+    parser.add_argument("plan", nargs="?")
     parser.add_argument("--spec")
+    parser.add_argument(
+        "--specs", action="store_true",
+        help="lint every file in docs/forge/specs/ instead of a plan",
+    )
     parser.add_argument(
         "--repo-root",
         help="repo root to check managed project-memory files under "
@@ -390,6 +571,19 @@ def main(argv):
     # allowed to default repo_root to the process cwd; lint_plan itself
     # never guesses.
     repo_root = args.repo_root if args.repo_root is not None else os.getcwd()
+
+    if args.specs:
+        try:
+            defects = lint_spec_corpus(repo_root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        for d in defects:
+            print(d)
+        return 1 if defects else 0
+
+    if not args.plan:
+        parser.error("plan is required unless --specs is given")
 
     try:
         defects = lint_plan(args.plan, args.spec, repo_root=repo_root)

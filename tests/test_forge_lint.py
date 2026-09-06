@@ -516,5 +516,222 @@ class ForgeLintCLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+def _spec_text(system="execution", supersedes=None, changelog=None, extra=""):
+    """Canonical-shaped living-spec text; each parameter overridable to
+    inject exactly one defect. ``changelog`` is a list of raw lines placed
+    verbatim under '## Changelog'; ``None`` means a well-formed single
+    entry."""
+    fm_lines = ["---"]
+    fm_lines.append("system: {}".format(system))
+    if supersedes is not None:
+        fm_lines.append("supersedes:")
+        for path in supersedes:
+            fm_lines.append("  - {}".format(path))
+    fm_lines.append("---")
+
+    if changelog is None:
+        changelog = ["2026-09-05: initial version (#1)"]
+
+    return "\n".join(fm_lines) + "\n\n# Title\n\nBody text.{}\n\n## Changelog\n{}\n".format(
+        extra, "\n".join(changelog)
+    )
+
+
+class ForgeLintLivingSpecTests(unittest.TestCase):
+    """The five living-spec grammar rules (Phase 14/5): dated filename,
+    frontmatter/system-identity, supersedes resolution, Changelog presence
+    and entry grammar, and amended-by system existence — plus the
+    hand-written frontmatter parser and the corpus mode built on all five."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-lint-spec-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.specs_dir = os.path.join(self.tmp, "docs", "forge", "specs")
+        os.makedirs(self.specs_dir)
+
+    def _write_spec(self, name, text):
+        path = os.path.join(self.specs_dir, name)
+        _write(path, text)
+        return path
+
+    # --- rule 2: frontmatter parses, system == filename stem -------------
+
+    def test_clean_spec_lints_with_no_defects(self):
+        path = self._write_spec("execution.md", _spec_text(system="execution"))
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    def test_system_disagreeing_with_stem_named(self):
+        path = self._write_spec("execution.md", _spec_text(system="planning"))
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("planning" in d and "execution" in d for d in defects))
+
+    def test_missing_frontmatter_is_a_defect(self):
+        path = self._write_spec("execution.md", "# Title\n\n## Changelog\n2026-09-05: x (#1)\n")
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("system" in d for d in defects))
+
+    # --- rule 3: supersedes resolves relative to docs/forge/ ---------------
+
+    def test_supersedes_path_resolves_no_defect(self):
+        archive_dir = os.path.join(self.tmp, "docs", "forge", "archive")
+        os.makedirs(archive_dir)
+        _write(os.path.join(archive_dir, "2026-01-01-old.md"), "old content\n")
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", supersedes=["archive/2026-01-01-old.md"]),
+        )
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    def test_supersedes_path_that_does_not_resolve_named(self):
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", supersedes=["archive/nosuchfile.md"]),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("archive/nosuchfile.md" in d for d in defects))
+
+    # --- rule 4: Changelog presence and entry grammar ----------------------
+
+    def test_missing_changelog_named(self):
+        text = "---\nsystem: execution\n---\n\n# Title\n\nBody, no changelog.\n"
+        path = self._write_spec("execution.md", text)
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("Changelog" in d for d in defects))
+
+    def test_malformed_changelog_entry_named_by_line(self):
+        path = self._write_spec(
+            "execution.md",
+            _spec_text(system="execution", changelog=["not a dated entry"]),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("not a dated entry" in d for d in defects))
+
+    # --- rule 5: amended by [<id>] names a system that exists --------------
+
+    def test_amended_by_unknown_system_named(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        path = self._write_spec(
+            "planning.md",
+            _spec_text(
+                system="planning",
+                changelog=["2026-09-05: amended by [nosuchsystem] — x (#1)"],
+            ),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("nosuchsystem" in d for d in defects))
+
+    def test_amended_by_real_system_no_defect(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        path = self._write_spec(
+            "planning.md",
+            _spec_text(
+                system="planning",
+                changelog=["2026-09-05: amended by [execution] — x (#1)"],
+            ),
+        )
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- rule 1: dated filename ---------------------------------------------
+
+    def test_dated_filename_named(self):
+        path = self._write_spec(
+            "2026-09-05-execution-design.md",
+            _spec_text(system="2026-09-05-execution-design"),
+        )
+        defects = fl.lint_living_spec(path, repo_root=self.tmp)
+        self.assertTrue(any("YYYY-MM-DD" in d for d in defects))
+
+    def test_same_content_renamed_is_clean(self):
+        path = self._write_spec("execution.md", _spec_text(system="execution"))
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- archive is never linted --------------------------------------------
+
+    def test_dated_frontmatter_less_spec_under_archive_no_defect(self):
+        archive_dir = os.path.join(self.tmp, "docs", "forge", "archive")
+        os.makedirs(archive_dir)
+        path = os.path.join(archive_dir, "2026-01-01-old-design.md")
+        _write(path, "# Old dated spec\n\nNo frontmatter, no changelog.\n")
+        self.assertEqual(fl.lint_living_spec(path, repo_root=self.tmp), [])
+
+    # --- corpus mode reports every offender, not just the first ------------
+
+    def test_corpus_mode_reports_every_offending_spec(self):
+        self._write_spec("execution.md", _spec_text(system="wrong-one"))
+        self._write_spec("planning.md", _spec_text(system="also-wrong"))
+        defects = fl.lint_spec_corpus(self.tmp)
+        self.assertTrue(any("execution.md" in d for d in defects))
+        self.assertTrue(any("planning.md" in d for d in defects))
+
+    def test_corpus_mode_clean_when_every_spec_clean(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        self._write_spec("planning.md", _spec_text(system="planning"))
+        self.assertEqual(fl.lint_spec_corpus(self.tmp), [])
+
+    # --- hand-written frontmatter parser: fails loud on malformed grammar ---
+
+    def test_parse_frontmatter_no_dashes_returns_empty_not_raise(self):
+        data, body_start = fl.parse_frontmatter(["# Title\n", "\n", "body\n"])
+        self.assertEqual(data, {})
+        self.assertEqual(body_start, 0)
+
+    def test_parse_frontmatter_unterminated_block_raises(self):
+        with self.assertRaises(RuntimeError):
+            fl.parse_frontmatter(["---\n", "system: execution\n"])
+
+    def test_parse_frontmatter_non_key_value_line_raises(self):
+        with self.assertRaises(RuntimeError):
+            fl.parse_frontmatter(["---\n", "not a key value line\n", "---\n"])
+
+    def test_lint_living_spec_malformed_frontmatter_raises_naming_file_and_line(self):
+        path = self._write_spec(
+            "execution.md",
+            "---\nsystem: execution\nnot a key value line\n---\n\n## Changelog\n",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fl.lint_living_spec(path, repo_root=self.tmp)
+        message = str(ctx.exception)
+        self.assertIn(path, message)
+        self.assertIn("line 3", message)
+
+    def test_no_third_party_import_in_forge_lint(self):
+        with open(os.path.join(SCRIPTS_DIR, "forge_lint.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("import yaml", src)
+
+    # --- --specs CLI mode ---------------------------------------------------
+
+    def test_cli_specs_mode_exits_nonzero_and_lists_defects(self):
+        self._write_spec("execution.md", _spec_text(system="wrong-one"))
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", self.tmp],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("execution.md", result.stdout)
+
+    def test_cli_specs_mode_exits_zero_when_clean(self):
+        self._write_spec("execution.md", _spec_text(system="execution"))
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", self.tmp],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class ForgeLintRealSpecCorpusTests(unittest.TestCase):
+    """The pre-migration corpus in docs/forge/specs/ is expected to be
+    non-compliant right now — the migration to living specs is a later
+    task. This is the acceptance criterion, not a regression."""
+
+    def test_real_specs_dir_reports_non_compliant_pre_migration(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--specs", "--repo-root", REPO_ROOT],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.strip(), "expected corpus defects on stdout")
+
+
 if __name__ == "__main__":
     unittest.main()
