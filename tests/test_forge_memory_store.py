@@ -527,12 +527,24 @@ class GitHubStoreTests(unittest.TestCase):
                     "GitHubStore.{} must not exist".format(name),
                 )
 
-    def test_no_gh_issue_list_call_site_remains(self):
+    def test_gh_issue_list_appears_only_in_open_issues(self):
+        # Phase 2 banned every `gh issue list` call site, because the only
+        # ones that existed re-found the engine's own records and
+        # duplicated the GitHub UI. Phase 4's `audit-issues` needs one for
+        # a different reason: it examines EVERY open issue, including ones
+        # forge never filed, which is exactly why it needs no marker to
+        # find them. So the ban narrows rather than lifts — the audit
+        # reader is the single sanctioned call site, and a read-back path
+        # creeping back in anywhere else still fails this test.
+        # Matched on the call-shaped literal only. A docstring saying the
+        # words "gh issue list" is documentation, not a call site, and a
+        # guard that cannot tell them apart makes prose unwritable.
+        allowed = inspect.getsource(fms.GitHubStore.open_issues)
+        self.assertIn('"issue", "list"', allowed)
         for module in (fms, forge_memory):
             with self.subTest(module=module.__name__):
-                source = inspect.getsource(module)
+                source = inspect.getsource(module).replace(allowed, "")
                 self.assertNotIn('"issue", "list"', source)
-                self.assertNotIn("gh issue list", source)
 
     def test_retire_closes_issue_with_reason_as_comment(self):
         store = fms.GitHubStore(self.tmp)
