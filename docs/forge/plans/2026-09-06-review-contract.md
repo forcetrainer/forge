@@ -301,3 +301,28 @@
 **Tier:** standard
 
 **Depends on:** Task 4.
+
+### Task 12: The resolved label is honored on the Claude path
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_dispose.py` (CLI `main()` passes the prior attempt's carried set into `classify_findings`)
+- Test: `tests/test_forge_dispose.py`
+
+**Spec:** Reviewer verdict contract
+
+**Interface:** `main()` calls `classify_findings(verdict, diff_text, carried_ids=state.carried_ids)`, mirroring `forge-run.py`. `state` is already loaded from `--state`; a fresh state supplies an empty carried set, so a first attempt is unchanged.
+
+**Tests:**
+- a finding labelled `convergence: "resolved"` whose id is in the state's carried set is dropped before disposition, and the decision is not a fix
+- the same finding with no `--state` supplied is dispositioned normally, since nothing was ever tracked as outstanding
+- a finding labelled `convergence: "resolved"` whose id is absent from the carried set is dispositioned normally, closing the self-labelling escape
+- a `carried_from` id in the carried set is honored where the finding's own `id` is not
+- a second attempt whose only finding is a legitimately resolved one decides `pass`, not `stuck`
+- attempt-one behaviour with an empty carried set is byte-identical to before
+
+**Acceptance:** `python3 -m pytest -q tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
+
+**Tier:** standard
+
+**Depends on:** Task 11.
