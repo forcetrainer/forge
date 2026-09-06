@@ -173,6 +173,12 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   single line of bare comma-separated heading names — no parentheticals, no `;`, no
   wrapping — and one spec file per task, since `--spec` takes one. Wrapped or
   parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
+- **`**Tests:**`** lists the task's test cases by behavior, one per line, descriptions
+  not code ("rejects empty email", "retries 3 times then throws"). `none — <reason>` is
+  the legal empty form. It is **machine-read**: each case becomes a `t<N>.t<M>` item on
+  that task's contract checklist (`execution` spec), so it is contract text, not
+  commentary. A malformed block raises at extraction rather than yielding silently zero
+  items (constraint: `parsers-fail-loud`).
 - **Decomposition** minimizes dependency chains: wall-clock is the critical path, not
   task count — prefer decompositions that share interfaces over ones that impose
   sequence.
@@ -264,6 +270,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-06: amended by [execution] — `**Tests:**` is machine-read plan grammar, one `t<N>.t<M>` checklist item per case (#60)
 
 2026-09-05: consolidated from three dated specs — phase1 pipeline-skill-edits, phase2 execution-efficiency, living-specs (#47)
 2026-09-05: deliberate exception to newest-is-anchor — living-specs (2026-09-05) is the newest source but covers only the spec-document convention, so phase2 execution-efficiency (2026-07-02) supplies the spine and living-specs contributes the Spec documents section; its Self-migration section is dropped, having been performed by this merge (#47)
