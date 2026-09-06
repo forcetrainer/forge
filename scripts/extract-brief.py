@@ -252,6 +252,39 @@ def parse_spec_names(task_block):
     return [name.strip() for name in content.split(",") if name.strip()]
 
 
+NONE_TESTS_RE = re.compile(r'^none\b')
+
+
+def parse_test_cases(task_block):
+    """Parse a task's ``**Tests:**`` line into a list of test case names.
+
+    Cases are semicolon-separated freeform descriptions, in document order.
+    Returns ``[]`` when the field is absent, and ``[]`` for the legal empty
+    form ``none`` (optionally followed by a trailing reason, e.g.
+    ``none — prose``). Raise on a field present but declaring no cases — a
+    silently empty list there would be indistinguishable from "no field at
+    all" and hide a malformed task. Fence-masked like ``parse_spec_names``.
+    """
+    lines = task_block.splitlines()
+    mask = fence_mask(lines)
+    idx = next(
+        (
+            i
+            for i, ln in enumerate(lines)
+            if not mask[i] and ln.startswith("**Tests:**")
+        ),
+        None,
+    )
+    if idx is None:
+        return []
+    content = lines[idx][len("**Tests:**"):].strip()
+    if not content:
+        raise RuntimeError(f"**Tests:** is declared but empty: {lines[idx]!r}")
+    if NONE_TESTS_RE.match(content):
+        return []
+    return [case.strip() for case in content.split(";") if case.strip()]
+
+
 def strip_heading_text(text):
     """Drop a leading numbering token (e.g. '1.', '2.3') before prefix matching."""
     return re.sub(r'^\d+(\.\d+)*\.?\s+', '', text).strip()

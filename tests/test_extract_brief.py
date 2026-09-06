@@ -474,6 +474,49 @@ class ExtractBriefTests(unittest.TestCase):
         with open(default_path) as f:
             self.assertTrue(f.read())
 
+    # --- parse_test_cases (Task 1: Tests-line parser) ---
+
+    def test_parse_test_cases_multi_case_in_order(self):
+        block = (
+            "### Task 1: Do it\n- [ ] Done\n\n"
+            "**Tests:** rejects empty email; retries 3 times then throws; "
+            "logs a warning on retry\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block),
+            [
+                "rejects empty email",
+                "retries 3 times then throws",
+                "logs a warning on retry",
+            ],
+        )
+
+    def test_parse_test_cases_absent_returns_empty_list(self):
+        self.assertEqual(extract_brief.parse_test_cases(self._TASK), [])
+
+    def test_parse_test_cases_none_with_dash_prose_returns_empty_list(self):
+        block = self._TASK + "\n**Tests:** none — prose.\n"
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_none_with_any_trailing_reason_returns_empty_list(self):
+        block = self._TASK + "\n**Tests:** none because it's a doc-only change\n"
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_ignores_fenced_tests_line(self):
+        block = (
+            self._TASK + "\n"
+            "```markdown\n"
+            "**Tests:** fenced case that must not count\n"
+            "```\n"
+        )
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_present_but_empty_raises_naming_line(self):
+        block = self._TASK + "\n**Tests:**\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            extract_brief.parse_test_cases(block)
+        self.assertIn("Tests", str(ctx.exception))
+
     def test_last_task_in_file_eof_terminated_extracts_fully(self):
         code, out, err = self._run([self.plan_no_spec, "2", "--out", self.tmpdir.name])
         self.assertEqual(code, 0, err)

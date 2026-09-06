@@ -4,7 +4,7 @@
 > of the planning skill, with strict TDD per task. Checkboxes track progress.
 
 **Goal:** Make a task's review contract the task's own promises, so the reviewer stops manufacturing findings from spec sections it was never told the task's share of.
-**Architecture:** `forge_checklist.py` stops sourcing spec sections for task checklists and gains a `Tests:` source parsed by `extract-brief.py`; `forge_dispose.py` gains an `unverifiable` value that dispositions to `seed` and a `contract_ref` membership check; `forge_lint.py` gains a git-backed rule requiring every changed spec section to be claimed by a task.
+**Architecture:** `forge_checklist.py` stops sourcing spec sections for task checklists and gains a `Tests:` source parsed by `extract-brief.py`; `forge_dispose.py` gains an `unverifiable` value that dispositions to `seed` and a `contract_ref` membership check; `forge_lint.py` gains a git-backed rule requiring every changed spec section to be claimed by a task, and a grammar check for `**Tests:**`.
 **Tech stack:** Python 3 standard library, pytest.
 **Global Constraints:** scripts use the Python 3 standard library only; parsers raise on malformed input naming the cause and the line, never falling back to a default.
 
@@ -15,9 +15,19 @@
 - Modify: `scripts/extract-brief.py` (add `parse_test_cases`, sibling to `parse_spec_names`)
 - Test: `tests/test_extract_brief.py`
 
-**Interface:** `parse_test_cases(task_block) -> list[str]` — one entry per test case listed on the task's `**Tests:**` line, in document order. Returns `[]` when the field is absent, and `[]` for the legal empty form `none — <reason>`. Fence-masked like `parse_spec_names`.
+**Interface:** `parse_test_cases(task_block) -> list[str]` — one entry per `-` bullet under the task's `**Tests:**` marker, in document order. The only legal form is the marker alone on its line followed by `-` bullets, the block ending at the first blank line or next `**Field:**`. `**Tests:** none — <reason>` on one line returns `[]`. An absent field returns `[]`. Fence-masked like `parse_spec_names`.
 
-**Tests:** returns one entry per listed case for a multi-case block; preserves document order; returns empty list when `**Tests:**` is absent; returns empty list for `none — prose`; returns empty list for `none` with any trailing reason; ignores a `**Tests:**` string inside a fenced code block; raises naming the line on a `**Tests:**` field present but empty.
+**Tests:**
+- returns one entry per bullet for a multi-case block, in document order
+- stops at the first blank line, not at the end of the task block
+- stops at the next `**Field:**` marker when no blank line intervenes
+- returns an empty list when the `**Tests:**` field is absent
+- returns an empty list for `**Tests:** none — prose`
+- returns an empty list for `none` with any trailing reason
+- ignores a `**Tests:**` marker inside a fenced code block
+- raises naming the line for the inline joined form `**Tests:** a; b; c`
+- raises naming the line for a `**Tests:**` marker followed by neither bullets nor `none`
+- preserves a `;` inside a single bullet as literal text rather than splitting on it
 
 **Acceptance:** `python3 -m pytest -q tests/test_extract_brief.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -36,7 +46,14 @@
 
 **Interface:** `_test_items(task_block, task_number) -> list[ChecklistItem]` with `id` of form `t<N>.t<M>`, 1-based, and `source` of `"tests"`.
 
-**Tests:** a task checklist contains no `spec:` item even when the task declares `**Spec:**`; a task checklist contains one `t<N>.t<M>` item per test case; test item ids are 1-based and ordered; a task checklist still contains its `g<N>` global-constraint items; a task checklist still contains its `t<N>.a<M>` acceptance items; `build_final_checklist` still contains `spec:` items for every task's declared sections; a task with no tests, no globals and command-only acceptance raises the existing empty-checklist error.
+**Tests:**
+- a task checklist contains no `spec:` item even when the task declares `**Spec:**`
+- a task checklist contains one `t<N>.t<M>` item per test case
+- test item ids are 1-based and follow document order
+- a task checklist still contains its `g<N>` global-constraint items
+- a task checklist still contains its `t<N>.a<M>` acceptance items
+- `build_final_checklist` still contains `spec:` items for every task's declared sections
+- a task with no tests, no globals and command-only acceptance raises the existing empty-checklist error
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_checklist.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -55,7 +72,14 @@
 
 **Interface:** `derive_disposition(finding)` returns `"seed"` for any finding whose `impact` is `unverifiable`, at every provenance value.
 
-**Tests:** an unverifiable finding dispositions to seed when in-diff; when in-run; when pre-existing; an unverifiable finding with a null `contract_ref` still dispositions to seed; a coverage entry with status `unverifiable` and non-empty evidence is valid with no backing finding; a coverage entry with status `unverifiable` and empty evidence is a defect; a `violated` entry with no backing finding remains a defect.
+**Tests:**
+- an unverifiable finding dispositions to seed when in-diff
+- an unverifiable finding dispositions to seed when in-run
+- an unverifiable finding dispositions to seed when pre-existing
+- an unverifiable finding with a null `contract_ref` still dispositions to seed
+- a coverage entry with status `unverifiable` and non-empty evidence is valid with no backing finding
+- a coverage entry with status `unverifiable` and empty evidence is a defect
+- a `violated` entry with no backing finding remains a defect
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -75,7 +99,13 @@
 
 **Interface:** `validate_contract_refs(verdict, checklist) -> list[str]` — one human-readable defect string per finding whose non-null `contract_ref` is not a checklist id. Returns `[]` when `checklist` is falsy.
 
-**Tests:** a finding citing a real checklist id yields no defect; a finding citing an unknown string yields a defect naming the finding id and the bad ref; a finding with a null `contract_ref` yields no defect; an empty checklist yields no defects regardless of refs; the defect routes through the existing one-retry-then-contract-error path rather than raising directly; a contract-breaking finding whose ref is rejected downgrades to improvement at disposition.
+**Tests:**
+- a finding citing a real checklist id yields no defect
+- a finding citing an unknown string yields a defect naming the finding id and the bad ref
+- a finding with a null `contract_ref` yields no defect
+- an empty checklist yields no defects regardless of refs
+- the defect routes through the existing one-retry-then-contract-error path rather than raising directly
+- a contract-breaking finding whose ref is rejected downgrades to improvement at disposition
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_coverage.py tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -94,7 +124,12 @@
 
 **Interface:** no signature change; the instruction string gains the `unverifiable` status and impact values, states that `contract_ref` must name a checklist id supplied in the packet, and states that `unverifiable` requires a reason but obliges no backing finding.
 
-**Tests:** the instruction names `unverifiable` as a coverage status; names `unverifiable` as an impact value; states the checklist-id requirement for `contract_ref`; states that unverifiable obliges no backing finding; no longer describes `contract_ref` as any acceptance criterion or spec section.
+**Tests:**
+- the instruction names `unverifiable` as a coverage status
+- the instruction names `unverifiable` as an impact value
+- the instruction states the checklist-id requirement for `contract_ref`
+- the instruction states that unverifiable obliges no backing finding
+- the instruction no longer describes `contract_ref` as any acceptance criterion or spec section
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_review.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -113,7 +148,15 @@
 
 **Interface:** the check reads the spec file's committed version via `git show HEAD:<path>` from `repo_root`, compares section bodies by heading, and emits one `error` defect per changed section named by no task's `**Spec:**` line. `## Changelog` is exempt. A spec with no committed version treats every section as changed. A spec path outside a git repo, or a git read that fails, emits no defect.
 
-**Tests:** a changed section claimed by a task yields no defect; a changed section claimed by no task yields an error defect naming the section; an unchanged section claimed by no task yields no defect; a changed `## Changelog` yields no defect; a spec with no committed version requires every non-changelog section to be claimed; a spec outside a git repo yields no defect; the defect is severity `error`; the check reports every unclaimed section in one run, not the first only.
+**Tests:**
+- a changed section claimed by a task yields no defect
+- a changed section claimed by no task yields an error defect naming the section
+- an unchanged section claimed by no task yields no defect
+- a changed `## Changelog` yields no defect
+- a spec with no committed version requires every non-changelog section to be claimed
+- a spec outside a git repo yields no defect
+- the defect carries severity `error`
+- the check reports every unclaimed section in one run, not the first only
 
 **Acceptance:** `python3 -m pytest -q tests/test_forge_lint.py` passes; `python3 -m pytest -q` shows no regression.
 
@@ -155,10 +198,43 @@
 
 **Interface:** `build_packet(task_block, base, diff_output, prior_findings=None, checklist=None, review_kind=None, spec_sections=None)` — `spec_sections` is a list of `(heading, body)` pairs rendered as a `## Spec context` section, omitted entirely when None or empty. `_packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None, checklist=None, spec_path=None)` resolves the task's `**Spec:**` names via `find_spec_sections` and passes them.
 
-**Tests:** a packet built with spec sections contains a `## Spec context` heading; the rendered section carries each named section's heading and body; a packet built with no spec sections contains no `## Spec context` heading; the CLI's output is unchanged when the flag is absent; `_packet_for` with a `spec_path` and a task declaring `**Spec:**` produces a packet containing the section body; `_packet_for` with a task declaring no `**Spec:**` produces a packet with no spec-context section; the verification packet is unaffected.
+**Tests:**
+- a packet built with spec sections contains a `## Spec context` heading
+- the rendered section carries each named section's heading and body
+- a packet built with no spec sections contains no `## Spec context` heading
+- the CLI's output is unchanged when no spec sections are supplied
+- `_packet_for` with a `spec_path` and a task declaring `**Spec:**` produces a packet containing the section body
+- `_packet_for` with a task declaring no `**Spec:**` produces a packet with no spec-context section
+- the verification packet is unaffected
 
 **Acceptance:** `python3 -m pytest -q tests/test_review_packet.py tests/test_forge_verification_packet.py` passes; `python3 -m pytest -q` shows no regression.
 
 **Tier:** standard
 
 **Depends on:** nothing.
+
+### Task 9: Plan lint checks the Tests grammar
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_lint.py` (add the `**Tests:**` grammar check to `lint_plan`)
+- Test: `tests/test_forge_lint.py`
+
+**Spec:** Plan lint
+
+**Interface:** for every task, the check calls `parse_test_cases` and converts its raise into an `error` defect naming the task and the offending line. A task with no `**Tests:**` field is legal and yields no defect.
+
+**Tests:**
+- a task using the bulleted form yields no defect
+- a task using `none — <reason>` yields no defect
+- a task with no `**Tests:**` field yields no defect
+- a task using the inline joined form yields an error defect naming the task
+- a task whose `**Tests:**` marker is followed by neither bullets nor `none` yields an error defect
+- every offending task is reported in one run, not the first only
+- the defect carries severity `error`
+
+**Acceptance:** `python3 -m pytest -q tests/test_forge_lint.py` passes; `python3 scripts/forge_lint.py docs/forge/plans/2026-09-06-review-contract.md --spec docs/forge/specs/execution.md` exits zero; `python3 -m pytest -q` shows no regression.
+
+**Tier:** standard
+
+**Depends on:** Task 1.
