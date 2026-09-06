@@ -994,6 +994,221 @@ class DeferCLITests(CLITestCase):
         self.assertNotIn("improve-x", text)
 
 
+def _deferral_record():
+    return fm.Record("deferral", {"title": "t", "why": "w", "from": "user"})
+
+
+class GitHubStorePrimitivesTests(unittest.TestCase):
+    """``GitHubStore``'s kind-label support and the three read/edge
+    primitives ``program``/``phase``/``audit-issues`` need. Unlike the
+    CLI-driven ``DeferCLITests`` above, these call ``GitHubStore`` directly:
+    the subcommands that will use them (``add-program``, ``add-phase``,
+    ``audit-issues``) are a later task, but the store primitives are this
+    one's whole scope."""
+
+    def setUp(self):
+        self.store = fms.GitHubStore("/repo")
+
+    def test_create_with_kind_applies_origin_and_kind_label(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/9\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            number = self.store.create(_deferral_record(), by="human", kind="debt")
+        self.assertEqual(number, "9")
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:human", "debt"])
+
+    def test_create_with_no_kind_applies_exactly_one_label(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ["gh", "auth"]:
+                return _completed(returncode=0, stdout="Logged in")
+            label = _gh_label_preflight(args)
+            if label is not None:
+                return label
+            return _completed(returncode=0, stdout="https://github.com/o/r/issues/9\n")
+
+        with mock.patch.object(fms.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.store.create(_deferral_record(), by="human")
+        create = next(
+            a for a in calls if a[:2] == ["gh", "issue"] and "create" in a
+        )
+        labels = [create[i + 1] for i, v in enumerate(create) if v == "--label"]
+        self.assertEqual(labels, ["by:human"])
+
+    def test_create_with_unknown_kind_raises_before_any_network_call(self):
+        with mock.patch.object(fms.subprocess, "run", side_effect=AssertionError(
+            "gh must not be invoked when kind is invalid"
+        )):
+            with self.assertRaises(fm.SchemaError):
+                self.store.create(_deferral_record(), by="human", kind="bogus")
+
+    def test_issue_title_returns_title_from_structured_output(self):
+        def fake_run(args, **kwargs):
+            self.assertEqual(args, ["gh", "api", "repos/{owner}/{repo}/issues/9"])
+            return _completed(returncode=0, stdout=json.dumps({"id": 111, "title": "Epic A"}))
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(self.store.issue_title(9), "Epic A")
+
+    def test_sub_issues_returns_numbers_in_insertion_order(self):
+        def fake_run(args, **kwargs):
+            self.assertEqual(
+                args, ["gh", "api", "repos/{owner}/{repo}/issues/9/sub_issues"],
+            )
+            return _completed(returncode=0, stdout=json.dumps([
+                {"number": 10, "id": 1}, {"number": 11, "id": 2},
+            ]))
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(
+                self.store.sub_issues(9), [{"number": 10}, {"number": 11}],
+            )
+
+    def test_sub_issues_of_an_epic_with_none_is_empty(self):
+        def fake_run(args, **kwargs):
+            return _completed(returncode=0, stdout="[]")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(self.store.sub_issues(9), [])
+
+    def test_attach_sub_issue_resolves_id_then_posts_once(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ["gh", "api", "repos/{owner}/{repo}/issues/10"]:
+                return _completed(returncode=0, stdout=json.dumps({"id": 555}))
+            return _completed(returncode=0, stdout="{}")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.store.attach_sub_issue(9, 10)
+        posts = [a for a in calls if "--method" in a]
+        self.assertEqual(len(posts), 1)
+        post = posts[0]
+        self.assertEqual(post[:3], ["gh", "api", "repos/{owner}/{repo}/issues/9/sub_issues"])
+        self.assertIn("sub_issue_id=555", post)
+
+    def test_add_blocked_by_resolves_id_then_posts_once(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ["gh", "api", "repos/{owner}/{repo}/issues/5"]:
+                return _completed(returncode=0, stdout=json.dumps({"id": 777}))
+            return _completed(returncode=0, stdout="{}")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            self.store.add_blocked_by(6, 5)
+        posts = [a for a in calls if "--method" in a]
+        self.assertEqual(len(posts), 1)
+        post = posts[0]
+        self.assertEqual(
+            post[:3],
+            ["gh", "api", "repos/{owner}/{repo}/issues/6/dependencies/blocked_by"],
+        )
+        self.assertIn("issue_id=777", post)
+
+    def test_issue_title_failure_raises_through_raise_for_gh_failure(self):
+        def fake_run(args, **kwargs):
+            return _completed(returncode=1, stderr="boom")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                self.store.issue_title(9)
+        self.assertIn("boom", str(cm.exception))
+
+    def test_sub_issues_failure_raises_through_raise_for_gh_failure(self):
+        def fake_run(args, **kwargs):
+            return _completed(returncode=1, stderr="boom")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                self.store.sub_issues(9)
+        self.assertIn("boom", str(cm.exception))
+
+    def test_open_issues_failure_raises_through_raise_for_gh_failure(self):
+        def fake_run(args, **kwargs):
+            return _completed(returncode=1, stderr="boom")
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                self.store.open_issues()
+        self.assertIn("boom", str(cm.exception))
+
+    def test_attach_sub_issue_failure_raises_through_raise_for_gh_failure(self):
+        def fake_run(args, **kwargs):
+            if "--method" in args:
+                return _completed(returncode=1, stderr="boom")
+            return _completed(returncode=0, stdout=json.dumps({"id": 1}))
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                self.store.attach_sub_issue(9, 10)
+        self.assertIn("boom", str(cm.exception))
+
+    def test_add_blocked_by_failure_raises_through_raise_for_gh_failure(self):
+        def fake_run(args, **kwargs):
+            if "--method" in args:
+                return _completed(returncode=1, stderr="boom")
+            return _completed(returncode=0, stdout=json.dumps({"id": 1}))
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(fms.StoreUnavailable) as cm:
+                self.store.add_blocked_by(6, 5)
+        self.assertIn("boom", str(cm.exception))
+
+    def test_open_issues_passes_explicit_limit_and_parses_fields(self):
+        def fake_run(args, **kwargs):
+            self.assertEqual(args[:4], ["gh", "issue", "list", "--state"])
+            self.assertIn("--json", args)
+            self.assertIn("number,title,labels", args)
+            self.assertIn("--limit", args)
+            limit_idx = args.index("--limit")
+            self.assertEqual(args[limit_idx + 1], str(fms.GitHubStore._LABEL_LIST_LIMIT))
+            return _completed(returncode=0, stdout=json.dumps([
+                {"number": 3, "title": "Fix it", "labels": [
+                    {"name": "defect"}, {"name": "by:human"},
+                ]},
+            ]))
+
+        with mock.patch.object(fms.subprocess, "run", side_effect=fake_run):
+            issues = self.store.open_issues()
+        self.assertEqual(issues, [
+            {"number": 3, "title": "Fix it", "labels": ["defect", "by:human"]},
+        ])
+
+    def test_select_store_returns_github_for_program_and_phase(self):
+        tmp = tempfile.mkdtemp(prefix="forge-memory-select-store-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "docs", "forge"), exist_ok=True)
+        with open(os.path.join(tmp, "docs", "forge", "config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"deferrals": {"store": "file"}}, f)
+        self.assertIsInstance(fms.select_store(tmp, "program"), fms.GitHubStore)
+        self.assertIsInstance(fms.select_store(tmp, "phase"), fms.GitHubStore)
+        # The config's file-store request for deferrals still holds — it is
+        # config.json's own scope, ``program``/``phase`` simply never
+        # consult it.
+        self.assertIsInstance(fms.select_store(tmp, "deferral"), fms.FileStore)
+
+
 # The fixture run.json's plan path: what a runner-staged deferral's ``from``
 # must record (plan path, plus task number when the entry carries one).
 _PROVENANCE = "/x/plan.md"

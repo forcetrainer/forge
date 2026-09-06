@@ -12,15 +12,21 @@ live on ``FileStore`` rather than being promised by a base class that
 - ``FileStore`` — canonical markdown, machine-written only. Used for
   ``constraint`` unconditionally, and for ``deferral`` only when the repo has
   explicitly opted out of GitHub via ``docs/forge/config.json``.
-- ``GitHubStore`` — the default for ``deferral``. ``gh issue create/close``
-  under the hood; issue bodies are produced by ``forge_memory.render``, the
-  *same* renderer ``FileStore`` uses. Write-only: it files and closes, and
-  never reads issues back. Re-finding forge's own records duplicated the
-  GitHub UI, and validating a body already on GitHub guards a threat that
-  does not propagate — the next record is composed from CLI arguments, not
-  read from the last one. ``create`` validates BEFORE ``_gh_ready``, which
-  is the half that matters: a malformed or over-budget record never
-  reaches the network.
+- ``GitHubStore`` — the default for ``deferral``, and the only store for
+  ``program``/``phase``. ``gh issue create/close`` under the hood for
+  ``deferral``; issue bodies are produced by ``forge_memory.render``, the
+  *same* renderer ``FileStore`` uses. Re-finding a filed deferral duplicated
+  the GitHub UI, and validating a body already on GitHub guards a threat
+  that does not propagate — the next record is composed from CLI
+  arguments, not read from the last one, so ``deferral`` stays create/close
+  only. Programs and phases are different: they are hierarchy nodes a
+  caller must read back (an epic's title, its sub-issues) to file the next
+  one correctly, so ``GitHubStore`` also carries a handful of read
+  primitives (``issue_title``, ``sub_issues``, ``open_issues``) and the two
+  hierarchy-edge writes (``attach_sub_issue``, ``add_blocked_by``) used by
+  programs/phases and ``audit-issues``. ``create`` validates BEFORE
+  ``_gh_ready``, which is the half that matters: a malformed or
+  over-budget record never reaches the network.
 
 The one rule that matters more than any other here: every store failure is
 loud and names its fix. A missing/unauthenticated ``gh``, or a repo with
@@ -203,24 +209,36 @@ def _raise_for_gh_failure(proc):
 
 
 class GitHubStore(Store):
-    """``gh issue create/close`` backend for ``deferral`` records. Issue
-    bodies are ``forge_memory.render`` output — the same renderer
-    ``FileStore`` uses. Write-only: nothing here reads an issue back.
+    """``gh issue create/close`` backend for ``deferral`` records, plus the
+    read and hierarchy-edge primitives ``program``/``phase`` and
+    ``audit-issues`` need. Issue bodies are ``forge_memory.render``
+    output — the same renderer ``FileStore`` uses.
 
     Labels: exactly one origin label per filed issue. The KIND labels
-    (``feature``/``defect``/``debt``/``risk``) are never applied here —
-    whether something is a defect or debt is a human call this engine
-    cannot make, and a guessed kind label is worse than an absent one
-    because it reads as a judgment somebody made."""
+    (``feature``/``defect``/``debt``/``risk``) are applied only when a
+    caller passes ``kind`` to ``create`` — whether something is a defect or
+    debt is a human call this engine cannot make on its own, and a guessed
+    kind label is worse than an absent one because it reads as a judgment
+    somebody made. ``defer`` never passes ``kind``, so its issues carry
+    exactly the origin label, unchanged."""
 
     ORIGIN_LABELS = {
         "human": "by:human",
         "agent": "by:agent",
     }
 
+    KIND_LABELS = ("feature", "defect", "debt", "risk")
+
     _ORIGIN_DESCRIPTIONS = {
         "by:human": "Noticed by a person",
         "by:agent": "Noticed by an agent",
+    }
+
+    _KIND_DESCRIPTIONS = {
+        "feature": "New capability",
+        "defect": "Something broken",
+        "debt": "Cleanup owed",
+        "risk": "Risk to flag",
     }
 
     def __init__(self, repo_root):
@@ -270,8 +288,8 @@ class GitHubStore(Store):
                 _raise_for_gh_failure(proc)
             raise StoreUnavailable(
                 "could not check whether the label {0!r} exists, which "
-                "every filed deferral must carry (gh said: {1}). Re-run "
-                "once `gh label list` works in this repo.".format(
+                "this issue must carry (gh said: {1}). Re-run once "
+                "`gh label list` works in this repo.".format(
                     name, (proc.stderr or "").strip() or proc.returncode,
                 )
             )
@@ -281,15 +299,17 @@ class GitHubStore(Store):
         except (ValueError, TypeError, KeyError) as e:
             raise StoreUnavailable(
                 "could not read the label list while checking for {0!r}, "
-                "which every filed deferral must carry ({1}). Refusing to "
-                "assume the label is absent — that would try to create it "
-                "on every filing.".format(name, e)
+                "which this issue must carry ({1}). Refusing to assume "
+                "the label is absent — that would try to create it on "
+                "every filing.".format(name, e)
             )
         return name in names
 
-    def _ensure_label(self, name):
+    def _ensure_label(self, name, description):
         """Create ``name`` if the repo does not already have it, before the
-        issue that needs it.
+        issue that needs it. ``description`` is used only for the create
+        call, so one method serves both the two origin labels and the four
+        kind labels rather than each needing its own copy of this logic.
 
         Create-if-missing rather than fail-loud, because of the fresh-repo
         case: ``gh issue create`` rejects a label the repo does not have,
@@ -312,34 +332,43 @@ class GitHubStore(Store):
             return
         proc = self._run([
             "label", "create", name,
-            "--description", self._ORIGIN_DESCRIPTIONS[name],
+            "--description", description,
         ])
         if proc.returncode == 0:
             return
         if _issues_disabled(proc):
             _raise_for_gh_failure(proc)
         raise StoreUnavailable(
-            "could not create the label {0!r}, which every filed deferral "
-            "must carry and which this repository does not have yet (gh "
-            "said: {1}). Filing a deferral needs permission to create a "
-            "repository label the first time an origin is used — issue "
-            "write access alone is not enough. Run `gh label create {0}` "
-            "once, or ask someone with write access to this repo to, then "
-            "re-run.".format(name, (proc.stderr or "").strip() or proc.returncode)
+            "could not create the label {0!r}, which this issue must carry "
+            "and which this repository does not have yet (gh said: {1}). "
+            "Filing this issue needs permission to create a repository "
+            "label the first time this value is used — issue write access "
+            "alone is not enough. Run `gh label create {0}` once, or ask "
+            "someone with write access to this repo to, then re-run.".format(
+                name, (proc.stderr or "").strip() or proc.returncode,
+            )
         )
 
-    def create(self, record, by=None):
+    def create(self, record, by=None, kind=None):
         # Validated here, not only in the CLI: FileStore.create validates,
         # and the file store is "a second drawer, not a degraded path" —
         # the symmetry has to hold in both directions, or a non-CLI caller
         # pushes an over-budget body that nothing would catch. Nothing
         # catches it later any more: read-back validation of filed bodies
         # is gone, so this is the only gate between a malformed record and
-        # the network. It runs before ``_gh_ready`` deliberately.
+        # the network. It, and the ``kind`` check below, run before
+        # ``_gh_ready`` deliberately — no defect here ever reaches the
+        # network.
         defects = forge_memory.validate(record)
         if defects:
             raise forge_memory.SchemaError(
                 "refusing to store an invalid record: {}".format("; ".join(defects))
+            )
+        if kind is not None and kind not in self.KIND_LABELS:
+            raise forge_memory.SchemaError(
+                "unknown kind {!r}: expected one of {} or None — a kind "
+                "this engine has never heard of is never guessed into an "
+                "existing one.".format(kind, list(self.KIND_LABELS))
             )
         label = self.ORIGIN_LABELS.get(by)
         if label is None:
@@ -353,11 +382,15 @@ class GitHubStore(Store):
         _gh_ready(self.repo_root)
         body = forge_memory.render(record)
         title = record.fields.get("title", "")
-        self._ensure_label(label)
-        proc = self._run([
-            "issue", "create", "--title", title, "--body", body,
-            "--label", label,
-        ])
+        self._ensure_label(label, self._ORIGIN_DESCRIPTIONS[label])
+        labels = [label]
+        if kind is not None:
+            self._ensure_label(kind, self._KIND_DESCRIPTIONS[kind])
+            labels.append(kind)
+        args = ["issue", "create", "--title", title, "--body", body]
+        for one_label in labels:
+            args += ["--label", one_label]
+        proc = self._run(args)
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)
         url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
@@ -373,19 +406,142 @@ class GitHubStore(Store):
         if proc.returncode != 0:
             _raise_for_gh_failure(proc)
 
+    @staticmethod
+    def _issue_path(number, suffix=""):
+        # ``gh api`` fills in ``{owner}``/``{repo}`` itself from the repo
+        # the command runs in — this is a plain string, not a
+        # ``str.format`` template, so those braces reach ``gh`` literally.
+        return "repos/{owner}/{repo}/issues/" + str(number) + suffix
+
+    def _get_issue(self, number):
+        """The full ``gh api`` issue object for ``number`` — STRUCTURED
+        JSON, never text. Backs ``issue_title`` and the id resolution
+        ``attach_sub_issue``/``add_blocked_by`` need: the sub-issues and
+        blocked-by endpoints identify the OTHER issue by its REST ``id``,
+        which is not the same value as its number, so every caller that
+        needs one reads it here rather than assuming the two coincide."""
+        proc = self._run(["api", self._issue_path(number)])
+        if proc.returncode != 0:
+            _raise_for_gh_failure(proc)
+        try:
+            return json.loads(proc.stdout or "{}")
+        except (ValueError, TypeError) as e:
+            raise StoreUnavailable(
+                "could not read issue #{} from gh api ({})".format(number, e)
+            )
+
+    def _issue_id(self, number):
+        data = self._get_issue(number)
+        try:
+            return data["id"]
+        except (KeyError, TypeError) as e:
+            raise StoreUnavailable(
+                "gh api's response for issue #{} had no 'id' field ({})."
+                " Refusing to guess it from the number.".format(number, e)
+            )
+
+    def issue_title(self, number):
+        """``number``'s title, read from ``gh api``'s structured issue
+        object — never from ``gh issue view``'s human-formatted text."""
+        data = self._get_issue(number)
+        try:
+            return data["title"]
+        except (KeyError, TypeError) as e:
+            raise StoreUnavailable(
+                "gh api's response for issue #{} had no 'title' field "
+                "({}).".format(number, e)
+            )
+
+    def sub_issues(self, epic):
+        """``epic``'s sub-issues, in the insertion order GitHub returns
+        them, each as ``{"number": ...}``. An epic with none returns
+        ``[]`` rather than raising — no sub-issues is a legitimate state
+        for a freshly created epic, not a read failure."""
+        proc = self._run(["api", self._issue_path(epic, "/sub_issues")])
+        if proc.returncode != 0:
+            _raise_for_gh_failure(proc)
+        try:
+            data = json.loads(proc.stdout or "[]")
+            return [{"number": item["number"]} for item in data]
+        except (ValueError, TypeError, KeyError) as e:
+            raise StoreUnavailable(
+                "could not read the sub-issues of #{} from gh api "
+                "({}).".format(epic, e)
+            )
+
+    def attach_sub_issue(self, epic, number):
+        """Make ``number`` a real GitHub sub-issue of ``epic``. The body
+        param GitHub expects is ``number``'s ``id``, not its number —
+        resolved via ``_issue_id`` rather than assumed."""
+        sub_id = self._issue_id(number)
+        proc = self._run([
+            "api", self._issue_path(epic, "/sub_issues"),
+            "--method", "POST",
+            "-f", "sub_issue_id={}".format(sub_id),
+        ])
+        if proc.returncode != 0:
+            _raise_for_gh_failure(proc)
+
+    def add_blocked_by(self, number, blocker):
+        """Record that ``number`` is blocked by ``blocker``. Same id-vs-
+        number distinction as ``attach_sub_issue``: the body param is
+        ``blocker``'s ``id``, resolved via ``_issue_id``."""
+        blocker_id = self._issue_id(blocker)
+        proc = self._run([
+            "api", self._issue_path(number, "/dependencies/blocked_by"),
+            "--method", "POST",
+            "-f", "issue_id={}".format(blocker_id),
+        ])
+        if proc.returncode != 0:
+            _raise_for_gh_failure(proc)
+
+    def open_issues(self):
+        """Every open issue, each as ``{"number", "title", "labels"}``
+        (``labels`` a list of names). Passes an explicit high ``--limit``
+        for the same reason ``_label_exists`` does: ``gh``'s default of 30
+        is never relied on to have paged in everything a caller — here,
+        ``audit-issues`` — must see all of."""
+        proc = self._run([
+            "issue", "list", "--state", "open",
+            "--json", "number,title,labels",
+            "--limit", str(self._LABEL_LIST_LIMIT),
+        ])
+        if proc.returncode != 0:
+            _raise_for_gh_failure(proc)
+        try:
+            data = json.loads(proc.stdout or "[]")
+            return [
+                {
+                    "number": item["number"],
+                    "title": item["title"],
+                    "labels": [label["name"] for label in item["labels"]],
+                }
+                for item in data
+            ]
+        except (ValueError, TypeError, KeyError) as e:
+            raise StoreUnavailable(
+                "could not read the open issue list from gh ({}).".format(e)
+            )
+
 
 _LEGAL_STORE_VALUES = ("github", "file")
 
 
 def select_store(repo_root, type):
     """``constraint`` is always ``FileStore(docs/forge/constraints.md)``,
-    ignoring config entirely. ``deferral`` reads ``docs/forge/config.json``:
-    absent => GitHub; ``{"deferrals":{"store":"file"}}`` => FileStore;
-    anything else (unknown value, or malformed JSON) is a loud ``ConfigError``
-    naming the file and the legal values — never a silent fallback. No other
-    config keys are read."""
+    ignoring config entirely. ``program`` and ``phase`` are always
+    ``GitHubStore``, also ignoring config entirely — a program/phase IS a
+    GitHub issue with native sub-issue/blocked-by edges, so there is no
+    file-store equivalent to opt into. ``deferral`` reads
+    ``docs/forge/config.json``: absent => GitHub; ``{"deferrals":{"store":
+    "file"}}`` => FileStore; anything else (unknown value, or malformed
+    JSON) is a loud ``ConfigError`` naming the file and the legal values —
+    never a silent fallback. No other config keys are read."""
     if type == "constraint":
         return FileStore(os.path.join(repo_root, "docs/forge/constraints.md"))
+
+    if type in ("program", "phase"):
+        return GitHubStore(repo_root)
 
     if type != "deferral":
         raise ValueError("select_store: unknown record type {!r}".format(type))
