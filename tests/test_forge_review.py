@@ -863,3 +863,54 @@ class ReviewVerdictInstructionTests(unittest.TestCase):
         self.assertIn("pre-existing", instr)
         self.assertIn("contract-breaking", instr)
         self.assertIn("improvement", instr)
+
+    def test_unverifiable_is_a_coverage_status(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            '"satisfied" | "violated" | "n/a" | "unverifiable"', instr
+        )
+
+    def test_unverifiable_is_an_impact_value(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            '"contract-breaking" | "improvement" | "unverifiable"', instr
+        )
+
+    def test_contract_ref_requires_a_citable_ref_from_this_review(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn("a checklist id from this review's packet", instr)
+
+    def test_unverifiable_requires_reason_but_no_backing_finding(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            '"unverifiable" requires a reason in evidence and obliges no '
+            "backing finding",
+            instr,
+        )
+
+    def test_contract_ref_no_longer_described_as_acceptance_criterion_or_spec_section(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertNotIn("acceptance criterion or spec section", instr)
+
+    def test_findings_reported_regardless_of_provenance(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            "every finding you see is reported regardless of provenance",
+            instr,
+        )
+
+    def test_unverifiable_finding_requires_reason_in_summary(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            'a finding with impact "unverifiable" requires a reason in its '
+            "summary",
+            instr,
+        )
+
+    def test_unverifiable_finding_carries_no_repair_task(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn(
+            'a finding with impact "unverifiable" '
+            "carries no repair_task",
+            instr,
+        )

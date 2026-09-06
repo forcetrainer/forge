@@ -120,7 +120,7 @@
 **Depends on:** Task 3.
 
 ### Task 5: Verdict instruction text
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`REVIEW_VERDICT_INSTRUCTION`)
