@@ -253,17 +253,22 @@ def parse_spec_names(task_block):
 
 
 NONE_TESTS_RE = re.compile(r'^none\b')
+BULLET_RE = re.compile(r'^-\s+(.*)$')
 
 
 def parse_test_cases(task_block):
-    """Parse a task's ``**Tests:**`` line into a list of test case names.
+    """Parse a task's ``**Tests:**`` field into a list of test case names.
 
-    Cases are semicolon-separated freeform descriptions, in document order.
-    Returns ``[]`` when the field is absent, and ``[]`` for the legal empty
-    form ``none`` (optionally followed by a trailing reason, e.g.
-    ``none — prose``). Raise on a field present but declaring no cases — a
-    silently empty list there would be indistinguishable from "no field at
-    all" and hide a malformed task. Fence-masked like ``parse_spec_names``.
+    The only legal forms are the marker alone on its line followed by ``-``
+    bullets (one entry per bullet, in document order — the block ends at the
+    first blank line or the next ``**Field:**`` marker), or
+    ``**Tests:** none — <reason>`` on a single line. Returns ``[]`` when the
+    field is absent or is the ``none`` form. Raise on the inline joined form
+    (a test description is prose that may itself contain ``;``, so splitting
+    on one would guess intent) and on a marker followed by neither bullets
+    nor ``none`` — both are malformed, and a silently empty list would be
+    indistinguishable from "no field at all". Fence-masked like
+    ``parse_spec_names``.
     """
     lines = task_block.splitlines()
     mask = fence_mask(lines)
@@ -278,11 +283,28 @@ def parse_test_cases(task_block):
     if idx is None:
         return []
     content = lines[idx][len("**Tests:**"):].strip()
-    if not content:
-        raise RuntimeError(f"**Tests:** is declared but empty: {lines[idx]!r}")
-    if NONE_TESTS_RE.match(content):
-        return []
-    return [case.strip() for case in content.split(";") if case.strip()]
+    if content:
+        if NONE_TESTS_RE.match(content):
+            return []
+        raise RuntimeError(
+            "**Tests:** must be the marker alone on its line followed by "
+            "'-' bullets, or 'none — <reason>' on one line — inline joined "
+            f"cases are not legal; found: {lines[idx]!r}"
+        )
+    cases = []
+    for j in range(idx + 1, len(lines)):
+        line = lines[j]
+        if line.strip() == "" or FIELD_LINE_RE.match(line):
+            break
+        m = BULLET_RE.match(line)
+        if not m:
+            break
+        cases.append(m.group(1).strip())
+    if not cases:
+        raise RuntimeError(
+            f"**Tests:** is declared but lists no '-' bullets: {lines[idx]!r}"
+        )
+    return cases
 
 
 def strip_heading_text(text):

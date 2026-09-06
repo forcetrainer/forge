@@ -9,7 +9,7 @@
 **Global Constraints:** scripts use the Python 3 standard library only; parsers raise on malformed input naming the cause and the line, never falling back to a default.
 
 ### Task 1: Tests-line parser
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/extract-brief.py` (add `parse_test_cases`, sibling to `parse_spec_names`)
