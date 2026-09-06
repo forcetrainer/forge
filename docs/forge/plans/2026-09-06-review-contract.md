@@ -271,3 +271,28 @@
 **Tier:** standard
 
 **Depends on:** nothing.
+
+### Task 11: Membership enforcement reaches the Claude dispatch path
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_dispose.py` (CLI `main()` validates contract refs before classifying)
+- Test: `tests/test_forge_dispose.py`
+
+**Spec:** Reviewer verdict contract
+
+**Interface:** `main()` calls `validate_contract_refs` before `classify_findings`, gated on `--checklist` being supplied, mirroring `forge-run.py`'s per-task wiring. A defect exits non-zero naming the offending finding id and ref, and writes no decision. Without `--checklist`, behavior is unchanged.
+
+**Tests:**
+- a CLI run with `--checklist` and a `contract_ref` outside the citable set exits non-zero naming the finding id and the bad ref
+- that run produces no decision output, rather than a decision carrying a contract-breaking disposition
+- a CLI run with `--checklist` and a `contract_ref` inside the citable set is unaffected
+- a CLI run with `--checklist` and a null `contract_ref` is unaffected
+- a CLI run without `--checklist` behaves exactly as before
+- the existing `validate_locations` ordering before `classify_findings` is preserved
+
+**Acceptance:** `python3 -m pytest -q tests/test_forge_dispose.py` passes; `python3 -m pytest -q` shows no regression.
+
+**Tier:** standard
+
+**Depends on:** Task 4.
