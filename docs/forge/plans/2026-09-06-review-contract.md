@@ -59,7 +59,7 @@
 
 **Tier:** standard
 
-**Depends on:** Task 1, Task 8.
+**Depends on:** Task 1, Task 8, Task 10.
 
 ### Task 3: Unverifiable impact dispositions to seed
 - [ ] Done
@@ -238,3 +238,29 @@
 **Tier:** standard
 
 **Depends on:** Task 1.
+
+### Task 10: Owned lint fixtures replace live plan documents
+- [ ] Done
+
+**Files:**
+- Create: `tests/fixtures/plans/legacy-dispatch-parity.md`
+- Create: `tests/fixtures/specs/legacy-dispatch-parity-design.md`
+- Create: `tests/fixtures/plans/legacy-halt-precision.md`
+- Create: `tests/fixtures/specs/legacy-halt-precision-design.md`
+- Modify: `tests/test_forge_lint.py` (the two real-document tests read the fixtures instead)
+
+**Spec:** Plan lint
+
+**Interface:** no code. `test_real_phase12b_plan_lints_clean` and `test_real_phase14_plan_lints_clean` read `tests/fixtures/`, not `docs/forge/plans/` or `docs/forge/archive/specs/`. Each fixture is derived from the document it replaces, trimmed to what the test exercises, and conforms to current plan and spec grammar — including the bulleted `**Tests:**` form.
+
+**Tests:**
+- each fixture plan lints clean against its fixture spec
+- a fixture plan with one task's `**Tier:**` justification removed produces an error defect, proving the fixture still exercises real lint rules
+- no test in the suite reads a path under `docs/forge/plans/` or `docs/forge/archive/`
+- each fixture plan carries more than one task, so multi-task lint paths stay exercised
+
+**Acceptance:** `python3 -m pytest -q tests/test_forge_lint.py` passes; `grep -rn 'REPO_ROOT, "docs/' tests/` returns nothing; `python3 -m pytest -q` shows no regression.
+
+**Tier:** standard
+
+**Depends on:** nothing.
