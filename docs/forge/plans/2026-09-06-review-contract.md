@@ -175,7 +175,7 @@
 **Depends on:** nothing.
 
 ### Task 7: Agent contracts and skill prose parity
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `agents/forge-standard.md` (review paragraph points at the schema value)
