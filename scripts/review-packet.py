@@ -193,6 +193,22 @@ def build_checklist_section(checklist):
     return "\n".join(lines) + "\n"
 
 
+def build_spec_context_section(spec_sections):
+    """Render a '## Spec context' markdown section: one '### <heading>'
+    subsection per ``(heading, body)`` pair, in order. Context the reviewer
+    reads for understanding, never an item it must return a verdict on — the
+    task's own promises (checklist) are judged separately (Contract
+    checklist spec: "as context the reviewer reads, never as an item it
+    must return a verdict on")."""
+    parts = ["## Spec context", ""]
+    for heading, body in spec_sections:
+        parts.append("### {}".format(heading))
+        parts.append("")
+        parts.append(body.rstrip("\n"))
+        parts.append("")
+    return "\n".join(parts).rstrip("\n") + "\n"
+
+
 def build_prior_findings_section(prior_findings):
     """Render the prior attempt's findings (as loaded from --prior-findings)
     into a packet section instructing the reviewer to label each current
@@ -210,12 +226,20 @@ def build_prior_findings_section(prior_findings):
 
 
 def build_packet(task_block, base, diff_output, prior_findings=None,
-                  checklist=None, review_kind=None):
+                  checklist=None, review_kind=None, *, spec_sections=None):
     """``review_kind`` (None by default) opts into the '## Review kind'
     marker — the CLI (main(), below) never passes it, so its output stays
     byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
     (the runner's real discovery packets) pass ``review_kind="discovery"``
-    explicitly (Coverage on discovery only spec)."""
+    explicitly (Coverage on discovery only spec).
+
+    ``spec_sections`` (keyword-only, None by default) is a list of
+    ``(heading, body)`` pairs — the task's ``**Spec:**`` sections, resolved
+    by the caller via ``find_spec_sections`` — rendered as a '## Spec
+    context' section right after the diff. Omitted or empty, no section is
+    added and the packet is unchanged (Contract checklist spec: spec
+    sections are context the reviewer reads, never a checklist item it must
+    return a verdict on)."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -230,6 +254,8 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
     fence = "`" * max(3, longest_run + 1)
     diff_section = fence + "diff\n" + diff_body + fence + "\n"
     packet = task_block.rstrip("\n") + "\n\n" + diff_section
+    if spec_sections:
+        packet += "\n" + build_spec_context_section(spec_sections)
     if checklist is not None:
         packet += "\n" + build_checklist_section(checklist)
     if prior_findings is not None:

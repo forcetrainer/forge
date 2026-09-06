@@ -206,6 +206,23 @@ class BuildVerificationPacketTests(unittest.TestCase):
         # only the delta's own file appears.
         self.assertNotIn("b/unrelated-plan-file.py", packet)
 
+    def test_unaffected_by_spec_context_task_8(self):
+        # Task 8 (Contract checklist: spec context) adds spec_sections to
+        # build_packet only — a resumed reviewer already holds the spec in
+        # session, so build_verification_packet takes no such parameter and
+        # never renders a '## Spec context' section.
+        with self.assertRaises(TypeError):
+            rp.build_verification_packet(
+                self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n",
+                self._checklist()[:1],
+                spec_sections=[("Widget behavior", "Widgets must widget.")],
+            )
+        packet = rp.build_verification_packet(
+            self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n",
+            self._checklist()[:1],
+        )
+        self.assertNotIn("## Spec context", packet)
+
     def test_checklist_none_omits_section(self):
         packet = rp.build_verification_packet(
             self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n", None

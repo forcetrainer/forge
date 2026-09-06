@@ -186,7 +186,7 @@
 **Depends on:** Task 5.
 
 ### Task 8: Review packet carries spec context
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/review-packet.py` (`build_packet` gains a spec-context section)

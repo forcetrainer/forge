@@ -805,6 +805,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
+                    spec_path=spec_path,
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
