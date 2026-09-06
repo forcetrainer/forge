@@ -176,8 +176,23 @@ claude plugin marketplace add forcetrainer/forge
 claude plugin install forge@forge
 ```
 
-To update later: `claude plugin update forge@forge` (or `git pull` in a
-local clone).
+To update later: `claude plugin update forge@forge`.
+
+**Channels.** One marketplace offers three, each pinned to a commit rather
+than to whatever `main` happens to be:
+
+| plugin | what you get |
+| --- | --- |
+| `forge` | the current release — install this one |
+| `forge-beta` | the next version, feature-complete and being proven |
+| `forge-dev` | unreleased, tracks `main`. Expect breakage. |
+
+Install a different channel by name — `claude plugin install forge-beta@forge`.
+A channel moves only when its pin is updated, so `main` advancing never
+changes what you have installed. The current pre-release is
+[0.12.0-beta.1](https://github.com/forcetrainer/forge/releases/tag/v0.12.0-beta.1),
+which changes how project memory and specs work; see its release notes for
+the breaking changes.
 
 ### Codex CLI
 
