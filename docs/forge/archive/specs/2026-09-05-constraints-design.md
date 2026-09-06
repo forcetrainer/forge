@@ -1,4 +1,10 @@
-# Constraints — design
+# Constraints — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/project-memory.md`](../../specs/project-memory.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 3 of the structured-memory program (issue #45). Retires `docs/forge/DECISIONS.md`;
 binding rules move to `docs/forge/constraints.md` under the Phase 1 record engine.

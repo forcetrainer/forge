@@ -1,4 +1,10 @@
-# Phase 3: Codex dual-harness packaging — design
+# Phase 3: Codex dual-harness packaging — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/codex-runner.md`](../../specs/codex-runner.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Goal: forge installable on Codex CLI from this repo, alongside Claude Code. Skills, scripts, and the session-start script are shared verbatim; harness divergence is isolated to manifests, agent definitions, hook wiring, and one execution reference file.
 

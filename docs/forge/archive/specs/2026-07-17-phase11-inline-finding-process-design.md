@@ -1,4 +1,10 @@
-# Phase 11 — Fix the inline finding-process — Design
+# Phase 11 — Fix the inline finding-process — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 **Status:** approved (2026-07-17)
 **Roadmap:** Phase 11 (cross-harness). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../archive/DECISIONS.md) (Phase 8 decomposition; inline self-review).

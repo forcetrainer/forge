@@ -1,4 +1,10 @@
-# Project Memory Engine — design
+# Project Memory Engine — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/project-memory.md`](../../specs/project-memory.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 1 of the structured-memory program. Replaces the flat-file project memory
 (`DECISIONS.md`, `DEFERRALS.md`, `ROADMAP.md`) with a schema-driven record engine.

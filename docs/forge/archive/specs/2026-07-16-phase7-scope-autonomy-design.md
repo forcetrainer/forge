@@ -1,4 +1,10 @@
-# Runner Scope Autonomy — design
+# Runner Scope Autonomy — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 7 (Codex runner). Replaces the runner's raw 2-iteration rework cap and single-shot final-review human gate with a **disposition matrix** (fix / defer / halt) driven by two per-finding axes, a **convergence-based** stop condition, an auto-fix-by-default autonomy knob, and a **terminal doc-sync stage**. Goal: let the runner rework as far as it is *converging*, fix only what threatens the phase's contract, defer what is harmless, and halt only on a genuine human decision.
 

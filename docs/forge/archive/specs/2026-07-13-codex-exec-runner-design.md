@@ -1,4 +1,10 @@
-# Codex exec runner — design
+# Codex exec runner — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/codex-runner.md`](../../specs/codex-runner.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Goal: Codex plan execution moves from in-session subagent dispatch to a deterministic task runner over `codex exec`. One fresh worker process per task; the process boundary eliminates parent-model inheritance and child-thread quota accumulation. Claude Code execution path unchanged.
 

@@ -1,4 +1,10 @@
-# Deferrals as GitHub Issues — design
+# Deferrals as GitHub Issues — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/project-memory.md`](../../specs/project-memory.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 2 of the structured-memory program (issue #44). Retires `docs/forge/DEFERRALS.md`;
 deferrals become GitHub issues via the Phase 1 record engine.

@@ -1,4 +1,10 @@
-# Living Specs — design
+# Living Specs — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/pipeline.md`](../../specs/pipeline.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 5 of the structured-memory program (issue #47), and its last. Specs stop being
 dated per-change snapshots and become per-system documents amended in place. The

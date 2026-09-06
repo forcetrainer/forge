@@ -1,4 +1,10 @@
-# Retire ROADMAP.md — design
+# Retire ROADMAP.md — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/project-memory.md`](../../specs/project-memory.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 Phase 4 of the structured-memory program (issue #46). Deletes the last flat memory
 file as a live read path. Phase decomposition becomes GitHub issues carrying native

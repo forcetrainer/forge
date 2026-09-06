@@ -36,10 +36,11 @@ spinning forever.
 
 Every review finding is classified on two independent axes:
 
-- **Provenance** — is the finding *in this task's diff*, or *pre-existing*? This
-  is verified by the runner against the actual diff line ranges, **not** trusted
-  from the reviewer. A finding whose lines fall outside the diff is pre-existing,
-  overriding any optimistic reviewer claim.
+- **Provenance** — three values, all verified by the runner against the actual
+  diff line ranges and **never** trusted from the reviewer: **in-diff** (it
+  intersects this review's diff), **in-run** (it intersects what this run has
+  written in an earlier task, but not this task's own diff), or **pre-existing**
+  (neither). An optimistic reviewer claim is overridden by what the diff says.
 - **Contract impact** — is it **contract-breaking** (violates a *named*
   acceptance criterion) or an **improvement** (nicer, but nothing promised was
   broken)? Contract-breaking requires the reviewer to cite the criterion; with no
@@ -47,12 +48,21 @@ Every review finding is classified on two independent axes:
 
 Cross the two and every finding lands in exactly one cell with a different action:
 
-|                  | contract-breaking            | improvement-only         |
-| ---------------- | ---------------------------- | ------------------------ |
-| **in this diff** | ✅ **fix** — rework in-loop  | 📝 **defer** — log it    |
-| **pre-existing** | ⚠️ **halt** — human decides  | 📝 **defer** — log it    |
+|                  | contract-breaking             | improvement-only         |
+| ---------------- | ----------------------------- | ------------------------ |
+| **in-diff**      | ✅ **fix** — rework in-loop   | 📝 **defer** — log it    |
+| **in-run**       | 🌱 **seed** — to final review | 📝 **defer** — log it    |
+| **pre-existing** | ⚠️ **halt** — human decides   | 📝 **defer** — log it    |
 
-**Only the top-left cell is ever auto-fixed.** Everything else defers or halts.
+**seed** is the cross-task case: code this run wrote, in a task that is already
+committed. The run *continues* and the finding is carried into the final review's
+packet, because an integration defect can only be judged at integration — and a
+task's rework loop editing another task's committed work would break the linear
+vertical-slice history the per-task review base depends on. In the final review
+the run base *is* the diff base, so `in-run` and `in-diff` coincide and `seed`
+cannot arise there.
+
+**Only the top-left cell is ever auto-fixed.** Everything else seeds, defers or halts.
 That bias is deliberate: an autonomous fixer's failure mode is *over*-fixing, and
 over-fixing is just diff over-scoping in disguise — the exact thing per-task
 commit discipline exists to prevent. So the rule is fix-what-you-broke-against-

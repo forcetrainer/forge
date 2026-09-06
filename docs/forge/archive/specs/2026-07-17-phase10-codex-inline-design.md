@@ -1,4 +1,10 @@
-# Phase 10 — Codex inline execution branch — Design
+# Phase 10 — Codex inline execution branch — ARCHIVE
+
+**Historical. Not authoritative. No new entries.**
+
+Superseded by [`docs/forge/specs/execution.md`](../../specs/execution.md), which describes this
+system as it is now. This document is kept for provenance: it records what was
+specified at the time, not what is true today.
 
 **Status:** approved (2026-07-17)
 **Roadmap:** Phase 10 (Codex path). Decomposed from Phase 8 — see [DECISIONS 2026-07-17](../archive/DECISIONS.md) (Phase 8 decomposition; inline self-review).

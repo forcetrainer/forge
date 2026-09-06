@@ -118,14 +118,12 @@ forge-run.py --status --run-dir DIR
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists because a `codex exec`
    reviewer is a subprocess and cannot gather its own context.
-5. Reviewer verdict contract — the reviewer's final message is JSON, captured via
-   `--output-last-message`:
-   ```json
-   {"verdict": "pass"}
-   {"verdict": "findings", "findings": ["<file:line — issue>", "..."]}
-   ```
-   An unparseable verdict is a loud runner failure naming the cause. Never guessed at,
-   never retried silently.
+5. Capture the verdict: the reviewer's final message is one JSON object, read from the
+   `--output-last-message` file. That file, not the live log, is the verdict's channel.
+   An unparseable verdict is a loud runner failure naming the cause — never guessed at,
+   never silently retried. The verdict's shape, its coverage and finding fields, and the
+   shared `forge_common.REVIEW_VERDICT_INSTRUCTION` that both harnesses' reviewers are
+   held to are the `execution` spec's — see `docs/forge/specs/execution.md`.
 6. Findings are classified, then fixed, deferred, or halted on, per the `execution`
    spec's disposition matrix and convergence rules. The runner drives them through
    `scripts/forge_dispose.py`, the same module the Claude path calls.
@@ -497,3 +495,4 @@ staleness is never an exit condition.
 2026-09-05: dropped the monitor spec's Scope in/out framing — a phase-scoped delta statement; its standing exclusions (no interactivity, no push notification) are stated under Monitor (#47)
 2026-09-05: dropped the monitor spec's `_run_teed` runner-private helper name — the tee lives in `forge_common` as `run_teed`, with `run_json_teed` added for the `codex exec --json` event stream (#47)
 2026-09-05: monitor gains `--follow`, the standing mode that auto-attaches to each new run, plus the `.forge/watch` launcher the runner prints at start (#47)
+2026-09-05: dropped the restated reviewer verdict contract — the runner spec's flat `findings: ["<file:line — issue>"]` string form is superseded by the coverage/`location`/`provenance`/`impact`/`contract_ref`/`convergence` object contract, and the contract belongs to the `execution` system; what stays here is the Codex mechanics, capture via `--output-last-message` and a loud failure on an unparseable verdict (#47)

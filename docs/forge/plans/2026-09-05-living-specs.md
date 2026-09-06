@@ -150,7 +150,7 @@ Known traps: the disposition matrix is stated in three sources at different widt
 
 **Tests:** none — prose and moves; verification is the acceptance commands.
 
-**Acceptance:** `ls docs/forge/specs/` lists exactly `codex-runner.md execution.md pipeline.md project-memory.md`; `ls docs/forge/archive/specs/ | wc -l` is 17 (the sixteen pre-existing dated specs plus this phase's own, per Self-migration); `grep -rn "specs/2026-" --exclude-dir=.git --exclude-dir=__pycache__ . | grep -v "^./docs/forge/plans/" | grep -v "^./docs/forge/archive/"` returns nothing; `grep -rn "YYYY-MM-DD" skills/brainstorming/SKILL.md` returns nothing; `grep -h '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json` shows `0.12.0` twice; `python3 scripts/forge_lint.py --specs` exits 0; `python3 -m pytest -q` shows no regression.
+**Acceptance:** `ls docs/forge/specs/` lists exactly `codex-runner.md execution.md pipeline.md project-memory.md`; `ls docs/forge/archive/specs/ | wc -l` is 17 dated specs plus the archive header file, whose form (one directory-level header, or a banner per file) is the implementer's choice; no TRACKED file outside `docs/forge/plans/` and `docs/forge/archive/` cites a dated spec path (an untracked, gitignored local settings file is out of scope, and the four living specs' own `supersedes` lists naming `archive/specs/2026-...` are the citation, not a stale one); `grep -rn "YYYY-MM-DD" skills/brainstorming/SKILL.md` returns nothing; `grep -h '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json` shows `0.12.0` twice; `python3 scripts/forge_lint.py --specs` exits 0; `python3 -m pytest -q` shows no regression.
 
 **Tier:** standard
 
