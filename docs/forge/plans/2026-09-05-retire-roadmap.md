@@ -201,7 +201,7 @@ The rest of each sentence — the flow description, and the legacy path's migrat
 
 **Tests:** none — prose. Verification is the acceptance greps below.
 
-**Acceptance:** `test -f docs/forge/archive/ROADMAP.md && test ! -e docs/forge/ROADMAP.md`; `grep -rn "ROADMAP" --exclude-dir=.git --exclude-dir=archive --exclude-dir=plans --exclude-dir=specs --exclude-dir=ideas --exclude-dir=__pycache__ .` returns nothing; `grep -n "add-program" skills/project-memory/SKILL.md` and `grep -n "add-phase" skills/brainstorming/SKILL.md` each return a line; `grep -rn "in-progress" skills/planning/SKILL.md` returns nothing; `python3 -m pytest -q` shows no regression.
+**Acceptance:** `test -f docs/forge/archive/ROADMAP.md && test ! -e docs/forge/ROADMAP.md`; `grep -rln "ROADMAP" --exclude-dir=.git --exclude-dir=archive --exclude-dir=plans --exclude-dir=specs --exclude-dir=ideas --exclude-dir=__pycache__ .` names only `tests/test_forge_memory.py` (assertions that the string is absent from the hook context) and `skills/project-memory/SKILL.md` (the Legacy sentence this spec requires) — a zero-hit grep is unreachable, since both mentions exist to say the roadmap is gone; `grep -n "add-program" skills/project-memory/SKILL.md` and `grep -n "add-phase" skills/brainstorming/SKILL.md` each return a line; `grep -rn "in-progress" skills/planning/SKILL.md` returns nothing; `python3 -m pytest -q` shows no regression.
 
 **Tier:** standard
 

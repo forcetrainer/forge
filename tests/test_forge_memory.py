@@ -3445,7 +3445,7 @@ class SessionStartHookTests(unittest.TestCase):
         "(docs/forge/specs/) -> plan (docs/forge/plans/) -> TDD execution, "
         "with user approval gates between stages."
     )
-    ROADMAP_SENTENCE = (
+    BACKLOG_SENTENCE = (
         "Open GitHub issues are the work backlog; check them for the current phase."
     )
     LEGACY_FLOW_SENTENCE = (
@@ -3453,7 +3453,7 @@ class SessionStartHookTests(unittest.TestCase):
         "(or .theforge/) signal directory: brainstorm -> spec -> plan -> "
         "TDD execution, with user approval gates between stages."
     )
-    LEGACY_ROADMAP_SENTENCE = (
+    LEGACY_BACKLOG_SENTENCE = (
         "Open GitHub issues are the work backlog; check them for the current phase."
     )
 
@@ -3500,22 +3500,22 @@ class SessionStartHookTests(unittest.TestCase):
         self.assertIn("forge flow", context)
         self._assert_no_decision_or_skill_deferral_instruction(context)
 
-    def test_flow_and_roadmap_sentences_survive_unchanged(self):
+    def test_flow_and_backlog_sentences_survive_unchanged(self):
         self._mkforge()
         code, out, err = _run_session_start_hook(cwd=self.tmp)
         self.assertEqual(code, 0, err)
         context = self._get_context(out)
         self.assertIn(self.FLOW_SENTENCE, context)
-        self.assertIn(self.ROADMAP_SENTENCE, context)
+        self.assertIn(self.BACKLOG_SENTENCE, context)
         self.assertNotIn("ROADMAP", context)
 
-    def test_legacy_flow_and_roadmap_sentences_survive_unchanged(self):
+    def test_legacy_flow_and_backlog_sentences_survive_unchanged(self):
         self._mkforge(legacy=True)
         code, out, err = _run_session_start_hook(cwd=self.tmp)
         self.assertEqual(code, 0, err)
         context = self._get_context(out)
         self.assertIn(self.LEGACY_FLOW_SENTENCE, context)
-        self.assertIn(self.LEGACY_ROADMAP_SENTENCE, context)
+        self.assertIn(self.LEGACY_BACKLOG_SENTENCE, context)
         self.assertNotIn("ROADMAP", context)
 
     def test_constraints_present_includes_each_rule(self):
