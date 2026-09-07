@@ -202,7 +202,7 @@ satisfy — no new authoring burden, no new plan fields.
 |---|---|
 | `spec:<slug>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections` |
 | `g<N>` | each clause of the plan header's `**Global Constraints:**` |
-| `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line |
+| `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
 | `t<N>.a<M>` | each `;`-separated clause of task N's `**Acceptance:**` line **whose content is not solely an inline-code command** — those are already executed deterministically by the acceptance runner and would be dead checklist weight |
 | `t<N>` | final review only: task N's title, as an integration item |
 
@@ -316,6 +316,16 @@ identical contract.
   is deliberately wider than the coverage set, so a finding against code that
   contradicts the spec can still name what it breaks without the reviewer being asked
   to certify the whole section.
+
+  **Two mechanisms enforce this, and they are not the same.** Where a citable set is
+  supplied, a non-member ref is a *validation defect* — one retry naming it, then a
+  contract error — so the reviewer is asked to correct the citation rather than having
+  its finding silently reclassified. Where none is supplied (`validate_contract_refs`
+  skips a falsy set, and `derive_disposition` tests only non-nullness), the
+  named-evidence rule degrades to the presence check and the downgrade to `improvement`
+  is what remains. Membership is therefore enforced at the callers that supply the set,
+  not by the disposition matrix itself; a caller that omits it gets the weaker
+  guarantee, silently.
 - `impact: "unverifiable"` is the honest verdict for a finding the reviewer cannot
   settle from the diff in front of it — the agent contract has always called that a
   valid answer, and until now the schema had nowhere to put it. It requires a reason in
@@ -830,6 +840,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-07: `t<N>.t<M>` is coverage-per-task but citable at the final review; membership is enforced by the callers that supply a citable set, not by the matrix (#60)
 2026-09-06: Plan lint's check table gains the `**Tests:**` grammar row (#60)
 2026-09-06: spec-coverage lint reads the merge base, not HEAD; Risks / constraints joins Changelog as exempt (#60)
 2026-09-06: coverage items and citable refs are separate sets — spec sections stay citable, only coverage narrowed (#60)
