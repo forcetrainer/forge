@@ -47,7 +47,7 @@ def freeze_diff(cwd, freeze_sha) -> str
 **Depends on:** nothing.
 
 ### Task 2: The halt record in run.json
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_receipts.py` (`write_run_json` gains `halt=`; add `_read_halt`)
@@ -72,7 +72,7 @@ def _read_halt(run_dir) -> dict | None
 - `halt=None` writes no `halt` key; an existing run.json shape stays valid
 - a written halt record round-trips through `_read_halt` field for field
 - `_read_halt` returns `None` for a run dir with no run.json, and for one whose run.json carries no `halt` key
-- `_read_halt` raises naming the file when run.json is malformed JSON (matching the module's existing reader behavior)
+- `_read_halt` raises naming the file when run.json is malformed JSON. This DIVERGES from every sibling reader in the module, which catches `ValueError` and returns `None`; `parsers-fail-loud` governs here because reading a corrupt run.json as "no halt record" would resume a fresh task run against a frozen tree. The divergence is deliberate and must be documented at the function
 - a later `write_run_json` call passing `halt=None` clears a previously written record rather than preserving it
 
 **Acceptance:** `python3 -m pytest tests/test_forge_receipts.py -q` passes with no skips.

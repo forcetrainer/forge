@@ -118,11 +118,37 @@ def _read_deferrals(run_dir):
         return None
 
 
+def _read_halt(run_dir):
+    """The ``halt`` record from an existing ``run.json`` (used on resume to
+    continue a frozen task against the human's fix rather than restarting
+    into the same halt), or ``None`` when there is no prior run.json or its
+    ``halt`` key is absent.
+
+    Unlike its siblings (``_read_base_commit`` and friends), a run.json that
+    exists but fails to parse is not treated as "no prior state" here: a halt
+    record is exactly what a scope-decision resume needs to proceed safely,
+    so silently returning ``None`` for corrupt JSON would resume into a fresh
+    task run against a frozen tree instead of surfacing the corruption. This
+    raises, naming the file, on malformed JSON (parsers-fail-loud); a missing
+    file is not malformed, so it still returns ``None``."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError("{}: malformed JSON ({})".format(path, e))
+    return data.get("halt")
+
+
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
-                   seeded_findings=None):
+                   seeded_findings=None, halt=None):
     """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
     ``started_at``/``updated_at``/``pid``) and the scope-autonomy fields
     (``deferrals``/``autofix_mode``/``doc_sync``/``seeded_findings``) are
@@ -142,7 +168,17 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     reset by the caller at the start of every invocation — never carried across
     a resume — so it is written whenever the caller passes even an empty dict
     (unlike the other optional fields, which omit on None: an empty ``threads``
-    on resume must overwrite a prior invocation's stale map, not be skipped)."""
+    on resume must overwrite a prior invocation's stale map, not be skipped).
+    ``halt`` is the scope-decision freeze record (Receipts and run state spec)
+    — task/attempt, the freeze commit and its base, the serialized convergence
+    state, the halt reason, the outstanding findings with their drafted
+    ``repair_task``, and the accumulated human-approved finding ids. Like
+    ``deferrals``/``seeded_findings`` it omits on None and is read back on
+    resume; unlike ``threads`` it is *not* forced onto every call, so a
+    resumed run's terminal write that passes ``halt=None`` after the human's
+    fix has been folded in correctly clears the record rather than preserving
+    it — each call rebuilds ``run.json`` from scratch, so omitting the key is
+    already sufficient to erase a prior invocation's value."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -165,6 +201,7 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
         ("autofix_mode", autofix_mode),
         ("doc_sync", doc_sync),
         ("seeded_findings", seeded_findings),
+        ("halt", halt),
     ):
         if value is not None:
             data[key] = value
