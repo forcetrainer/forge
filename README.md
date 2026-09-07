@@ -202,7 +202,7 @@ breaking changes.
 
 ```bash
 codex plugin marketplace add /path/to/forge
-codex plugin install forge@forge
+codex plugin add forge@forge
 ```
 
 The `SessionStart` hook works on Codex without extra wiring — the shared
