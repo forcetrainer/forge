@@ -299,6 +299,62 @@ class RenderStatusTests(unittest.TestCase):
             out = forge_status.render_status(forge_status.read_run_state(d))
             self.assertIn("scope-decision", out)
 
+    def test_render_reports_a_halted_run_as_resumable_with_finding_ids(self):
+        # Halt resolution spec: a frozen `scope-decision` halt is resumable —
+        # `--status` must say so and name the outstanding finding ids, since
+        # those ids are what the human passes back as `--resolve <id>=...`.
+        with tempfile.TemporaryDirectory() as d:
+            halt = {
+                "task": 2,
+                "attempt": 1,
+                "freeze_commit": "a" * 40,
+                "freeze_base": "b" * 40,
+                "convergence_state": {"resolved_ids": [], "carried_ids": [],
+                                      "prev_acceptance_ok": True},
+                "halt_reason": "scope-decision",
+                "findings": [{"id": "h1", "summary": "legacy guard is wrong"},
+                             {"id": "h2", "summary": "second scope call"}],
+                "repair_task": {"title": "Fix the legacy guard"},
+                "approved": {},
+            }
+            _write_run(d, "escalated", [_summary(1, "passed"), _summary(2, "escalated")],
+                       halt=halt)
+            _write_receipt(d, 2, 1, "escalated", findings=["legacy guard is wrong"],
+                           halt_reason="scope-decision")
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["halt"], halt)
+            out = forge_status.render_status(state)
+            self.assertIn("resumable", out)
+            self.assertIn("h1", out)
+            self.assertIn("h2", out)
+            self.assertIn("--resolve", out)
+
+    def test_render_halt_splits_outstanding_on_the_canonical_id(self):
+        # A re-issued finding is answered by its CANONICAL id (`carried_from`)
+        # — the identity run_plan's `--resolve` validation keys on. Splitting
+        # on the raw id would show h1 as still outstanding and print a
+        # `--resolve h1b=...` command run_plan rejects as unknown.
+        with tempfile.TemporaryDirectory() as d:
+            halt = {
+                "task": 1,
+                "attempt": 2,
+                "freeze_commit": "a" * 40,
+                "freeze_base": "b" * 40,
+                "convergence_state": {},
+                "halt_reason": "scope-decision",
+                "findings": [
+                    {"id": "h1b", "carried_from": "h1", "summary": "re-issued"},
+                    {"id": "h9", "summary": "still open"},
+                ],
+                "approved": {"h1": "repair"},
+            }
+            _write_run(d, "escalated", [_summary(1, "escalated")], halt=halt)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("outstanding findings: h9", out)
+            self.assertIn("--resolve h9=repair|defer", out)
+            self.assertNotIn("h1b", out)
+            self.assertIn("already resolved: h1=repair", out)
+
     def test_render_shows_halt_reason_class_for_final_review(self):
         with tempfile.TemporaryDirectory() as d:
             _write_run(d, "escalated-final-review", [_summary(1, "passed")])

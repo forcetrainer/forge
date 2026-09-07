@@ -113,7 +113,7 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
 **Depends on:** nothing.
 
 ### Task 4: Freeze at halt, restore and reconcile on resume
-- [ ] Done
+- [x] Done — passed, 3 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`execute_task` reconciliation brief and freeze-on-halt; `run_plan` halt-record read/write and resume restore; `main` gains `--resolve`)

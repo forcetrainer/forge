@@ -341,3 +341,346 @@ class EffortOverrideCliTests(unittest.TestCase):
         res = self._run(plan, extra_args=["--effort", "99=max"])
         self.assertEqual(res.returncode, 1, res.stderr)
         self.assertIn("99", res.stderr)
+
+
+# --- halt freeze / resume (Halt resolution spec) -----------------------------
+
+# A standard (reviewed) task whose acceptance passes only when FROZENWORK is
+# present in the tracked f1.txt. The scripted worker writes that line on the
+# first invocation only, so a resumed invocation passes acceptance if — and
+# only if — the frozen attempt was really restored to the working tree.
+# Acceptance is command-only (no prose clause), so the task has no contract
+# checklist and the fixture verdicts need no coverage array.
+PLAN_FREEZE = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `grep -q FROZENWORK f1.txt`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+# The same task with an acceptance command that is satisfied by the checkpoint
+# itself, so a halted attempt leaves nothing to freeze.
+PLAN_FREEZE_NOOP = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `true`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+REPAIR_TASK = {
+    "title": "Fix the legacy guard",
+    "files": ["f1.txt"],
+    "spec": "Halt resolution",
+    "tests": ["the guard holds"],
+    "acceptance": "`true`",
+    "tier": "standard",
+}
+
+
+class HaltFreezeResumeTests(unittest.TestCase):
+    """A `scope-decision` halt freezes the paused attempt, leaves the tree
+    clean, and records a halt record the next invocation resumes from
+    (Halt resolution spec). End-to-end through the CLI so `--resolve`, the
+    clean-tree precondition and the exit codes are exercised as shipped."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-halt-resume-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.run_dir = os.path.join(self.d, "run")
+        self.log = os.path.join(self.d, "fakelog")
+        self.f1 = os.path.join(self.d, "f1.txt")
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        with open(self.f1, "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            # The fake binary, its logs and the run dir must be ignored: the
+            # freeze's `git clean -fd` removes untracked, non-ignored paths.
+            f.write("fake_codex.py\nfakelog*\nresponses.json\nrun/\n.forge/\n")
+        self.plan = self._plan(PLAN_FREEZE)
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        ).stdout
+
+    def _plan(self, content, name="plan.md", where=None):
+        p = os.path.join(where or self.d, name)
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def _run(self, responses, extra_args=(), plan=None):
+        # Fresh log every invocation so the fake's response index restarts.
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        if os.path.exists(self.log + ".prompts"):
+            os.remove(self.log + ".prompts")
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.log + ".prompts"
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), plan or self.plan,
+             "--spec", self.spec, "--run-dir", self.run_dir,
+             "--codex-bin", self.fake, *extra_args],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+
+    def _halt_msg(self, id="h1"):
+        # Line 99 is far outside the reviewed diff -> verified pre-existing;
+        # contract-breaking + pre-existing is the scope-decision cell.
+        return _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id=id,
+            repair_task=REPAIR_TASK,
+        )
+
+    def _worker_writes_frozen(self):
+        return {"exit": 0, "msg": "", "append_file": self.f1,
+                "append_text": "FROZENWORK\n"}
+
+    def _halt_run(self, plan=None):
+        res = self._run([self._worker_writes_frozen(),
+                         {"exit": 0, "msg": self._halt_msg()}], plan=plan)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        return res
+
+    def _halt_record(self):
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            return json.load(f).get("halt")
+
+    def _porcelain(self):
+        return subprocess.run(
+            ["git", "status", "--porcelain"], cwd=self.d,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def _briefs(self):
+        """Every worker brief this invocation wrote, newest last."""
+        out = []
+        for name in sorted(os.listdir(self.run_dir)):
+            if name.startswith("task-1-attempt-") and name.endswith("-brief.md"):
+                with open(os.path.join(self.run_dir, name)) as f:
+                    out.append(f.read())
+        return out
+
+    def test_scope_decision_halt_freezes_and_leaves_tree_clean(self):
+        self._halt_run()
+        record = self._halt_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["task"], 1)
+        self.assertEqual(record["attempt"], 1)
+        self.assertEqual(record["halt_reason"], "scope-decision")
+        head = self._git("rev-parse", "HEAD").strip()
+        self.assertEqual(record["freeze_base"], head)
+        self.assertTrue(record["freeze_commit"])
+        # The freeze holds the paused attempt and is parked off the branch.
+        show = self._git("show", record["freeze_commit"])
+        self.assertIn("FROZENWORK", show)
+        self.assertEqual(self._porcelain(), "")
+
+    def test_reinvocation_after_halt_is_not_refused_by_clean_tree_check(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertNotIn("working tree not clean", res.stderr)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_unrelated_dirty_tree_at_resume_is_still_refused(self):
+        self._halt_run()
+        with open(os.path.join(self.d, "unrelated.txt"), "w") as f:
+            f.write("a human's uncommitted work\n")
+        res = self._run([{"exit": 0, "msg": ""}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("working tree not clean", res.stderr)
+        self.assertIn("unrelated.txt", res.stderr)
+
+    def test_resume_restores_frozen_work_and_dispatches_reconcile_brief(self):
+        self._halt_run()
+        # The resumed worker writes nothing: acceptance (`grep -q FROZENWORK`)
+        # can only pass if the freeze was replayed into the working tree.
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        brief = self._briefs()[-1]
+        self.assertIn("restored", brief.lower())
+        # Not the plain brief: the plain brief has no reconciliation section.
+        self.assertIn("Resumed after a halt", brief)
+        prompts = _log_prompts(self.log + ".prompts")
+        self.assertTrue(any("Resumed after a halt" in p for p in prompts))
+
+    def test_conflicting_replay_leaves_checkpoint_and_supplies_frozen_diff(self):
+        self._halt_run()
+        # The human's fix rewrites exactly the line the frozen attempt added
+        # after, so the replay cannot apply.
+        with open(self.f1, "w") as f:
+            f.write("base\nHUMANFIX\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "human fix")
+        head = self._git("rev-parse", "HEAD").strip()
+        res = self._run([self._worker_writes_frozen(),
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        brief = self._briefs()[-1]
+        self.assertIn("reference", brief.lower())
+        self.assertIn("FROZENWORK", brief)  # the frozen diff, as reference text
+        # The task restarted from the checkpoint: the human's commit is the
+        # parent of the task's own commit, nothing was replayed onto it.
+        parents = self._git(
+            "rev-list", "--parents", "-n", "1",
+            self._git("log", "--format=%H", "--grep", "forge: task 1",
+                      "-n", "1").strip(),
+        ).split()
+        self.assertEqual(parents[1], head)
+
+    def test_resume_without_resolve_halts_again_on_the_same_finding(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()}])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertEqual(record["halt_reason"], "scope-decision")
+        self.assertEqual(record["approved"], {})
+        # The brief must not tell the worker a decision was made: nothing was
+        # resolved, so the scope finding is still an open question.
+        brief = self._briefs()[-1]
+        self.assertNotIn("### Resolved finding(s)", brief)
+        self.assertIn("NO finding resolved", brief)
+
+    def test_resolve_repair_lets_the_same_finding_pass(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            run = json.load(f)
+        self.assertEqual(run["status"], "passed")
+        self.assertIsNone(run.get("halt"))
+        # Only what the human actually answered is named as resolved, with
+        # the resolution they gave.
+        brief = self._briefs()[-1]
+        self.assertIn("### Resolved finding(s)", brief)
+        self.assertIn("h1 (repair)", brief)
+
+    def test_resolve_defer_stages_a_deferral_and_does_not_halt(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=defer"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            run = json.load(f)
+        staged = run.get("deferrals") or []
+        self.assertTrue(any(d.get("id") == "h1" for d in staged), staged)
+        self.assertEqual(
+            [d.get("task_number") for d in staged if d.get("id") == "h1"], [1]
+        )
+
+    def test_resolve_of_an_id_absent_from_the_halt_record_raises_naming_it(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""}],
+                        extra_args=["--resolve", "nope9=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("nope9", res.stderr)
+        # The halt record survives the failed invocation — the run is still
+        # resumable once the human names a real finding id.
+        self.assertIsNotNone(self._halt_record())
+
+    def test_missing_freeze_commit_object_at_resume_raises_naming_the_sha(self):
+        self._halt_run()
+        bogus = "0" * 40
+        path = os.path.join(self.run_dir, "run.json")
+        with open(path) as f:
+            run = json.load(f)
+        run["halt"]["freeze_commit"] = bogus
+        with open(path, "w") as f:
+            json.dump(run, f)
+        res = self._run([{"exit": 0, "msg": ""}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn(bogus, res.stderr)
+
+    def test_halt_with_nothing_to_freeze_records_null_and_resumes(self):
+        # The plan lives outside the repo, so not even the ledger annotation
+        # touches the tree: the halted attempt has nothing to freeze at all.
+        outside = tempfile.mkdtemp(prefix="forge-halt-plan-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        plan = self._plan(PLAN_FREEZE_NOOP, where=outside)
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()}], plan=plan)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertIsNone(record["freeze_commit"])
+        self.assertEqual(self._porcelain(), "")
+        res2 = self._run([{"exit": 0, "msg": ""},
+                          {"exit": 0, "msg": _pass_msg()}],
+                         extra_args=["--resolve", "h1=repair"], plan=plan)
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        brief = self._briefs()[-1]
+        self.assertIn("checkpoint", brief.lower())
+
+    def test_reconcile_brief_carries_the_real_resolution_delta(self):
+        # End-to-end wiring of freeze_base -> resolution delta: the delta is
+        # `git diff <the checkpoint the freeze was taken against>`, so the
+        # human's fix — committed on top of that checkpoint while the task was
+        # paused — must appear in the resumed worker's brief. Recomputing the
+        # base from the current HEAD, or dropping the diff, empties exactly
+        # this assertion.
+        self._halt_run()
+        with open(os.path.join(self.d, "fix.txt"), "w") as f:
+            f.write("HUMANFIXMARKER\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "human fix")
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        brief = self._briefs()[-1]
+        self.assertIn("Resolution delta", brief)
+        self.assertIn("HUMANFIXMARKER", brief)
+        # And the worker was actually sent it, not merely a file on disk.
+        prompts = _log_prompts(self.log + ".prompts")
+        self.assertTrue(any("HUMANFIXMARKER" in p for p in prompts), prompts)
+
+    def test_passed_task_after_a_resumed_halt_commits_the_frozen_work(self):
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        sha = self._git("log", "--format=%H", "--grep", "forge: task 1",
+                        "-n", "1").strip()
+        self.assertTrue(sha)
+        self.assertIn("FROZENWORK", self._git("show", "{}:f1.txt".format(sha)))
+        self.assertEqual(self._porcelain(), "")

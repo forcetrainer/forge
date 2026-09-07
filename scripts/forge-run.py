@@ -5,9 +5,11 @@ Scope: the sequential task loop (dependency order), worker dispatch via one
 ``codex exec`` process per task, direct acceptance-command execution, standard/
 complex reviewer dispatch with a machine-parsed JSON verdict, the 2-iteration
 rework cap enforced as a loop counter, mechanical halt on escalation, resume
-(skip tasks already ``passed`` in the run-dir), a plan-level final review against
-the whole-plan diff + spec, JSON receipts, a ``run.json`` summary, and plan-
-checkbox ledger annotations.
+(skip tasks already ``passed`` in the run-dir; a ``scope-decision`` halt freezes
+the paused attempt and the next invocation resumes it against the human's fix,
+carrying ``--resolve`` answers into the convergence decision), a plan-level
+final review against the whole-plan diff + spec, JSON receipts, a ``run.json``
+summary, and plan-checkbox ledger annotations.
 
 Usage:
     forge-run.py <plan.md> --spec <spec.md> [--run-dir DIR] [--codex-bin PATH]
@@ -114,6 +116,10 @@ from forge_git import (  # noqa: F401
     _git_head,
     _packet_for,
     _working_tree_dirty,
+    freeze_attempt,
+    freeze_diff,
+    freeze_ref_name,
+    restore_freeze,
 )
 from forge_plan import (  # noqa: F401
     order_tasks,
@@ -124,6 +130,7 @@ from forge_receipts import (  # noqa: F401
     _clear_task_receipts,
     _read_base_commit,
     _read_deferrals,
+    _read_halt,
     _read_latest_receipt,
     _read_run_tasks,
     _read_seeded_findings,
@@ -583,15 +590,212 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
 # --- per-task execution & plan loop -----------------------------------------
 
 
-def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings):
+def _fenced_diff(diff):
+    """A diff fenced with a dynamic-length fence, so a diff line that is
+    itself a ``` fence cannot close the block early. An empty diff renders
+    ``(no changes)`` rather than an empty block — the reader must be told the
+    delta is empty, not left to wonder whether it was omitted. One
+    implementation behind every prompt that pastes a diff (the doc-sync brief
+    and the reconciliation brief)."""
+    body = diff if diff and diff.strip() else "(no changes)\n"
+    if not body.endswith("\n"):
+        body += "\n"
+    longest_run = max(
+        (len(m.group(0)) for m in re.finditer(r"`+", body)), default=0
+    )
+    fence = "`" * max(3, longest_run + 1)
+    return fence + "diff\n" + body + fence + "\n"
+
+
+def _resolution_delta(cwd, freeze_base):
+    """Everything that changed while the task was paused: ``git diff
+    <freeze_base>`` — the checkpoint the freeze was taken against, through to
+    the current tree (Halt resolution: the worker resumes holding the
+    resolution delta).
+
+    ``freeze_base`` is READ FROM THE HALT RECORD, never recomputed from a
+    HEAD that has since moved: the human's fix is normally a commit on top of
+    that checkpoint, so a base taken now would render the delta empty — the
+    one thing the resumed worker most needs to see.
+
+    Must be called BEFORE ``restore_freeze``: afterwards the working tree
+    also carries the frozen attempt, which is the worker's own paused work,
+    not part of what changed around it. Returns ``""`` when no base was
+    recorded (nothing to diff against)."""
+    if not freeze_base:
+        return ""
+    return _git_diff(cwd, freeze_base)
+
+
+def _reconcile_brief(task, run_dir, restored, resolution_delta, frozen_diff,
+                     finding):
+    """The reconciliation section appended to a resumed halted task's first
+    worker brief (Halt resolution: the paused task resumes against the fixed
+    tree rather than restarting from scratch).
+
+    ``restored`` is ``restore_freeze``'s own return value, never a guess from
+    which files changed: ``True`` states the frozen work is back in the
+    working tree and the worker decides whether to keep, adjust, or discard
+    it; ``False`` means the replay conflicted (or there was nothing to
+    freeze) and the task restarts from the clean checkpoint, with
+    ``frozen_diff`` supplied as reference text that is explicitly NOT
+    applied. A conflict is the signal that the fix invalidated the work, not
+    an error, and the runner never resolves one.
+
+    ``finding`` is the halt record entry — or a list of them, or a bare
+    summary string — that the human ACTUALLY resolved, each stamped with its
+    ``resolution`` (``repair`` | ``defer``); naming it is what tells the
+    worker which question was answered. It must never be handed the record's
+    whole finding list: a resume can carry no ``--resolve`` at all (the
+    exemption is opt-in), and listing an unanswered scope finding as resolved
+    would tell the worker the tree was fixed for a question nobody answered.
+    An empty list is therefore a real state, and says so.
+
+    That empty case names the consequence — this task will halt again — and
+    stops there. It must never offer a way out of the halt: the only way a
+    worker could clear a pre-existing scope finding is to edit code the plan
+    never claimed, which would reclassify the finding as in-diff, flip its
+    disposition from ``halt`` to ``fix``, and launder the human's scope
+    decision into an auto-repair through the rework loop. The runner
+    dispatches no repair of its own — the decision and the edit both stay
+    with the human (Halt resolution) — so the brief says so outright, and the
+    ``repair``/``defer`` glosses are prohibitions for the same reason.
+    ``resolution_delta`` rides every path.
+
+    The section is also written to ``run_dir`` as ``task-<N>-reconcile.md``,
+    like ``_resume_findings_prompt``'s prompt file, so the run dir records
+    what the resumed worker was actually told. Returns the section text."""
+    findings = finding if isinstance(finding, (list, tuple)) else [finding]
+    resolved_lines = []
+    for entry in findings:
+        if entry is None:
+            continue
+        if isinstance(entry, dict):
+            gloss = {
+                "repair": " — the human has already made this fix. Do not "
+                          "make it again and do not extend it: check that it "
+                          "holds, and work only the task as written",
+                "defer": " — the human has filed this for later. Do not fix "
+                         "it: leave it exactly as it stands",
+            }.get(entry.get("resolution"), "")
+            resolved_lines.append(
+                "- {} ({}) — {}{}".format(
+                    entry.get("id", "?"), entry.get("resolution", "resolved"),
+                    entry.get("summary", ""), gloss,
+                )
+            )
+        else:
+            resolved_lines.append("- {}".format(entry))
+    lines = ["## Resumed after a halt — reconcile before continuing", ""]
+    if resolved_lines:
+        lines.extend([
+            "This task was paused for a human decision. The decision has been "
+            "made and the run is resuming; nothing about the task's own "
+            "contract above has changed.",
+            "",
+            "### Resolved finding(s)",
+            "",
+        ])
+        lines.extend(resolved_lines)
+        lines.append("")
+    else:
+        lines.extend([
+            "This task was paused for a human decision, and the run is "
+            "resuming with NO finding resolved — nothing was passed to "
+            "`--resolve` this invocation. The review's scope findings still "
+            "stand, and this task will halt on them again. That halt is the "
+            "correct outcome and clearing it is not your job. Do not edit "
+            "pre-existing code the plan never claimed: the decision to make "
+            "that edit, and the edit itself, belong to the human. Work the "
+            "task as written; nothing about its contract above has changed.",
+            "",
+        ])
+    if restored:
+        lines.extend([
+            "### Your paused work — RESTORED to the working tree",
+            "",
+            "The attempt you were part-way through has been replayed onto the "
+            "current checkpoint and is in the working tree now. Read it, then "
+            "decide: proceed unchanged, adjust it, or discard and rebuild. "
+            "That judgment is yours to make and is a proposal, not a verdict "
+            "— this task's own review still runs against the result.",
+            "",
+        ])
+    elif frozen_diff and frozen_diff.strip():
+        lines.extend([
+            "### Your paused work — NOT restored (reference only)",
+            "",
+            "The paused attempt did not replay cleanly onto the fixed tree, "
+            "so it was not applied: the working tree is at the last committed "
+            "checkpoint. A conflict is the signal that the fix invalidated "
+            "the work, not an error. The attempt is reproduced below as "
+            "reference — reuse what still holds, and rebuild the rest.",
+            "",
+            _fenced_diff(frozen_diff),
+        ])
+    else:
+        lines.extend([
+            "### Your paused work — nothing was frozen",
+            "",
+            "The paused attempt had made no change to the tree, so there was "
+            "nothing to freeze. Start the task from the checkpoint.",
+            "",
+        ])
+    lines.extend([
+        "### Resolution delta — what changed while this task was paused",
+        "",
+        _fenced_diff(resolution_delta),
+    ])
+    section = "\n".join(lines).rstrip("\n") + "\n"
+    path = os.path.join(run_dir, "task-{}-reconcile.md".format(task.number))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(section)
+    return section
+
+
+@dataclass
+class HaltResume:
+    """What a resumed ``scope-decision`` halt hands ``execute_task``: the
+    replay outcome (``restored`` — ``restore_freeze``'s own return value),
+    the two texts the reconciliation brief is built from, the halt record's
+    outstanding findings, and the convergence state to continue from.
+
+    ``attempt`` is the attempt number the halt happened on, so the resumed
+    task continues the count instead of restarting it — a halt must not
+    silently reset the attempt backstop. ``state`` is the halt record's
+    deserialized ConvergenceState, so the regression rule still sees the
+    resolved ids recorded before the pause. ``findings`` holds only the
+    record entries the human RESOLVED this invocation, each stamped with its
+    ``resolution`` — never the record's whole finding list (see
+    ``_reconcile_brief``)."""
+
+    restored: bool
+    resolution_delta: str
+    frozen_diff: str
+    findings: list = field(default_factory=list)
+    attempt: int = 0
+    state: ConvergenceState = field(default_factory=ConvergenceState)
+
+
+def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings,
+               reconcile=None):
     """Write the worker brief for one attempt and return its path + SHA-256. On a
     rework attempt (findings non-empty) the outstanding findings are appended so
-    the re-dispatched worker sees exactly what to fix; the SHA covers that text."""
+    the re-dispatched worker sees exactly what to fix; the SHA covers that text.
+
+    ``reconcile`` (``_reconcile_brief``'s section, or None) is appended the
+    same way on the first attempt of a task resumed from a ``scope-decision``
+    halt. It is appended to the FULL brief rather than replacing it: a
+    resumed run never carries a thread across invocations, so this worker is
+    a cold spawn that holds none of the task's contract yet (Halt
+    resolution / Session continuity)."""
     brief = eb.build_brief(plan_path, task.number, spec_path)
     if findings:
         lines = ["", "", "## Rework — address these findings before resubmitting", ""]
         lines.extend("- {}".format(f) for f in findings)
         brief = brief.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    if reconcile:
+        brief = brief.rstrip("\n") + "\n\n\n" + reconcile
     brief_path = os.path.join(
         run_dir, "task-{}-attempt-{}-brief.md".format(task.number, attempt)
     )
@@ -634,7 +838,8 @@ def _execution_failure_finding(detail):
 
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                   effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto",
-                  run_base=None, seeded_findings=None):
+                  run_base=None, seeded_findings=None, approved_ids=frozenset(),
+                  resume=None, halt_out=None):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
     per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
@@ -662,7 +867,31 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     re-dispositioned. ``seeded_findings`` (optional; a list the caller
     accumulates across every task in the run) receives one
     ``finding_to_dict`` entry per ``seed``-dispositioned finding this task's
-    review produces — logged, never reworked, never halted on."""
+    review produces — logged, never reworked, never halted on.
+
+    ``approved_ids`` (canonical finding ids a human resolved with
+    ``--resolve``) threads into every ``convergence_decision`` call, exempting
+    those findings from the scope-decision halt for the remainder of the run
+    — and from that step alone: gate mode and the regression rule still see
+    them (Halt resolution: approved findings).
+
+    ``resume`` (a ``HaltResume``, or None) resumes this task from a frozen
+    ``scope-decision`` halt: the attempt counter and ConvergenceState
+    continue from the record rather than restarting, and the first attempt's
+    brief carries ``_reconcile_brief``'s section. Continuity decisions
+    (worker/reviewer session resume, the pre-repair snapshot) key off the
+    LAP within this invocation, not the absolute attempt number: a resumed
+    run holds no session from the halted one, so its first lap is a cold
+    spawn exactly like any other first attempt, and its review is a cold
+    discovery review that is never told the work was frozen
+    (``discovery-review-is-cold``).
+
+    ``halt_out`` (a dict, or None) is filled in on a halt with the record the
+    caller needs to freeze and persist: ``attempt``, ``halt_reason``, the
+    outstanding findings as dicts, the drafted ``repair_task``, and the
+    serialized ConvergenceState as of this attempt. An out-parameter for the
+    same reason ``threads``/``seeded_findings`` are: the caller owns run.json,
+    and TaskOutcome is the loop's summary shape, not a run-state record."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -671,7 +900,10 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     # here and `git diff <review_base>` isolates this task's own changes. Taken
     # once (trivial tiers need no reviewer).
     review_base = _git_head(cwd) if task.tier != "trivial" else None
-    state = ConvergenceState()
+    state = resume.state if resume is not None else ConvergenceState()
+    # Attempts already spent before a halt: the resumed task continues the
+    # count so the backstop is not reset by the pause (Halt resolution).
+    attempt_offset = resume.attempt if resume is not None else 0
     findings_carry = []     # outstanding fix-finding summaries -> next brief
     prior_findings = []     # outstanding fix findings (dicts) -> next re-review packet
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
@@ -681,11 +913,19 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                              # when an execution failure preempted a review) — this,
                              # not `attempt`, decides discovery (0) vs verification (>0)
 
-    attempt = 0
+    attempt = attempt_offset
     while True:
         attempt += 1
+        lap = attempt - attempt_offset   # 1-based within THIS invocation
+        reconcile = None
+        if resume is not None and lap == 1:
+            reconcile = _reconcile_brief(
+                task, run_dir, resume.restored, resume.resolution_delta,
+                resume.frozen_diff, resume.findings,
+            )
         brief_path, brief_sha = _brief_for(
-            task, plan_path, spec_path, run_dir, attempt, findings_carry
+            task, plan_path, spec_path, run_dir, attempt, findings_carry,
+            reconcile=reconcile,
         )
         update_run_progress(run_dir, task.number, "worker")
         # Rework laps (attempt > 1) resume the worker with the outstanding
@@ -695,8 +935,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # (non-zero exit, missing session, context overflow) falls back to
         # exactly one cold spawn with the full brief; the fallback is recorded
         # on this attempt's receipt, never fatal (Continuity scope and failure).
-        worker_resume_thread = threads.get(worker_role) if attempt > 1 else None
-        worker_resume_fallback = attempt > 1 and worker_resume_thread is None
+        worker_resume_thread = threads.get(worker_role) if lap > 1 else None
+        worker_resume_fallback = lap > 1 and worker_resume_thread is None
         # Pre-repair snapshot (Delta-scoped verification packets spec): every
         # rework lap dispatches a repair (resumed worker, or its cold
         # fallback below) — snapshot the tree just before that dispatch so a
@@ -704,7 +944,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # scoped to this repair alone rather than the task's whole
         # accumulated diff. Never taken on attempt 1 (nothing has repaired
         # anything yet); never mutates the working tree.
-        repair_snapshot = forge_git.snapshot_tree(cwd) if attempt > 1 else None
+        repair_snapshot = forge_git.snapshot_tree(cwd) if lap > 1 else None
         if worker_resume_thread:
             resume_prompt_path = _resume_findings_prompt(
                 findings_carry, run_dir, task, attempt
@@ -876,7 +1116,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 )
 
         action, halt_reason = convergence_decision(
-            findings, state, acc_ok, attempt, autofix_mode
+            findings, state, acc_ok, attempt, autofix_mode,
+            approved_ids=approved_ids,
         )
         advance_state(state, findings, acc_ok)
 
@@ -906,6 +1147,20 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             "coverage_skipped": coverage_skipped,
             "coverage_retry": coverage_retry,
             "resume_fallback": worker_resume_fallback or reviewer_resume_fallback,
+            # The reconciliation outcome, on the attempt that resumed a frozen
+            # halt (Halt resolution: the reconciliation outcome is recorded on
+            # the receipt). None on every other attempt.
+            "reconcile": (
+                {
+                    "restored": resume.restored,
+                    "resumed_from_attempt": attempt_offset,
+                    "resolved": [
+                        f.get("id") for f in resume.findings
+                        if isinstance(f, dict)
+                    ],
+                }
+                if reconcile else None
+            ),
         }
         write_receipt(run_dir, task, attempt, receipt)
 
@@ -913,6 +1168,18 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             return TaskOutcome(status="passed", attempts=attempt, summary="",
                                deferrals=deferrals)
         if action == "halt":
+            if halt_out is not None:
+                # Everything the caller needs to freeze this attempt and write
+                # the halt record. The state is serialized AFTER advance_state,
+                # so a resume continues from what this attempt actually
+                # established rather than from the attempt before it.
+                halt_out.update({
+                    "attempt": attempt,
+                    "halt_reason": halt_reason,
+                    "findings": [finding_to_dict(f) for f in findings],
+                    "repair_task": repair_task,
+                    "convergence_state": state.to_dict(),
+                })
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,
@@ -1446,14 +1713,7 @@ def _doc_sync_brief(spec_path, diff, run_dir):
     the block early). Overwritten fresh; there is exactly one doc-sync stage."""
     with open(spec_path, "r", encoding="utf-8") as f:
         spec_text = f.read()
-    diff_body = diff if diff.strip() else "(no changes)\n"
-    if not diff_body.endswith("\n"):
-        diff_body += "\n"
-    longest_run = max(
-        (len(m.group(0)) for m in re.finditer(r"`+", diff_body)), default=0
-    )
-    fence = "`" * max(3, longest_run + 1)
-    diff_section = fence + "diff\n" + diff_body + fence + "\n"
+    diff_section = _fenced_diff(diff)
     brief = (
         spec_text.rstrip("\n") + "\n\n"
         + DOC_SYNC_INSTRUCTION + "\n\n"
@@ -1664,7 +1924,7 @@ def stage_deferrals(staged, findings, *, task_number=None, stage=None,
 
 
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
-             timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
+             timeout=DEFAULT_TIMEOUT, autofix_mode="auto", resolve=None):
     """Sequential whole-plan loop. Every invocation first lints the plan (+ spec)
     against documented grammar (Plan lint spec): any error defect is a contract
     error before the run dir exists or anything dispatches, naming every defect;
@@ -1695,7 +1955,18 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     persisted session may be stale once a halt lets a human hand-edit code; a
     thread id is never carried across runner invocations, only within one.
     ``seeded_findings``, unlike ``threads``, IS read back from a prior
-    invocation's run.json so a seed logged before a resume point is preserved."""
+    invocation's run.json so a seed logged before a resume point is preserved.
+
+    ``resolve`` (``{finding_id: "repair" | "defer"}``, from repeatable
+    ``--resolve``) carries a human's answer to a prior ``scope-decision``
+    halt into this invocation (Halt resolution). Each id must name a finding
+    on the halt record — an id that does not raises, since silently ignoring
+    it would resume straight back into the halt the human thought they had
+    answered. Resolutions accumulate onto the record's ``approved`` map
+    across resumes, exempt those findings from the scope-decision halt for
+    the rest of the run, and a ``defer`` resolution is staged through the
+    ordinary ``stage_deferrals`` path. The runner applies no fix of its own:
+    ``repair`` means the human already made it."""
     # Clean-tree precondition (every invocation, first run and resume): commit
     # discipline only yields clean per-task/whole-plan boundaries if the tree
     # starts clean. Checked before creating the run dir or `.forge/` gitignore so
@@ -1741,6 +2012,44 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         )
     os.makedirs(run_dir, exist_ok=True)
     ensure_forge_gitignore(cwd)
+    # The halt record is read FIRST, before every other run.json reader: it is
+    # the one reader that raises on malformed JSON (its five siblings catch
+    # ValueError and return None), so reading it first turns a corrupt run.json
+    # into one clear error rather than a confusing partial read that would look
+    # like a fresh run starting against a frozen tree (_read_halt).
+    halt_record = _read_halt(run_dir)
+    # `halt_state` is what this invocation PERSISTS: the record carried
+    # forward while the halted task is unresolved, cleared the moment it
+    # resolves, replaced when a new scope-decision halt freezes. It rides
+    # every run.json write below, so a crash mid-resume still leaves a
+    # resumable run rather than a run whose freeze nothing points at.
+    halt_state = halt_record
+    resolve = dict(resolve or {})
+    approved = dict((halt_record or {}).get("approved") or {})
+    if resolve:
+        # Canonical ids (carried_from else id) — the same identity
+        # convergence_decision matches on, so a finding re-issued under a new
+        # id is resolvable by the id the human was shown.
+        record_findings = (halt_record or {}).get("findings") or []
+        known = {
+            (f.get("carried_from") or f.get("id")): f for f in record_findings
+        }
+        unknown = sorted(set(resolve) - set(known) - set(approved))
+        if unknown:
+            raise RuntimeError(
+                "--resolve names finding id(s) {} that no halt record in {} "
+                "carries — {}".format(
+                    ", ".join(unknown), run_dir,
+                    "this run has no halt record to resolve against"
+                    if halt_record is None else
+                    "outstanding id(s): {}".format(
+                        ", ".join(sorted(known)) or "(none)"),
+                )
+            )
+        approved.update(resolve)
+    if halt_record is not None:
+        halt_record["approved"] = approved  # accumulates across resumes
+    approved_ids = frozenset(approved)
     # Whole-plan final-review diff base: the run-start HEAD, captured once and
     # persisted in run.json so a resume reuses it rather than a HEAD that has
     # advanced past already-committed tasks.
@@ -1790,6 +2099,19 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # within this invocation staging is lossless (stage_deferrals).
     deferrals = list(_read_deferrals(run_dir) or [])
     carried_deferrals = deferral_stage_keys(deferrals)
+    # A `defer` resolution is a human answering the scope question with "file
+    # it for later" — the same disposition a deferrable finding would have
+    # reached on its own, so it stages through the ordinary path (stamped with
+    # the halted task, deduplicated against what a prior invocation staged).
+    if halt_record is not None:
+        stage_deferrals(
+            deferrals,
+            [f for canon, f in (
+                ((g.get("carried_from") or g.get("id")), g)
+                for g in halt_record.get("findings") or []
+            ) if approved.get(canon) == "defer"],
+            task_number=halt_record.get("task"), carried=carried_deferrals,
+        )
     doc_sync_record = None
     # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at
     # invocation start (never read back from a prior run.json), populated in
@@ -1809,7 +2131,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # along so a resume still reads it; started_at/pid feed the monitor.
     write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
                    started_at=run_started, pid=run_pid, threads=threads,
-                   seeded_findings=seeded_findings or None)
+                   seeded_findings=seeded_findings or None, halt=halt_state)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -1842,12 +2164,58 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         summary.update({"status": "running", "started_at": task_started})
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
-                       seeded_findings=seeded_findings or None)
+                       seeded_findings=seeded_findings or None, halt=halt_state)
+        # Resume a frozen scope-decision halt on the task it names: replay the
+        # paused attempt onto the fixed tree, then hand execute_task the
+        # reconciliation context. `restore_freeze`'s own return value decides
+        # restore-versus-reference — never a heuristic about which files
+        # changed — and a freeze commit that no longer resolves raises naming
+        # the sha rather than silently dropping the human's paused work.
+        resume_ctx = None
+        if halt_record is not None and halt_record.get("task") == task.number:
+            freeze_commit = halt_record.get("freeze_commit")
+            # Computed BEFORE the replay: afterwards the tree also carries the
+            # paused attempt, which is the worker's own work, not part of what
+            # changed around it while it was paused.
+            resolution_delta = _resolution_delta(
+                cwd, halt_record.get("freeze_base")
+            )
+            frozen = ""
+            restored = False
+            if freeze_commit:
+                restored = restore_freeze(cwd, freeze_commit)
+                if not restored:
+                    frozen = freeze_diff(cwd, freeze_commit)
+            # ONLY the findings this human actually resolved reach the
+            # reconciliation brief, each stamped with its resolution: the
+            # record's other findings are still open questions, and a brief
+            # that listed them as resolved would tell the worker the tree was
+            # fixed for something nobody answered (the exemption is opt-in —
+            # a resume with no --resolve resolves nothing at all).
+            resolved_entries = []
+            for entry in halt_record.get("findings") or []:
+                canon = entry.get("carried_from") or entry.get("id")
+                if canon in approved:
+                    resolved_entries.append(
+                        dict(entry, resolution=approved[canon])
+                    )
+            resume_ctx = HaltResume(
+                restored=restored,
+                resolution_delta=resolution_delta,
+                frozen_diff=frozen,
+                findings=resolved_entries,
+                attempt=halt_record.get("attempt") or 0,
+                state=ConvergenceState.from_dict(
+                    halt_record.get("convergence_state")
+                ),
+            )
+        halt_out = {}
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
             autofix_mode=autofix_mode, run_base=run_base,
-            seeded_findings=seeded_findings,
+            seeded_findings=seeded_findings, approved_ids=approved_ids,
+            resume=resume_ctx, halt_out=halt_out,
         )
         stage_deferrals(deferrals, outcome.deferrals,
                         task_number=task.number, carried=carried_deferrals)
@@ -1865,13 +2233,56 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # Commit this task's slice (ledger annotation included); records the
             # SHA, or None when the task changed nothing (no empty commit).
             summary["commit"] = _git_commit_task(cwd, task)
+            if halt_state is not None and halt_state.get("task") == task.number:
+                # The frozen halt is answered and its work is committed; the
+                # record must not outlive it, or the next invocation would
+                # replay a freeze that is already in the mainline.
+                halt_state = None
             write_run_json(
                 run_dir, plan_path, spec_path, "running", task_summaries, run_base,
                 started_at=run_started, pid=run_pid, threads=threads,
-                seeded_findings=seeded_findings or None,
+                seeded_findings=seeded_findings or None, halt=halt_state,
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
+            # A scope-decision halt is resumable: freeze the paused attempt
+            # under a forge-owned ref, leaving the tree at the checkpoint, so
+            # the human's fix lands on the same base the resumed task will be
+            # reviewed against and the clean-tree precondition needs no
+            # exception (Halt resolution / Commit discipline). The ledger
+            # annotation is written FIRST, so it rides inside the freeze
+            # rather than being left behind as the one dirty path that would
+            # refuse the very resume this exists to enable; the resume
+            # restores it, and a later pass overwrites it in place.
+            #
+            # A freeze failure is fail-loud, never a silent "nothing to
+            # freeze": freeze_attempt raises (an untracked nested repo cannot
+            # be captured and must not be cleaned away), and a null
+            # freeze_commit — the tree already equals the checkpoint — is a
+            # different state entirely.
+            halt_state = None
+            if outcome.halt_reason == "scope-decision":
+                run_id = os.path.basename(os.path.normpath(run_dir))
+                freeze_base = _git_head(cwd)
+                freeze_commit = freeze_attempt(
+                    cwd, freeze_ref_name(run_id, task.number)
+                )
+                halt_state = {
+                    "task": task.number,
+                    "attempt": halt_out.get("attempt", outcome.attempts),
+                    "freeze_commit": freeze_commit,
+                    "freeze_base": freeze_base,
+                    "convergence_state": halt_out.get("convergence_state") or {},
+                    "halt_reason": outcome.halt_reason,
+                    "findings": halt_out.get("findings") or [],
+                    "repair_task": outcome.repair_task,
+                    "approved": approved,
+                }
+            # Any other halt class (regression, stuck, backstop, gate) is not
+            # a question for a human to answer with --resolve and leaves the
+            # tree as it stands, exactly as before — and clears a prior
+            # record, whose freeze this invocation has already replayed into
+            # the tree.
             overall = "escalated"
             escalated = True
             break
@@ -1883,7 +2294,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     if not escalated:
         write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
-                       seeded_findings=seeded_findings or None)
+                       seeded_findings=seeded_findings or None, halt=halt_state)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -1933,7 +2344,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
                    doc_sync=doc_sync_record, threads=threads,
-                   seeded_findings=seeded_findings or None)
+                   seeded_findings=seeded_findings or None, halt=halt_state)
     return 0 if overall == "passed" else 2
 
 
@@ -1945,6 +2356,48 @@ def resume(plan_path, spec_path, run_dir):
     skip-passed logic already makes every invocation resumable — using the
     production defaults: ``codex`` on PATH and the current working directory."""
     return run_plan(plan_path, spec_path, run_dir, "codex", os.getcwd())
+
+
+RESOLUTIONS = ("repair", "defer")
+
+
+def parse_resolutions(entries):
+    """``--resolve ID=repair|defer`` entries -> ``{finding_id: resolution}``.
+
+    ``repair`` is "I fixed it", ``defer`` is "file it for later"; both are a
+    human's answer to a ``scope-decision`` halt (Halt resolution). Raises
+    RuntimeError naming the cause on a malformed entry, an unknown
+    resolution, or one id given two different resolutions — never guesses at
+    what was meant (parsers-fail-loud), because a misread resolution either
+    re-halts a run the human thought they had answered or waves through a
+    scope decision they never made."""
+    out = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise RuntimeError(
+                "--resolve expects ID=repair|defer, got {!r}".format(entry)
+            )
+        finding_id, _, resolution = entry.partition("=")
+        finding_id = finding_id.strip()
+        resolution = resolution.strip()
+        if not finding_id:
+            raise RuntimeError(
+                "--resolve entry {!r} names no finding id".format(entry)
+            )
+        if resolution not in RESOLUTIONS:
+            raise RuntimeError(
+                "--resolve {}: resolution must be one of {}, got {!r}".format(
+                    finding_id, ", ".join(RESOLUTIONS), resolution
+                )
+            )
+        if finding_id in out and out[finding_id] != resolution:
+            raise RuntimeError(
+                "--resolve names finding {} twice, as {} and {}".format(
+                    finding_id, out[finding_id], resolution
+                )
+            )
+        out[finding_id] = resolution
+    return out
 
 
 def _default_run_dir():
@@ -1992,6 +2445,16 @@ def main(argv=None):
         "(default: {})".format(DEFAULT_TIMEOUT),
     )
     parser.add_argument(
+        "--resolve",
+        action="append",
+        default=[],
+        metavar="ID=repair|defer",
+        help="carry a human resolution for a halted finding into this resumed "
+        "invocation (repeatable): `repair` = I already fixed it, `defer` = "
+        "file it for later. Exempts that finding from the scope-decision halt "
+        "for the rest of the run; the runner applies no fix of its own",
+    )
+    parser.add_argument(
         "--autofix",
         choices=AUTOFIX_MODES,
         default="auto",
@@ -2023,7 +2486,7 @@ def main(argv=None):
         return run_plan(
             args.plan, args.spec, run_dir, args.codex_bin, os.getcwd(),
             effort_overrides=effort_overrides, timeout=args.timeout,
-            autofix_mode=args.autofix,
+            autofix_mode=args.autofix, resolve=parse_resolutions(args.resolve),
         )
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
@@ -2038,11 +2501,23 @@ def main(argv=None):
                 # current pid; omitting current_task/current_phase clears the live
                 # pointer so the monitor paints the contract-error banner and stops
                 # the spinner rather than freezing a task mid-flight.
+                # A halt record survives a contract error: each write
+                # rebuilds run.json from scratch, so omitting it here would
+                # erase the freeze pointer and make a resumable run
+                # unresumable — a bad --resolve id would cost the human their
+                # paused work. Read tolerantly: _read_halt raises on a
+                # malformed run.json, which is itself one of the errors that
+                # can land here.
+                try:
+                    prior_halt = _read_halt(run_dir)
+                except RuntimeError:
+                    prior_halt = None
                 write_run_json(
                     run_dir, args.plan, args.spec, "contract-error",
                     _read_run_tasks(run_dir) or [], _read_base_commit(run_dir),
                     contract_error=str(e),
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
+                    halt=prior_halt,
                 )
             except OSError:
                 pass
