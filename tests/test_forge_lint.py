@@ -1107,5 +1107,59 @@ class ForgeLintChangedSpecCoverageTests(unittest.TestCase):
         self.assertEqual(self._coverage(_coverage_plan(None)), [])
 
 
+class PlanningSkillTemplateTests(unittest.TestCase):
+    """The authoring front door: the task-structure template in
+    `skills/planning/SKILL.md` is what plan authors copy, so every field form
+    it shows must be one `forge_lint.py` accepts. A template that lints as an
+    `error` produces plans that never dispatch."""
+
+    SKILL_MD = os.path.join(REPO_ROOT, "skills", "planning", "SKILL.md")
+
+    def _template_field(self, name):
+        """The `**<name>:**` block from the ```markdown task-structure
+        template — the marker line through the line before the next blank
+        line — read out of the real SKILL.md, not a copy."""
+        with open(self.SKILL_MD, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        start = next(
+            i for i, ln in enumerate(lines)
+            if ln.startswith("### Task N:")
+        )
+        marker = "**{}:**".format(name)
+        i = next(
+            j for j in range(start, len(lines))
+            if lines[j].startswith(marker)
+        )
+        block = [lines[i]]
+        for ln in lines[i + 1:]:
+            if not ln.strip():
+                break
+            block.append(ln)
+        return "\n".join(block)
+
+    def test_template_tests_field_lints_clean_in_a_plan(self):
+        tests_block = self._template_field("Tests")
+        plan = LEGAL_MINIMAL_PLAN.replace(
+            "**Acceptance:**", tests_block + "\n\n**Acceptance:**",
+        )
+        tmp = tempfile.mkdtemp(prefix="forge-lint-template-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plan_path = os.path.join(tmp, "plan.md")
+        _write(plan_path, plan)
+        defects = fl.lint_plan(plan_path, None, repo_root=tmp)
+        self.assertEqual(
+            [d for d in defects if d.severity == "error"], [], plan,
+        )
+
+    def test_template_tests_field_parses_as_named_cases(self):
+        # Not merely "lint doesn't reject it": the template's own block must
+        # yield real test-case items, so a plan copied from it produces a
+        # non-empty checklist rather than a silently empty one.
+        cases = fl.eb.parse_test_cases(
+            "### Task 1: T\n\n" + self._template_field("Tests") + "\n",
+        )
+        self.assertTrue(len(cases) >= 2, cases)
+
+
 if __name__ == "__main__":
     unittest.main()

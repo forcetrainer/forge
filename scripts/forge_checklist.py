@@ -17,6 +17,13 @@ invokes the CLI.
 |                | line that isn't solely an inline-code command                 |
 | ``t<N>``       | final review only: task N's title, as an integration item     |
 
+The *citable* set a review's findings may name as ``contract_ref`` is
+wider than the checklist it must render coverage on: ``citable_refs`` adds a
+task's declared ``spec:<slug>`` sections, and ``final_citable_refs`` adds
+every task's ``t<N>.t<M>`` ids to the final checklist. Both are emitted by
+the CLI's ``--citable`` modifier as the JSON id array ``forge_dispose.py
+--citable`` consumes.
+
 Fail-loud, matching the packet contract: an unresolvable or ambiguous
 ``**Spec:**`` name raises (reusing extract-brief.py's existing raise), and an
 empty checklist raises naming the absent source — never a silently thin
@@ -248,6 +255,20 @@ def citable_refs(plan_path, spec_path, task_number):
 def build_final_checklist(plan_path, spec_path):
     """Union of every task's **Spec:** sections + global constraints + every
     task's acceptance prose clauses + one t<N> integration item per task."""
+    items = _final_items(plan_path, spec_path)
+    if not items:
+        raise RuntimeError(
+            "final checklist is empty — no spec sections, global constraints, "
+            "acceptance clauses, or tasks were found"
+        )
+    return items
+
+
+def _final_items(plan_path, spec_path):
+    """``build_final_checklist``'s items without its empty-checklist raise —
+    shared with ``final_citable_refs``, which (like ``citable_refs``) must
+    never raise on an empty set: a falsy citable set is "nothing to check
+    membership against", not a defect."""
     lines = eb.read_lines(plan_path)
     _, gc_block = eb.extract_header(lines)
     tasks = forge_plan.parse_plan_tasks(plan_path)
@@ -277,12 +298,38 @@ def build_final_checklist(plan_path, spec_path):
             )
         )
 
-    if not items:
-        raise RuntimeError(
-            "final checklist is empty — no spec sections, global constraints, "
-            "acceptance clauses, or tasks were found"
-        )
     return items
+
+
+def final_citable_refs(plan_path, spec_path):
+    """The set of ids a FINAL review's findings may cite as ``contract_ref``:
+    every final-checklist item id (spec sections, global constraints,
+    acceptance clauses, and the ``t<N>`` integration items) **plus** every
+    task's ``t<N>.t<M>`` test-case ids — the one coverage source that is
+    task-only (Contract checklist: a task's checklist is its own promises).
+
+    Widening, rather than exempting replayed findings, is deliberate. A
+    per-task finding dispositioned ``seed`` is replayed verbatim into the
+    final discovery packet with its ``contract_ref`` intact, so a finding
+    raised against ``t3.t2`` re-cites ``t3.t2`` at the final review; with a
+    checklist-derived citable set that correct finding fails membership and
+    costs the run a contract error on a pointer technicality. Exempting
+    seeded findings from membership instead would open the hole membership
+    exists to close — "contract-breaking" claimed against an invented
+    reference — since the exemption would ride on a disposition the reviewer
+    can influence. Every id here is still derived from the plan's own
+    grammar: nothing invented becomes citable.
+
+    Like ``citable_refs``, an empty result is never a defect to raise on.
+    """
+    refs = {item.id for item in _final_items(plan_path, spec_path)}
+    lines = eb.read_lines(plan_path)
+    for task in forge_plan.parse_plan_tasks(plan_path):
+        task_block = eb.extract_task_block(lines, task.number)
+        if task_block is None:
+            continue
+        refs.update(item.id for item in _test_items(task_block, task.number))
+    return refs
 
 
 def reduce_checklist(items, findings):
@@ -313,10 +360,27 @@ def main(argv):
     group.add_argument("--final", action="store_true")
     parser.add_argument("--out")
     parser.add_argument("--format", choices=("json", "md"), default="json")
+    # --citable is a modifier on the scope flags, not a third scope: --task N
+    # and --final already say WHICH review this is, and the citable set is
+    # scoped exactly the same way (a task's own, or the whole plan's). A
+    # separate --citable-task/--citable-final pair would restate that choice,
+    # and a bare --citable would have no scope to compute against. It emits
+    # the JSON array of id strings `forge_dispose.py --citable` reads, so
+    # --format md is meaningless with it and is rejected rather than ignored
+    # (parsers fail loud).
+    parser.add_argument("--citable", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.citable and args.format == "md":
+        parser.error("--citable emits a JSON id array; --format md is not valid with it")
+
     try:
-        if args.final:
+        if args.citable:
+            refs = (
+                final_citable_refs(args.plan, args.spec) if args.final
+                else citable_refs(args.plan, args.spec, args.task)
+            )
+        elif args.final:
             items = build_final_checklist(args.plan, args.spec)
         else:
             items = build_task_checklist(args.plan, args.spec, args.task)
@@ -324,7 +388,9 @@ def main(argv):
         print(str(e), file=sys.stderr)
         return 1
 
-    if args.format == "json":
+    if args.citable:
+        output = json.dumps(sorted(refs), indent=2)
+    elif args.format == "json":
         output = json.dumps([asdict(it) for it in items], indent=2)
     else:
         output = render_section(items)

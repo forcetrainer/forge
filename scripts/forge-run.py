@@ -1191,10 +1191,21 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
 
     checklist = None
     coverage_skipped = None
+    # The whole-plan citable set, computed ONCE and passed on every lap — the
+    # same treatment the per-task path gives `citable_refs` (see execute_task).
+    # It must not be re-derived from the packet's checklist: a verification
+    # lap's packet carries the REDUCED checklist, so falling back to it would
+    # reject a legitimate whole-plan ref (a `spec:<slug>`, or a `t<N>`
+    # integration item) no outstanding finding happened to name. It is also
+    # wider than the final checklist by every task's `t<N>.t<M>` id, so a
+    # seeded per-task finding replayed into the discovery packet can re-cite
+    # the test case it was raised against (final_citable_refs).
+    final_citable = None
     if plan_path is not None:
         checklist, coverage_skipped = _checklist_or_skip(
             forge_checklist.build_final_checklist, plan_path, spec_path,
         )
+        final_citable = forge_checklist.final_citable_refs(plan_path, spec_path)
 
     attempt = 0
     while True:
@@ -1324,7 +1335,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             verdict, coverage_retry = _review_with_coverage(
                 _final_reviewer_dispatch_call,
                 packet_path, packet_checklist, run_dir, "final",
-                review_kind=packet_review_kind,
+                review_kind=packet_review_kind, citable=final_citable,
             )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run

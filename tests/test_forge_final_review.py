@@ -540,5 +540,140 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self.assertEqual(receipt["halt_reason"], "scope-decision")
 
 
+# Same fixture plus a **Tests:** block, so the plan has real t<N>.t<M>
+# grammar — the coverage source `build_final_checklist` deliberately does not
+# emit, and therefore the one a replayed seeded finding can cite into a
+# membership failure.
+PLAN_FINAL_WITH_TESTS = PLAN_FINAL.replace(
+    "**Acceptance:** `true`",
+    "**Tests:**\n- the alpha path holds\n- the beta path holds\n"
+    "\n**Acceptance:** `true`",
+)
+
+
+class FinalReviewCitableSetTests(unittest.TestCase):
+    """The final review's citable set is the whole plan's, computed once and
+    passed on every lap — so a replayed seeded finding may still cite the
+    per-task test id it was raised against (`t<N>.t<M>`, which the final
+    CHECKLIST never carries), and a verification lap's reduced checklist
+    never narrows what a finding may name."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-final-citable-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir)
+        self.log = os.path.join(self.d, "fakelog")
+        self._set_env("FORGE_FAKE_LOG", self.log)
+
+    def _set_env(self, key, value):
+        old = os.environ.get(key)
+        os.environ[key] = value
+        self.addCleanup(
+            lambda: os.environ.__setitem__(key, old)
+            if old is not None
+            else os.environ.pop(key, None)
+        )
+
+    def _responses(self, responses):
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        self._set_env("FORGE_FAKE_RESPONSES", resp_path)
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        )
+
+    def _init_repo_with_task_work(self):
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+        run_base = forge_run._git_head(self.d)
+        with open(os.path.join(self.d, "f1.txt"), "a") as f:
+            f.write("NEEDFIX\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "task work")
+        return run_base
+
+    def _plan(self, text):
+        path = os.path.join(self.d, "plan.md")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_seeded_finding_may_recite_its_per_task_test_id(self):
+        # A per-task finding dispositioned `seed` is replayed verbatim into
+        # the final discovery packet, contract_ref included; the final
+        # reviewer re-raises it citing that same `t1.t1`. That id is real plan
+        # grammar but not a final CHECKLIST item, so a checklist-derived
+        # citable set would reject a correct finding on a pointer technicality.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan(PLAN_FINAL_WITH_TESTS)
+        self.assertNotIn(
+            "t1.t1",
+            {it.id for it in
+             forge_checklist.build_final_checklist(plan, self.spec)},
+        )
+        f1 = os.path.join(self.d, "f1.txt")
+        seeded = [{
+            "id": "s1", "summary": "seeded from task 1",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "unverifiable", "impact": "contract-breaking",
+            "contract_ref": "t1.t1", "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }]
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "seeded issue", contract_ref="t1.t1",
+            )},                                                   # discovery
+            {"exit": 0, "msg": "", "append_file": f1,
+             "append_text": "FIXED\n"},                           # fix
+            {"exit": 0, "msg": _pass_msg()},                      # verification
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan, seeded_findings=seeded,
+        )
+        self.assertEqual(outcome.status, "passed")
+
+    def test_verification_lap_still_accepts_a_whole_plan_ref(self):
+        # The verification packet carries the REDUCED checklist; a finding
+        # citing `t1` (a real final-checklist integration item, just not one
+        # the outstanding findings referenced) must still be citable.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan(PLAN_FINAL)
+        f1 = os.path.join(self.d, "f1.txt")
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "first issue", contract_ref="spec:Alpha section",
+            )},                                                   # discovery
+            {"exit": 0, "msg": "", "append_file": f1,
+             "append_text": "FIXED\n"},                           # fix 1
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "second issue", id="f2", contract_ref="t1",
+            )},                                                   # verification
+            {"exit": 0, "msg": "", "append_file": f1,
+             "append_text": "FIXED2\n"},                          # fix 2
+            {"exit": 0, "msg": _pass_msg()},                      # verification
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "passed")
+
+
 if __name__ == "__main__":
     unittest.main()

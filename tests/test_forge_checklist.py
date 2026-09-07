@@ -435,5 +435,140 @@ class CitableRefsTests(unittest.TestCase):
         self.assertNotIn("spec:Alpha section", refs)
 
 
+class FinalCitableRefsTests(unittest.TestCase):
+    """final_citable_refs: the whole-plan equivalent of citable_refs — the set
+    of ids a FINAL review's findings may cite. Wider than
+    build_final_checklist, which emits no t<N>.t<M> items (a task-only
+    coverage source): a per-task finding dispositioned `seed` is replayed
+    into the final packet with its contract_ref intact, and it must stay
+    citable there."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-checklist-final-citable-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.plan_path = os.path.join(self.tmp, "plan.md")
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD)
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_MD)
+
+    def test_includes_every_task_test_case_id_the_final_checklist_omits(self):
+        final_ids = {it.id for it in
+                     fc.build_final_checklist(self.plan_path, self.spec_path)}
+        self.assertNotIn("t1.t1", final_ids)   # the seam this exists to close
+        refs = fc.final_citable_refs(self.plan_path, self.spec_path)
+        self.assertIn("t1.t1", refs)
+        self.assertIn("t1.t2", refs)
+
+    def test_is_a_superset_of_the_final_checklist_ids(self):
+        final_ids = {it.id for it in
+                     fc.build_final_checklist(self.plan_path, self.spec_path)}
+        refs = fc.final_citable_refs(self.plan_path, self.spec_path)
+        self.assertTrue(final_ids <= refs, final_ids - refs)
+        self.assertIn("spec:Alpha section", refs)
+        self.assertIn("g1", refs)
+        self.assertIn("t1.a1", refs)
+        self.assertIn("t2", refs)
+
+    def test_is_the_union_of_every_task_citable_set_and_no_invention(self):
+        refs = fc.final_citable_refs(self.plan_path, self.spec_path)
+        union = set()
+        for n in (1, 2):
+            union |= fc.citable_refs(self.plan_path, self.spec_path, n)
+        self.assertTrue(union <= refs, union - refs)
+        # Membership still means something: an id no plan grammar produces
+        # is not citable, which is the whole point of the check.
+        self.assertNotIn("t9.t9", refs)
+        self.assertNotIn("spec:Nonexistent section", refs)
+
+    def test_plan_with_no_tests_blocks_equals_the_final_checklist_ids(self):
+        # The widening adds t<N>.t<M> and nothing else: with no **Tests:**
+        # anywhere, the citable set is exactly the final checklist's ids.
+        plan_path = os.path.join(self.tmp, "plan_no_tests.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD.replace(
+                "**Tests:**\n- the foo does the thing\n"
+                "- the foo handles the edge case\n\n", "",
+            ))
+        self.assertEqual(
+            fc.final_citable_refs(plan_path, self.spec_path),
+            {it.id for it in
+             fc.build_final_checklist(plan_path, self.spec_path)},
+        )
+
+
+class CitableCLITests(unittest.TestCase):
+    """--citable composes with the existing scope flags: --task N --citable
+    emits that task's citable set, --final --citable the whole plan's, both
+    as the JSON array of id strings forge_dispose.py --citable consumes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-checklist-citable-cli-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.plan_path = os.path.join(self.tmp, "plan.md")
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD)
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_MD)
+
+    def run_cli(self, args):
+        return subprocess.run(
+            [sys.executable, SCRIPT] + args,
+            capture_output=True, text=True,
+        )
+
+    def test_task_citable_emits_the_citable_ref_id_array(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--task", "1",
+            "--citable",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIsInstance(data, list)
+        self.assertTrue(all(isinstance(x, str) for x in data), data)
+        self.assertEqual(
+            set(data), fc.citable_refs(self.plan_path, self.spec_path, 1),
+        )
+
+    def test_final_citable_emits_the_whole_plan_ref_id_array(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--final", "--citable",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            set(json.loads(result.stdout)),
+            fc.final_citable_refs(self.plan_path, self.spec_path),
+        )
+
+    def test_citable_output_is_consumable_by_forge_dispose_citable(self):
+        # The producer's output must be exactly what the documented consumer
+        # reads: a JSON array of strings loaded straight into a set.
+        out = os.path.join(self.tmp, "citable.json")
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--task", "1",
+            "--citable", "--out", out,
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            loaded = set(json.load(f))
+        self.assertIn("t1.t1", loaded)
+        self.assertIn("spec:Alpha section", loaded)
+
+    def test_citable_with_format_md_is_rejected(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--task", "1",
+            "--citable", "--format", "md",
+        ])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_citable_still_requires_a_scope_flag(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--citable",
+        ])
+        self.assertNotEqual(result.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
