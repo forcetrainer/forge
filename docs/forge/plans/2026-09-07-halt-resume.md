@@ -9,7 +9,7 @@
 **Global Constraints:** Standard library only, no third-party dependency (`stdlib-only`). Git helpers raise `RuntimeError` naming the cause rather than returning a default (`parsers-fail-loud`). No test-harness changes (`test-harness-is-plan-work`). Autonomous repair dispatch is out of scope by design — the runner applies no fix of its own.
 
 ### Task 1: Freeze and restore primitives
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_git.py` (add `freeze_attempt`, `restore_freeze`, `freeze_diff`, `freeze_ref_name`; no change to existing helpers)
@@ -24,7 +24,7 @@ def freeze_attempt(cwd, ref_name) -> str | None
 def restore_freeze(cwd, freeze_sha) -> bool
 def freeze_diff(cwd, freeze_sha) -> str
 ```
-`freeze_ref_name` returns `refs/forge/freeze/<run_id>/task-<N>`. `freeze_attempt` captures tracked **and untracked, non-ignored** changes as a commit whose parent is HEAD, writes it to `ref_name`, returns the sha, and leaves the working tree and index matching HEAD; returns `None` when there is nothing to freeze (tree already equals HEAD). The branch ref never moves — the freeze is reachable only through `ref_name`. `restore_freeze` replays that commit's change onto the current HEAD, returning `True` when it applies cleanly (working tree now carries the frozen change) and `False` on conflict, leaving the working tree clean at HEAD in the conflict case. `freeze_diff` returns the frozen change as patch text. `restore_freeze` and `freeze_diff` raise `RuntimeError` naming the sha when it is not a resolvable object.
+`freeze_ref_name` returns `refs/forge/freeze/<run_id>/task-<N>`. `freeze_attempt` captures tracked **and untracked, non-ignored** changes as a commit whose parent is HEAD, writes it to `ref_name`, returns the sha, and leaves the working tree and index matching HEAD; returns `None` when there is nothing to freeze (tree already equals HEAD). The branch ref never moves — the freeze is reachable only through `ref_name`. `restore_freeze` replays that commit's change onto the current HEAD, returning `True` when it applies cleanly (working tree now carries the frozen change) and `False` on conflict, leaving the working tree clean at HEAD in the conflict case. `freeze_diff` returns the frozen change as patch text. `restore_freeze` and `freeze_diff` raise `RuntimeError` naming the sha when it is not a resolvable object. `freeze_attempt` additionally raises `RuntimeError` naming the path when an untracked nested git repo is present: such a tree cannot be captured (git records only a gitlink to a commit the outer store lacks) and `clean -ff` would destroy the human's work, so refusing is the only outcome that neither corrupts the freeze nor discards work. Callers in Task 4 must treat a freeze failure as a fail-loud halt, not a None.
 
 **Tests:**
 - freezes a tracked modification, leaves the working tree clean at HEAD, and the ref resolves to the captured commit
