@@ -22,11 +22,6 @@
         "sha": "031a1a476a4d0c800d909f5a26fdaf965f73243f"
       },
       "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.1-beta): project memory is constraints.md plus GitHub issues, specs are per-system living documents, reviews run against the task's review contract, and halted runs resume by freeze, bounded divert and reconcile."
-    },
-    {
-      "name": "forge-dev",
-      "source": "./",
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Unreleased: whatever checkout this marketplace was added from. Expect breakage."
     }
   ]
 }
