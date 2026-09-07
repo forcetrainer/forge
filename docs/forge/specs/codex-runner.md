@@ -36,7 +36,8 @@ confined to the manifests.
   JSON on stdout) and Codex sets `CLAUDE_PLUGIN_ROOT`, so no Codex-specific hook file
   and no manual `config.toml` wiring. A hook fires only in a repo carrying the forge
   signal directory (constraint: `hooks-inert-without-signal`).
-- Install is `codex plugin marketplace add <path>` + `codex plugin install forge@forge`.
+- Install is `codex plugin marketplace add <path>` + `codex plugin add forge@forge`.
+  Codex has no `install` subcommand; the verb is `add`.
   No agent-copy step: `codex exec` takes model and effort as flags, and the worker
   contract text is sourced from `agents/*.md`.
 - Invocation model: no Workflow tool, no auto-delegation — Codex subagents spawn only
