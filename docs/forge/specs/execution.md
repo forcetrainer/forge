@@ -497,9 +497,19 @@ still caught. Halt reasons are exactly `scope-decision`, `regression`, `stuck`,
 
 ## Halt resolution — freeze, resolve, reconcile
 
-A `scope-decision` halt stops the run for a human decision, but leaves it **resumable**:
-the paused work is frozen, the human resolves the finding, and the paused task resumes
-against the fixed tree rather than restarting from scratch.
+A task halt stops the run for a human decision, but leaves it **resumable**: the paused
+work is frozen, the human resolves what stopped it, and the paused task resumes against
+the fixed tree rather than restarting from scratch.
+
+**Every halt class freezes**, not only `scope-decision`. Each of the resolutions a halt
+invites — amend the brief, re-tier, bump to `max`, defer, fix the named code — is
+followed by a re-invocation, so `regression`, `stuck`, `backstop` and `gate` need the
+frozen tree for exactly the reason `scope-decision` does. Freezing only one class leaves
+the others dirty-and-unrecorded, and a resumed run that then halts on a different class
+strands its restored work in a ref nothing points at — worse than the dirty tree this
+section exists to remove. What *is* specific to `scope-decision` is the resolution
+mechanism below: `--resolve` and the approved-finding exemption answer a scope question,
+which the other classes do not pose.
 
 **Freeze.** The in-progress attempt is captured as a commit — **untracked files
 included**, since a task built from new files is otherwise captured as empty — retained
@@ -517,9 +527,10 @@ The clean-tree precondition is **unchanged**: freezing is what keeps every invoc
 boundary clean, so no run ever accepts a dirty tree, and no snapshot ref or recorded
 dirty-path set is needed.
 
-**Resolve.** The drafted `repair_task` — `{title, files, spec, tests, acceptance, tier}`,
-required on exactly this cell (Reviewer verdict contract) — is surfaced to the human with
-the halt. **The runner never dispatches a repair on its own.** Editing pre-existing code
+**Resolve.** On a `scope-decision` halt the drafted `repair_task` — `{title, files, spec,
+tests, acceptance, tier}`, required on exactly that cell (Reviewer verdict contract) — is
+surfaced to the human with the halt. Other halt classes carry no drafted repair; their
+resolution is the human action the halt reason names. **The runner never dispatches a repair on its own.** Editing pre-existing code
 the plan never claimed is the highest-risk write available, and both the decision to make
 it and the making of it stay with the human. The resolution is carried back into the
 resumed run (Approved findings, below); the fix itself is an ordinary commit like any
@@ -920,6 +931,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-07: every halt class freezes, not only `scope-decision` — the other classes are equally followed by a human fix and a re-invocation, and freezing one class alone let a resumed run strand its restored work in an unreferenced ref. `--resolve` and the approved-finding exemption stay scope-decision-specific (#59)
 2026-09-07: autonomous repair dispatch and its divert budget are dropped before implementation — a halt freezes and resumes, but the human makes and applies the fix. Autonomy is deferred to observed halt behavior rather than assumed; any future version must supply its own bound, since the attempt backstop never advances on a divert and would not catch such a loop (#59)
 2026-09-06: a `scope-decision` halt freezes the paused task, dispatches the drafted `repair_task` as a fully reviewed task, and reconciles — bounded by a 2-divert budget, no nesting, and approved-finding exemptions that regression still polices; run state survives a halt, session handles still do not (#59)
 2026-09-07: `t<N>.t<M>` is coverage-per-task but citable at the final review; membership is enforced by the callers that supply a citable set, not by the matrix (#60)

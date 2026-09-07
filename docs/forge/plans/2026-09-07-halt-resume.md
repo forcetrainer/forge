@@ -179,4 +179,33 @@ The `--autofix`, disposition-matrix, convergence and session-continuity paragrap
 
 **Tier:** standard
 
+**Depends on:** Task 6.
+
+### Task 6: Freeze on every halt class
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge-run.py` (freeze and record on every halt class, not only `scope-decision`)
+- Test: `tests/test_forge_loop.py`
+- Test: `tests/test_forge_resume.py`
+
+**Spec:** Halt resolution, Rework loop and convergence
+
+**Interface:** no new public functions. `run_plan`'s halt path freezes and writes the halt record for every value of `halt_reason` (`scope-decision`, `regression`, `stuck`, `backstop`, `gate`), not only `scope-decision`. The halt record's shape is unchanged; `repair_task` is null for the classes that carry no drafted repair. `--resolve` and the approved-finding exemption remain `scope-decision`-only: a `--resolve` id that names a finding from a non-scope halt raises naming the id, as an unknown id already does. A resumed run that halts again — same class or a different one — re-freezes and rewrites the record, so a run is never left dirty-and-unrecorded.
+
+**Tests:**
+- a `regression` halt freezes the attempt, writes the halt record, and leaves the working tree clean
+- a `stuck` halt does the same
+- a `backstop` halt does the same
+- a `gate`-mode halt does the same
+- the exact reported sequence: a `scope-decision` halt, a resume with `--resolve`, then a `regression` halt on the resumed attempt — the run is still resumable, the tree is clean, and the record names the second freeze rather than the first
+- a resumed run that halts twice in a row re-freezes each time; no freeze ref is orphaned
+- a non-scope halt record carries `repair_task: null` and `--status` does not offer a `--resolve` command for it
+- `--resolve` naming a finding from a non-scope halt raises naming the id
+- the guard test `test_reconcile_brief_never_offers_a_way_out_of_the_halt` anchors on the halt-consequence sentence itself (`assertRegex` for "will halt on them again" or "not your job"), so deleting that sentence fails the test — the current `assertIn("halt", ...)` is satisfied by the section heading alone and passes with the sentence removed
+
+**Acceptance:** `python3 -m pytest tests/test_forge_loop.py tests/test_forge_resume.py tests/test_forge_status.py -q` passes with no skips; `python3 -m pytest tests -q` passes with no new failures. Deleting the halt-consequence sentence from the no-resolution brief must fail the guard test — verify by applying that deletion and reverting it.
+
+**Tier:** standard
+
 **Depends on:** Task 4.

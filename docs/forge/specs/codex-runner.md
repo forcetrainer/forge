@@ -248,8 +248,9 @@ Two halt classes, distinguished by exit code:
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
   orchestrator relays the receipt's contents to the user. Which conditions escalate is
-  the `execution` spec's halt taxonomy. A `scope-decision` halt additionally freezes the
-  task's in-progress attempt so the run resumes rather than restarts.
+  the `execution` spec's halt taxonomy. Every halt class freezes the task's in-progress
+  attempt so the run resumes rather than restarts; `--resolve` applies only to
+  `scope-decision`, the one class that poses a question needing an answer.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
@@ -498,6 +499,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-09-07: freezing is per-halt, not per-class — `regression`, `stuck`, `backstop` and `gate` freeze too (#59)
 2026-09-07: `--resolve` records a human-applied fix rather than triggering one — autonomous repair dispatch is dropped before implementation (#59)
 2026-09-06: halted runs resume — a halted attempt is frozen in its own commit rather than left dirty, `run.json` gains the `halt` record, and `--resolve` carries a human decision back in; the clean-tree precondition now holds with no exception (#59)
 2026-09-05: consolidated from three dated specs — phase3 codex-dual-harness, codex-exec-runner, forge-run-monitor (#47)
