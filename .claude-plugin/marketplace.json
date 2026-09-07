@@ -21,7 +21,7 @@
         "url": "https://github.com/forcetrainer/forge.git",
         "sha": "22665137638776bf7d6bd4f8ab08bf8f79b07b74"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.0-beta.1): project memory is constraints.md plus GitHub issues, specs are per-system living documents."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.1-beta): project memory is constraints.md plus GitHub issues, specs are per-system living documents, reviews run against the task's review contract, and halted runs resume by freeze, bounded divert and reconcile."
     },
     {
       "name": "forge-dev",

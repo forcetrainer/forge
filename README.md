@@ -190,9 +190,10 @@ than to whatever `main` happens to be:
 Install a different channel by name — `claude plugin install forge-beta@forge`.
 A channel moves only when its pin is updated, so `main` advancing never
 changes what you have installed. The current pre-release is
-[0.12.0-beta.1](https://github.com/forcetrainer/forge/releases/tag/v0.12.0-beta.1),
-which changes how project memory and specs work; see its release notes for
-the breaking changes.
+[0.12.1-beta](https://github.com/forcetrainer/forge/releases/tag/forge--v0.12.1-beta),
+which adds the review contract and halted-run resume on top of the beta
+line's rework of project memory and specs; see its release notes for the
+breaking changes.
 
 ### Codex CLI
 
