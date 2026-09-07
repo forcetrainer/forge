@@ -426,9 +426,11 @@ the final review for the same reason.
   would settle it is not in this review's diff. Both say the answer lives at
   integration, so both go there rather than driving a repair on a question nobody has
   answered yet.
-- **halt** — a genuine human scope decision. This is the one cell that must never be
-  silently fixed *or* silently deferred, and the halt carries a drafted `repair_task`
-  for the human to approve.
+- **halt** — a scope decision: pre-existing code the plan never claimed. It must never
+  be silently fixed *or* silently deferred. The drafted `repair_task` it carries is
+  **dispatched** rather than merely surfaced — see Halt resolution — under a divert
+  budget, and only ever through a full review gate. `--autofix gate` and an exhausted
+  budget return it to the human.
 
 In the final review, `run_base` **is** the diff base, so `in-run` and `in-diff` coincide
 and `seed` is unreachable — no special case required.
@@ -472,7 +474,11 @@ and backstop rules. Then the decision is taken deterministically, in this preced
 
 1. **Gate mode** and any reviewer finding → **halt** (`gate`). A transient execution
    failure is exempt: it carries no impact.
-2. Any **halt-disposition** finding → **halt** (`scope-decision`).
+2. Any **halt-disposition** finding → **halt** (`scope-decision`). Terminal only when
+   the divert budget is spent, the halt arose inside a repair dispatch, or the mode is
+   `gate`; otherwise it opens a divert (Halt resolution). A canonical finding id carried
+   in as human-approved is exempt from this step for the rest of the run — the
+   regression rule (3) still applies to it.
 3. **Regression** → **halt**: a finding the runner previously recorded resolved
    reappears, or acceptance went green→red since the prior attempt. This is the
    "shuffling one bad state into another" case — a fix undid an earlier fix, or broke
@@ -491,6 +497,78 @@ against slow oscillation, not the primary stop. The runner owns the authoritativ
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
 still caught. Halt reasons are exactly `scope-decision`, `regression`, `stuck`,
 `backstop`, `gate`.
+
+## Halt resolution — freeze, divert, reconcile
+
+A `scope-decision` halt does not end the run by default. The paused work is frozen, the
+drafted repair runs as a task, and the paused task resumes against the repaired tree.
+
+**Freeze.** The in-progress attempt is captured as a commit — **untracked files
+included**, since a task built from new files is otherwise captured as empty — retained
+under a forge-owned ref so it is never garbage-collected, and recorded in run state. The
+working tree then returns to the last committed checkpoint.
+
+The freeze is **parked off the mainline, never stacked on it**. Were it committed onto
+the branch, the repair would land on top of it and the resumed task's review base would
+already contain the task's own partial work — reviewing as an empty diff. Parking keeps
+the checkpoint as the base for both the repair and the resumed task, which is what makes
+`git diff <prior commit>` still mean "exactly this task's work" (Commit discipline).
+
+The clean-tree precondition is **unchanged**: freezing is what keeps every invocation
+boundary clean, so no run ever accepts a dirty tree, and no snapshot ref or recorded
+dirty-path set is needed.
+
+**Divert.** The drafted `repair_task` — `{title, files, spec, tests, acceptance, tier}`,
+required on exactly this cell (Reviewer verdict contract) — runs as a **real task**
+through the full loop: worker at the drafted tier → acceptance → review → convergence →
+its own commit. Never an ad-hoc unreviewed dispatch: editing pre-existing code the plan
+never claimed is the highest-risk write the runner makes, and it earns the same gate as
+planned work. It is **not** written into the plan file — the plan is the human-approved
+artifact and the lint contract; the ledger records that a divert occurred.
+
+**Reconcile.** The frozen work is replayed onto the repair commit:
+
+- **Applies cleanly** → restored to the working tree. The worker resumes holding the
+  repair delta (the repair commit's own diff) and the resolved finding, and decides:
+  proceed unchanged, adjust, or discard and rebuild.
+- **Conflicts** → not restored. The task restarts from the clean checkpoint with the
+  frozen diff supplied as **reference text** alongside the repair delta. A conflict is
+  the signal that the repair invalidated the work, not an error, and the runner never
+  resolves one.
+
+The worker's judgment is a proposal, not a verdict: the task's own review still runs, and
+its reviewer is cold on discovery (`discovery-review-is-cold`) and is never told the work
+was frozen — the structural guard against a worker's sunk-cost bias toward keeping what
+it already built. The reconciliation outcome is recorded on the receipt.
+
+**Bounds.** All three required; the divert loop — fix, resume, find another, fix — is the
+failure mode this section exists to bound, and no existing rule catches it (a divert is
+not a rework lap, so the attempt backstop never advances).
+
+- **Budget: 2 diverts per run.** Counted across the whole invocation — every task plus
+  the final review, not per task — and read back on resume, so a resumed run cannot
+  refill it. The third `scope-decision` halt is terminal and reports that the plan is
+  mis-specified against this codebase: re-plan rather than keep patching. A seatbelt in
+  the same sense as the attempt backstop, not the primary stop.
+- **No nesting.** A repair dispatch that itself reaches a `scope-decision` halt is
+  terminal. Repairs never divert.
+- **Approved findings.** A human resolution — `repair` or `defer` — exempts that
+  canonical finding id from the `scope-decision` halt for the remainder of the run and
+  consumes no divert budget. On Codex it arrives as `--resolve` on the resumed
+  invocation (`codex-runner` spec); on Claude the human states it in the conversation.
+  **Regression still applies:** an approved repair that silently did not take is caught
+  by rule 3, so the exemption never becomes a blind spot.
+
+Every divert is visible without having been asked about: its own commit naming the
+finding it resolves, a receipt, and a count in the end-of-plan summary.
+
+**Both harnesses.** The policy above — freeze, the bounded divert, the reviewed repair,
+reconciliation by the worker — is harness-neutral and binds the Claude orchestrator as
+well as the runner. Only the durable half differs: the runner must write the halt record
+because its process exits, whereas an in-session Claude halt is a conversational pause
+that discards nothing. A Claude halt that *does* cross a session boundary has no run
+state to recover from; that gap is the Claude path's missing run-state store generally,
+not this section's to close.
 
 ## Autonomy flag
 
@@ -636,7 +714,10 @@ discovery, resumed for verification.**
 
 **Scope and failure.** Resume is scoped to **one invocation**. After a halt a human may
 hand-edit code, so a persisted session's context is stale and misleading and
-re-invocation always spawns cold. A failed resume — session missing, context overflow, a
+re-invocation always spawns cold. This governs **session handles only**. Run *state* —
+the halt record, convergence state, the frozen commit — does survive a halt by design
+(Receipts and run state): a stale handle costs a cold spawn, whereas discarded state
+costs the whole task and re-asks the human a question already answered. A failed resume — session missing, context overflow, a
 non-zero exit before any event — **falls back to a cold spawn with the full packet** and
 records the fallback on the receipt. Degraded, never fatal: continuity is an
 optimization, and the loop's correctness must not depend on it.
@@ -768,11 +849,17 @@ parity. Porting it is open work (issue #52).
   from sweeping in unrelated pre-existing changes.
 - **Final-review fixes** land as a single `fix: final-review` commit once the final review
   passes; **doc-sync** as a `docs: sync` commit after it, on Codex.
+- **Freeze commits** hold a halted task's in-progress attempt (Halt resolution). Not a
+  vertical slice and never a review base: written at the halt, unwound at reconcile, and
+  the reason the clean-tree precondition above needs no exception for a resumed halt.
 
 ## Receipts and run state
 
 - `run.json` carries `autofix_mode`, the aggregated `deferrals`, the aggregated
-  `seeded_findings` and the terminal `doc_sync` record. `deferrals` and `seeded_findings`
+  `seeded_findings`, the terminal `doc_sync` record, and the `halt` record when a run
+  stopped on one — freeze commit, task and attempt, serialized convergence state,
+  outstanding findings with the drafted `repair_task`, diverts consumed, and any
+  human-approved finding ids. `deferrals`, `seeded_findings` and `halt`
   are **read back on resume** — deliberately unlike the per-role session-handle map, which
   is cleared each invocation. A session handle goes stale the moment a human hand-edits
   code; a seeded finding is a finding about code, and dropping it on resume would silently
@@ -840,6 +927,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-06: a `scope-decision` halt freezes the paused task, dispatches the drafted `repair_task` as a fully reviewed task, and reconciles — bounded by a 2-divert budget, no nesting, and approved-finding exemptions that regression still polices; run state survives a halt, session handles still do not (#59)
 2026-09-07: `t<N>.t<M>` is coverage-per-task but citable at the final review; membership is enforced by the callers that supply a citable set, not by the matrix (#60)
 2026-09-06: Plan lint's check table gains the `**Tests:**` grammar row (#60)
 2026-09-06: spec-coverage lint reads the merge base, not HEAD; Risks / constraints joins Changelog as exempt (#60)
