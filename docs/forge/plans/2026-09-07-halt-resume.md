@@ -155,7 +155,7 @@ def run_plan(..., autofix_mode="auto", resolve=None)
 **Depends on:** Task 1, Task 2, Task 3.
 
 ### Task 5: Reconcile the Codex orchestrator instructions
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `skills/planning/codex-execution.md` (invocation form, clean-tree precondition, commit discipline, resume, halt-resolution options)
@@ -175,7 +175,7 @@ The `--autofix`, disposition-matrix, convergence and session-continuity paragrap
 - `grep -c 'resolve' skills/planning/codex-execution.md` is non-zero and the invocation block contains `--resolve`
 - `grep -F 'the rejected attempt stays uncommitted' skills/planning/codex-execution.md` exits non-zero (the false claim is gone)
 - `grep -F 'always spawns cold' skills/planning/codex-execution.md` exits zero (the still-true continuity rule is intact)
-- `python3 -m pytest tests/test_manifests.py -q` passes with no skips
+- `python3 -m pytest tests/test_manifests.py -q` passes. One skip is expected and correct: `test_codex_hooks_json_references_same_session_start_script_if_present` is gated on `hooks/codex-hooks.json` existing, and the test immediately above it asserts that file is absent (the shared-hooks.json outcome). A run reporting `16 passed, 1 skipped` satisfies this
 
 **Tier:** standard
 
