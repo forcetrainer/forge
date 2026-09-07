@@ -299,10 +299,23 @@ class ReviewLoopTests(unittest.TestCase):
         self.assertFalse(
             os.path.exists(os.path.join(self.run_dir, "task-2-worker-last.txt"))
         )
-        # Ledger annotated escalated on task 1.
+        # Ledger annotated escalated on task 1 — but a `stuck` halt freezes
+        # just like every other class now (Halt resolution: "Every halt
+        # class freezes"), so the annotation rides inside the freeze commit
+        # and the working tree itself is reset to the checkpoint rather than
+        # left showing it directly.
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            run = json.load(f)
+        freeze_commit = run["halt"]["freeze_commit"]
+        self.assertTrue(freeze_commit)
+        frozen_plan = subprocess.run(
+            ["git", "show", "{}:plan.md".format(freeze_commit)],
+            cwd=self.d, capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("escalated:", frozen_plan)
         with open(plan) as f:
             content = f.read()
-        self.assertIn("escalated:", content)
+        self.assertNotIn("escalated:", content)
 
     def test_unparseable_reviewer_verdict_exits_one_naming_cause(self):
         plan = self._plan(PLAN_STD)

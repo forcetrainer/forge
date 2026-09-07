@@ -28,6 +28,41 @@ import unittest
 from _forge_support import *  # noqa: F401,F403
 
 
+def _approved_halt_plus_regression_msg():
+    """A single review verdict carrying two findings: `h1` (pre-existing x
+    contract-breaking -> disposition `halt`, with a drafted `repair_task`)
+    and `f1` (in-diff x contract-breaking -> disposition `fix`, reappearing
+    against a caller-seeded `resolved_ids={"f1"}` -> the regression rule).
+    `h1`'s disposition stays `halt` regardless of whether its canonical id is
+    later passed as `approved_ids` — that exemption is `convergence_
+    decision`'s step-2 check alone, never the disposition matrix — so this
+    is the shape a real reviewer output takes when an already-approved scope
+    finding is still named alongside a separately reappearing one."""
+    findings = [
+        {
+            "id": "h1", "summary": "the legacy guard is wrong",
+            "location": {"file": "f1.txt", "lines": "99"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "Acceptance: `true`",
+            "convergence": None, "carried_from": None,
+            "repair_task": {
+                "title": "Fix the legacy guard", "files": ["f1.txt"],
+                "spec": "Halt resolution", "tests": ["the guard holds"],
+                "acceptance": "`true`", "tier": "standard",
+            },
+        },
+        {
+            "id": "f1", "summary": "back again",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "Acceptance: `true`",
+            "convergence": None, "carried_from": None,
+            "repair_task": None,
+        },
+    ]
+    return json.dumps({"verdict": "findings", "findings": findings})
+
+
 def _worker_event_stream(thread_id, text="ok"):
     events = [
         {"type": "thread.started", "thread_id": thread_id},
@@ -496,7 +531,14 @@ class ReconcileResumeTests(unittest.TestCase):
         )
         # The consequence is named — the worker should know the task halts
         # again — but with no condition attached under which it would not.
-        self.assertIn("halt", unresolved)
+        # Anchored on the halt-consequence sentence itself, not merely the
+        # section heading ("## Resumed after a halt"): `assertIn("halt", ...)`
+        # alone is satisfied by that heading and stays green even if the
+        # sentence naming the consequence is deleted outright.
+        self.assertRegex(
+            unresolved,
+            r"will halt on them again|not your job",
+        )
         self.assertIsNone(self.NUDGE_RE.search(unresolved), unresolved)
         # And the edit that would launder the scope decision is forbidden
         # outright, not merely left unmentioned.
@@ -568,6 +610,35 @@ class ReconcileResumeTests(unittest.TestCase):
         with open(os.path.join(self.run_dir, "task-1-attempt-3.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["attempt"], 3)
+
+    def test_approved_scope_finding_does_not_leak_repair_task_into_a_different_halt_class(self):
+        # h1 is an approved scope-decision finding (still named by the
+        # reviewer, disposition stays `halt`) but exempted from step 2; f1
+        # separately reappears this same attempt, halting as `regression`.
+        # The record must not surface h1's already-human-actioned
+        # repair_task under this non-scope halt reason (Task 6 Interface:
+        # "repair_task is null for the classes that carry no drafted
+        # repair").
+        self._set_responses([
+            {"exit": 0, "msg": ""},                                        # worker
+            {"exit": 0, "msg": _approved_halt_plus_regression_msg()},
+        ])
+        resume = forge_run.HaltResume(
+            restored=False, resolution_delta="", frozen_diff="",
+            findings=[{"id": "h1", "summary": "scope call"}],
+            attempt=2,
+            state=forge_run.ConvergenceState(resolved_ids={"f1"}),
+        )
+        outcome = forge_run.execute_task(
+            self._task1(), self.plan, self.spec, self.run_dir, self.fake,
+            self.d, {}, approved_ids=frozenset({"h1"}), resume=resume,
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "regression")
+        self.assertIsNone(outcome.repair_task)
+        with open(os.path.join(self.run_dir, "task-1-attempt-3.json")) as f:
+            receipt = json.load(f)
+        self.assertIsNone(receipt["repair_task"])
         self.assertFalse(
             os.path.exists(os.path.join(self.run_dir, "task-1-attempt-1.json"))
         )

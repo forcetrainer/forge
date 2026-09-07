@@ -684,3 +684,348 @@ class HaltFreezeResumeTests(unittest.TestCase):
         self.assertTrue(sha)
         self.assertIn("FROZENWORK", self._git("show", "{}:f1.txt".format(sha)))
         self.assertEqual(self._porcelain(), "")
+
+
+# --- freeze on every halt class (Task 6: Halt resolution — every class) -----
+
+# A standard task whose acceptance flips green -> red depending on whether
+# `fail_flag` exists, so a second attempt can manufacture the regression
+# rule's acceptance-based trigger without any harness change.
+PLAN_REGRESSION = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `test ! -f fail_flag`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+# A standard task whose acceptance is satisfied by the very first marker
+# written and stays green forever after (nothing ever removes it) — so a
+# scope-decision-then-regression sequence can be scripted without the
+# acceptance command itself flipping red mid-sequence.
+PLAN_REGRESSION_SEQUENCE = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `grep -q PARTIALFIX f1.txt`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+
+class FreezeEveryHaltClassTests(unittest.TestCase):
+    """Every halt class — not only `scope-decision` — freezes the paused
+    attempt, writes the halt record, and leaves the tree clean (Halt
+    resolution: "Every halt class freezes"). `--resolve` and the
+    approved-finding exemption stay scope-decision-only."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-halt-freeze-classes-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.run_dir = os.path.join(self.d, "run")
+        self.log = os.path.join(self.d, "fakelog")
+        self.f1 = os.path.join(self.d, "f1.txt")
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        with open(self.f1, "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fake_codex.py\nfakelog*\nresponses.json\nrun/\n.forge/\n")
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        ).stdout
+
+    def _plan(self, content, name="plan.md"):
+        p = os.path.join(self.d, name)
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def _set_plan(self, content):
+        """Write plan.md and commit it: every fixture plan here lives inside
+        the repo, so it must be part of the clean-tree checkpoint the same
+        way HaltFreezeResumeTests' setUp commits PLAN_FREEZE before `git
+        init` — otherwise plan.md itself is the dirty path the clean-tree
+        precondition (correctly) refuses."""
+        self.plan = self._plan(content)
+        self._git("add", "-A")
+        self._git("commit", "-m", "plan")
+
+    def _run(self, responses, extra_args=(), plan=None):
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        if os.path.exists(self.log + ".prompts"):
+            os.remove(self.log + ".prompts")
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.log + ".prompts"
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), plan or self.plan,
+             "--spec", self.spec, "--run-dir", self.run_dir,
+             "--codex-bin", self.fake, *extra_args],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+
+    def _halt_record(self):
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            return json.load(f).get("halt")
+
+    def _porcelain(self):
+        return subprocess.run(
+            ["git", "status", "--porcelain"], cwd=self.d,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_regression_halt_freezes_and_leaves_tree_clean(self):
+        self._set_plan(PLAN_REGRESSION)
+        head = self._git("rev-parse", "HEAD").strip()
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "OK\n"},                                   # a1 worker
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work")},                         # a1 review: fix -> rework
+            {"exit": 0, "msg": "", "append_file":
+                os.path.join(self.d, "fail_flag"), "append_text": "x\n"},
+        ]
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["halt_reason"], "regression")
+        self.assertEqual(record["task"], 1)
+        self.assertEqual(record["freeze_base"], head)
+        self.assertTrue(record["freeze_commit"])
+        self.assertIsNone(record["repair_task"])
+        show = self._git("show", record["freeze_commit"])
+        self.assertIn("OK", show)
+        self.assertEqual(self._porcelain(), "")
+
+    def test_stuck_halt_freezes_and_leaves_tree_clean(self):
+        self._set_plan(PLAN_STD)
+        head = self._git("rev-parse", "HEAD").strip()
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "OK\n"},                                   # a1 worker
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work")},                         # a1 review -> rework
+            {"exit": 0, "msg": ""},                                    # a2 worker: no progress
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work")},                         # a2 review: same, unresolved
+        ]
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["halt_reason"], "stuck")
+        self.assertEqual(record["freeze_base"], head)
+        self.assertTrue(record["freeze_commit"])
+        self.assertIsNone(record["repair_task"])
+        self.assertEqual(self._porcelain(), "")
+
+    def test_backstop_halt_freezes_and_leaves_tree_clean(self):
+        self._set_plan(PLAN_STD)
+        head = self._git("rev-parse", "HEAD").strip()
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "OK\n"},                                   # a1 worker
+        ]
+        for i, fid in enumerate(["a1", "a2", "a3", "a4", "a5"]):
+            if i > 0:
+                responses.append({"exit": 0, "msg": ""})
+            responses.append({"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "issue {}".format(fid), id=fid)})
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["halt_reason"], "backstop")
+        self.assertEqual(record["attempt"], 5)
+        self.assertEqual(record["freeze_base"], head)
+        self.assertTrue(record["freeze_commit"])
+        self.assertIsNone(record["repair_task"])
+        self.assertEqual(self._porcelain(), "")
+
+    def test_gate_mode_halt_freezes_and_leaves_tree_clean(self):
+        self._set_plan(PLAN_STD_TRACKED)
+        head = self._git("rev-parse", "HEAD").strip()
+        responses = [
+            {"exit": 0, "msg": ""},                                    # a1 worker
+            {"exit": 0, "msg": _findings_msg("a stylistic nit")},       # a1 review: any finding -> gate halt
+        ]
+        res = self._run(responses, extra_args=["--autofix", "gate"])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["halt_reason"], "gate")
+        self.assertEqual(record["freeze_base"], head)
+        self.assertTrue(record["freeze_commit"])
+        self.assertIsNone(record["repair_task"])
+        self.assertEqual(self._porcelain(), "")
+
+    def test_non_scope_halt_status_offers_no_resolve_command(self):
+        self._set_plan(PLAN_REGRESSION)
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "OK\n"},
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "needs work")},
+            {"exit": 0, "msg": "", "append_file":
+                os.path.join(self.d, "fail_flag"), "append_text": "x\n"},
+        ]
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertEqual(record["halt_reason"], "regression")
+        self.assertIsNone(record["repair_task"])
+        status = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--status", "--run-dir", self.run_dir],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertNotIn("--resolve", status.stdout)
+
+    def test_resolve_naming_a_finding_from_a_non_scope_halt_raises(self):
+        self._set_plan(PLAN_REGRESSION)
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "OK\n"},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work", id="regfind")},
+            {"exit": 0, "msg": "", "append_file":
+                os.path.join(self.d, "fail_flag"), "append_text": "x\n"},
+        ]
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        record = self._halt_record()
+        self.assertEqual(record["halt_reason"], "regression")
+        # The finding named in the record's `findings` list still cannot be
+        # resolved with --resolve: the record it came from is not a
+        # scope-decision halt, so the id is rejected exactly like an unknown
+        # one (Halt resolution: --resolve stays scope-decision-only).
+        finding_id = record["findings"][0]["id"]
+        res2 = self._run([{"exit": 0, "msg": ""}],
+                         extra_args=["--resolve", "{}=repair".format(finding_id)])
+        self.assertEqual(res2.returncode, 1, res2.stdout)
+        self.assertIn(finding_id, res2.stderr)
+        self.assertIsNotNone(self._halt_record())
+
+    def test_scope_decision_then_regression_on_resume_reflects_the_second_freeze(self):
+        # The exact reported sequence: a scope-decision halt, a resume with
+        # --resolve, then a regression halt on the resumed attempt. The run
+        # is still resumable, the tree is clean, and the record names the
+        # second freeze rather than the first.
+        #
+        # Acceptance checks only the marker round A writes (never removed),
+        # so it stays green through every attempt — unlike PLAN_FREEZE's
+        # FROZENWORK-gated acceptance, which round A's PARTIALFIX-only
+        # attempt would fail, misaligning the scripted responses against an
+        # execution-failure attempt neither review response was meant for.
+        self._set_plan(PLAN_REGRESSION_SEQUENCE)
+        # Round A: a real fix finding ("regfind") that will later reappear.
+        # Round B: the scope-decision halt (h1), during which "regfind"
+        # disappears from the reviewer's findings and is recorded resolved.
+        responses = [
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "PARTIALFIX\n"},                           # a1 worker
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs more work", id="regfind")},      # a1 review -> rework
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "MOREWORK\n"},                             # a2 worker
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "99", "the legacy guard is wrong", id="h1",
+                repair_task=REPAIR_TASK)},                              # a2 review -> scope-decision halt
+        ]
+        res = self._run(responses)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        first_record = self._halt_record()
+        self.assertEqual(first_record["halt_reason"], "scope-decision")
+        first_freeze = first_record["freeze_commit"]
+
+        # Resume: --resolve h1=repair. The worker adds nothing further, and
+        # the reviewer re-flags "regfind" at the same (still in-diff)
+        # location it originally occupied — a runner-recorded resolved id
+        # reappearing, which is the regression rule.
+        res2 = self._run(
+            [{"exit": 0, "msg": ""},
+             {"exit": 0, "msg": _fix_findings_msg(
+                 "f1.txt", "2", "regression: reappeared", id="regfind")}],
+            extra_args=["--resolve", "h1=repair"],
+        )
+        self.assertEqual(res2.returncode, 2, res2.stderr)
+        second_record = self._halt_record()
+        self.assertIsNotNone(second_record)
+        self.assertEqual(second_record["task"], 1)
+        self.assertEqual(second_record["halt_reason"], "regression")
+        self.assertEqual(second_record["attempt"], 3)  # count continues, not reset
+        self.assertTrue(second_record["freeze_commit"])
+        # The record names the SECOND freeze: its findings are the
+        # regression's, not the scope-decision halt's original h1 finding.
+        self.assertEqual(
+            [f["id"] for f in second_record["findings"]], ["regfind"]
+        )
+        self.assertEqual(self._porcelain(), "")
+
+    def test_resumed_run_halted_twice_in_a_row_refreezes_each_time_no_orphan(self):
+        # A resumed run that halts again re-freezes and rewrites the record —
+        # never left dirty-and-unrecorded — and the freeze ref is reused
+        # (same ref name), never orphaned.
+        self._set_plan(PLAN_FREEZE)
+        res = self._run([
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "FROZENWORK\n"},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "99", "the legacy guard is wrong", id="h1",
+                repair_task=REPAIR_TASK)},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        first_record = self._halt_record()
+        first_freeze = first_record["freeze_commit"]
+        run_id = os.path.basename(os.path.normpath(self.run_dir))
+        ref = "refs/forge/freeze/{}/task-1".format(run_id)
+        refs_before = self._git(
+            "for-each-ref", "--format=%(refname)", "refs/forge/freeze/"
+        ).split()
+        self.assertEqual(refs_before, [ref])
+
+        # Resume with no --resolve: the same scope-decision finding is still
+        # outstanding, so the task halts again on the same class.
+        res2 = self._run(
+            [{"exit": 0, "msg": ""},
+             {"exit": 0, "msg": _fix_findings_msg(
+                 "f1.txt", "99", "the legacy guard is wrong", id="h1",
+                 repair_task=REPAIR_TASK)}],
+        )
+        self.assertEqual(res2.returncode, 2, res2.stderr)
+        second_record = self._halt_record()
+        self.assertIsNotNone(second_record)
+        self.assertTrue(second_record["freeze_commit"])
+        refs_after = self._git(
+            "for-each-ref", "--format=%(refname)", "refs/forge/freeze/"
+        ).split()
+        self.assertEqual(refs_after, [ref])  # still exactly one ref: reused, not orphaned
+        self.assertEqual(self._git("cat-file", "-e", second_record["freeze_commit"]
+                                    ), "")  # resolvable
+        self.assertEqual(self._porcelain(), "")

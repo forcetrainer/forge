@@ -335,11 +335,17 @@ def render_halt(halt):
             outstanding.append(canon)
     if outstanding:
         lines.append("  outstanding findings: {}".format(", ".join(outstanding)))
-        lines.append(
-            "  resume with: --resolve {}=repair|defer".format(
-                "=repair|defer --resolve ".join(outstanding)
+        # --resolve (and the approved-finding exemption it feeds) answers a
+        # scope question only `scope-decision` poses (Halt resolution); every
+        # other halt class freezes the same way but offers no such command —
+        # its resolution is the human action the halt reason names, not a
+        # canonical finding id.
+        if halt.get("halt_reason") == "scope-decision":
+            lines.append(
+                "  resume with: --resolve {}=repair|defer".format(
+                    "=repair|defer --resolve ".join(outstanding)
+                )
             )
-        )
     if approved:
         lines.append(
             "  already resolved: {}".format(

@@ -1123,7 +1123,17 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
 
         fix_findings = [f for f in findings if f.disposition == "fix"]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
-        halted = [f for f in findings if f.disposition == "halt"]
+        # An approved id's disposition stays "halt" regardless — approved_ids
+        # only exempts it from convergence_decision's step-2 halt-reason
+        # check, never from the disposition matrix — so it must be filtered
+        # out here too: otherwise a LATER non-scope halt this same attempt
+        # (e.g. `regression`) would surface this already-human-actioned
+        # finding's repair_task under a halt reason that carries none (Halt
+        # resolution: repair_task is null on halt classes that draft none).
+        halted = [
+            f for f in findings
+            if f.disposition == "halt" and _canon(f) not in approved_ids
+        ]
         repair_task = halted[0].repair_task if halted else None
         status = {"pass": "passed", "rework": "rework", "halt": "escalated"}[action]
         outstanding = [f.summary for f in findings] if action == "halt" else []
@@ -2029,8 +2039,17 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     if resolve:
         # Canonical ids (carried_from else id) — the same identity
         # convergence_decision matches on, so a finding re-issued under a new
-        # id is resolvable by the id the human was shown.
-        record_findings = (halt_record or {}).get("findings") or []
+        # id is resolvable by the id the human was shown. `--resolve` and the
+        # approved-finding exemption are scope-decision-only (Halt
+        # resolution): a halt record from any other class contributes no
+        # known ids here, so an id it carries is rejected exactly like an
+        # unknown one — the other classes pose no scope question for
+        # --resolve to answer.
+        record_findings = (
+            (halt_record or {}).get("findings") or []
+            if (halt_record or {}).get("halt_reason") == "scope-decision"
+            else []
+        )
         known = {
             (f.get("carried_from") or f.get("id")): f for f in record_findings
         }
@@ -2245,44 +2264,47 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
-            # A scope-decision halt is resumable: freeze the paused attempt
-            # under a forge-owned ref, leaving the tree at the checkpoint, so
-            # the human's fix lands on the same base the resumed task will be
-            # reviewed against and the clean-tree precondition needs no
-            # exception (Halt resolution / Commit discipline). The ledger
-            # annotation is written FIRST, so it rides inside the freeze
-            # rather than being left behind as the one dirty path that would
-            # refuse the very resume this exists to enable; the resume
-            # restores it, and a later pass overwrites it in place.
+            # Every halt class freezes the paused attempt under a
+            # forge-owned ref, leaving the tree at the checkpoint, so the
+            # human's fix (or re-tier, or defer, or --gate reconsideration)
+            # lands on the same base the resumed task will be reviewed
+            # against and the clean-tree precondition needs no exception
+            # (Halt resolution / Commit discipline). Each of the resolutions
+            # a halt invites is followed by a re-invocation, so
+            # `regression`/`stuck`/`backstop`/`gate` need the frozen tree for
+            # exactly the reason `scope-decision` does — freezing only one
+            # class would leave the others dirty-and-unrecorded, and a
+            # resumed run that then halted on a different class would strand
+            # its restored work in a ref nothing points at. Only
+            # `scope-decision` poses a human resolution question that
+            # `--resolve`/the approved-finding exemption answers; that stays
+            # scope-only below. The ledger annotation is written FIRST, so it
+            # rides inside the freeze rather than being left behind as the
+            # one dirty path that would refuse the very resume this exists
+            # to enable; the resume restores it, and a later pass overwrites
+            # it in place.
             #
             # A freeze failure is fail-loud, never a silent "nothing to
             # freeze": freeze_attempt raises (an untracked nested repo cannot
             # be captured and must not be cleaned away), and a null
             # freeze_commit — the tree already equals the checkpoint — is a
             # different state entirely.
-            halt_state = None
-            if outcome.halt_reason == "scope-decision":
-                run_id = os.path.basename(os.path.normpath(run_dir))
-                freeze_base = _git_head(cwd)
-                freeze_commit = freeze_attempt(
-                    cwd, freeze_ref_name(run_id, task.number)
-                )
-                halt_state = {
-                    "task": task.number,
-                    "attempt": halt_out.get("attempt", outcome.attempts),
-                    "freeze_commit": freeze_commit,
-                    "freeze_base": freeze_base,
-                    "convergence_state": halt_out.get("convergence_state") or {},
-                    "halt_reason": outcome.halt_reason,
-                    "findings": halt_out.get("findings") or [],
-                    "repair_task": outcome.repair_task,
-                    "approved": approved,
-                }
-            # Any other halt class (regression, stuck, backstop, gate) is not
-            # a question for a human to answer with --resolve and leaves the
-            # tree as it stands, exactly as before — and clears a prior
-            # record, whose freeze this invocation has already replayed into
-            # the tree.
+            run_id = os.path.basename(os.path.normpath(run_dir))
+            freeze_base = _git_head(cwd)
+            freeze_commit = freeze_attempt(
+                cwd, freeze_ref_name(run_id, task.number)
+            )
+            halt_state = {
+                "task": task.number,
+                "attempt": halt_out.get("attempt", outcome.attempts),
+                "freeze_commit": freeze_commit,
+                "freeze_base": freeze_base,
+                "convergence_state": halt_out.get("convergence_state") or {},
+                "halt_reason": outcome.halt_reason,
+                "findings": halt_out.get("findings") or [],
+                "repair_task": outcome.repair_task,
+                "approved": approved,
+            }
             overall = "escalated"
             escalated = True
             break

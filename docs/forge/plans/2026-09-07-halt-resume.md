@@ -182,7 +182,7 @@ The `--autofix`, disposition-matrix, convergence and session-continuity paragrap
 **Depends on:** Task 6.
 
 ### Task 6: Freeze on every halt class
-- [ ] Done
+- [x] Done — passed, 2 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge-run.py` (freeze and record on every halt class, not only `scope-decision`)
