@@ -133,7 +133,7 @@ REVIEW_VERDICT_INSTRUCTION = (
     "required only when the finding is pre-existing and contract-breaking, "
     "optional otherwise; a finding with impact \"unverifiable\" requires a "
     "reason in its summary; a finding with impact \"unverifiable\" carries "
-    "no repair_task. every finding you see is reported regardless of "
+    "no repair_task. Every finding you see is reported regardless of "
     "provenance — the runner derives the disposition; never withhold a "
     "finding on the grounds that the code predates this diff. Set "
     "convergence and carried_from only on a re-review, "
@@ -182,7 +182,7 @@ class Finding:
     file: str
     lines: str  # "12-20" or "12"
     provenance: str  # "in-diff" | "pre-existing" (reviewer-proposed)
-    impact: str  # "contract-breaking" | "improvement"
+    impact: str  # "contract-breaking" | "improvement" | "unverifiable"
     contract_ref: str | None = None
     convergence: str | None = None  # "resolved" | "carried" | "new" | None
     carried_from: str | None = None
@@ -193,7 +193,7 @@ class Finding:
 @dataclass
 class CoverageEntry:
     id: str
-    status: str  # "satisfied" | "violated" | "n/a"
+    status: str  # "satisfied" | "violated" | "n/a" | "unverifiable"
     evidence: str
 
 

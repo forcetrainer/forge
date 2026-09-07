@@ -894,9 +894,12 @@ class ReviewVerdictInstructionTests(unittest.TestCase):
 
     def test_findings_reported_regardless_of_provenance(self):
         instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        # Case-insensitive: the rule is what must be stated, not its
+        # position in a sentence. Asserting the literal lowercase form made a
+        # capitalisation fix a test failure.
         self.assertIn(
             "every finding you see is reported regardless of provenance",
-            instr,
+            instr.lower(),
         )
 
     def test_unverifiable_finding_requires_reason_in_summary(self):

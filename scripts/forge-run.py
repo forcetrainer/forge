@@ -461,9 +461,9 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
 def _checklist_or_skip(builder, *args):
     """Call a forge_checklist builder (build_task_checklist / build_final_
     checklist). An empty checklist is a *runner-level* skip, not an error: a
-    task with no ``**Spec:**``, no plan ``**Global Constraints:**``, and only
+    task with no ``**Tests:**``, no plan ``**Global Constraints:**``, and only
     command-only ``**Acceptance:**`` clauses is a legal plan (both fields are
-    optional) with no contract material for a reviewer to cover — forcing an
+    optional; spec sections stopped being a task-checklist source in #60) with no contract material for a reviewer to cover — forcing an
     error there would make legal plans unexecutable (Contract checklist spec,
     2026-08-21 amendment). forge_checklist.py's own CLI/library contract is
     unchanged: it still raises on an empty checklist; this only catches that

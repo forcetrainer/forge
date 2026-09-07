@@ -827,7 +827,7 @@ def main(argv):
     )
     parser.add_argument(
         "--repo-root",
-        help="repo root to check managed project-memory files under "
+        help="repo root: both the tree whose managed project-memory files are checked and the git repository whose merge base is the spec-coverage baseline — pointing it outside a git repo disables that check "
              "(default: cwd)",
     )
     args = parser.parse_args(argv)
