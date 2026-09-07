@@ -310,11 +310,32 @@ def render_halt(halt):
     freeze commit (or the fact that there was nothing to freeze), the
     outstanding finding ids, and the `--resolve` form that answers them.
 
+    A stage-keyed record (``final-review`` / ``doc-sync``, no ``task``) gets
+    its own shorter block: the stage that halted and where its edits are
+    frozen. Nothing else applies to it — the stage re-runs from scratch
+    rather than replaying its freeze, and it holds no findings to resolve.
+
     Rendered from the run.json ``halt`` record alone — no git, no receipts —
     so a status check never touches the freeze it reports on. Finding ids,
     not summaries, lead the outstanding line: the id is the handle
     ``--resolve`` takes, and a summary that reads well is still unusable at
     the CLI."""
+    stage = halt.get("stage")
+    if stage:
+        # A whole-run stage halt (`final-review` / `doc-sync`) freezes its
+        # uncommitted edits so the tree is clean, but the stage is NOT
+        # replayed — it re-runs from scratch against the committed diff — and
+        # it carries no findings the human answers with `--resolve`. So it
+        # gets its own two lines rather than the per-task wording, which
+        # would print "halted task None" and offer a command that cannot work.
+        freeze = halt.get("freeze_commit")
+        return [
+            "",
+            "halted in the {} stage".format(stage),
+            "  frozen edits: {}".format(freeze) if freeze
+            else "  frozen edits: (nothing to freeze — the stage made no "
+                 "change to the tree)",
+        ]
     lines = ["", "halted task {} is resumable".format(halt.get("task"))]
     freeze = halt.get("freeze_commit")
     lines.append(

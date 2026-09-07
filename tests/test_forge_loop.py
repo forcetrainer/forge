@@ -536,6 +536,27 @@ class HaltFreezeResumeTests(unittest.TestCase):
         prompts = _log_prompts(self.log + ".prompts")
         self.assertTrue(any("Resumed after a halt" in p for p in prompts))
 
+    def test_resumed_task_review_is_never_told_the_task_halted(self):
+        # `discovery-review-is-cold`: the resumed task's reviewer is a fresh
+        # agent that must not learn the work was frozen. The `escalated:`
+        # ledger annotation is the leak — it lands in the plan file the packet
+        # extracts its task block from, and (restored with the freeze) in the
+        # diff the reviewer is handed.
+        self._halt_run()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        self.assertNotIn("escalated", packet)
+        # The reviewer is dispatched the packet as its prompt; assert on what
+        # it was actually sent, not only on the file.
+        prompts = _log_prompts(self.log + ".prompts")
+        self.assertTrue(prompts)
+        for prompt in prompts:
+            self.assertNotIn("escalated", prompt)
+
     def test_conflicting_replay_leaves_checkpoint_and_supplies_frozen_diff(self):
         self._halt_run()
         # The human's fix rewrites exactly the line the frozen attempt added

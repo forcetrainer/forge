@@ -558,6 +558,59 @@ class ReconcileResumeTests(unittest.TestCase):
             # edit the pre-existing code further.
             self.assertTrue(self.PROHIBITION_RE.search(line), line)
 
+    def test_reconcile_brief_no_resolution_text_is_class_aware(self):
+        # Task 6 widened freezing to every halt class, but the scope-decision
+        # prose is false for the others — and its "clearing it is not your
+        # job" tells a `stuck`/`backstop` worker not to do the very work the
+        # resume exists to let it do.
+        task = self._task1()
+        causes = {
+            "regression": "regression",
+            "stuck": "stuck",
+            "backstop": "backstop",
+            "gate": "gate",
+        }
+        for reason, word in causes.items():
+            brief = forge_run._reconcile_brief(
+                task, self.run_dir, True, "", "", [], halt_reason=reason,
+            )
+            self.assertIn(word, brief)
+            # None of the scope-decision-only claims may appear.
+            self.assertNotIn("scope findings still stand", brief)
+            self.assertNotIn("not your job", brief)
+            self.assertNotIn("--resolve", brief)
+            # And no halt-avoidance nudge in the class-specific text either.
+            self.assertIsNone(self.NUDGE_RE.search(brief), brief)
+        # The scope-decision text is unchanged and still explicit.
+        scope = forge_run._reconcile_brief(
+            task, self.run_dir, True, "", "", [], halt_reason="scope-decision",
+        )
+        self.assertIn("not your job", scope)
+        self.assertRegex(scope, r"(?i)do not edit[^.]*pre-existing")
+
+    def test_reconcile_brief_class_comes_from_the_halt_record(self):
+        # The class must reach `_reconcile_brief` from the resumed halt
+        # record, not be assumed: a `stuck` resume dispatched with the
+        # scope-decision brief is the defect.
+        self._set_responses([
+            {"exit": 0, "msg": ""},           # resumed worker
+            {"exit": 0, "msg": _pass_msg()},  # review
+        ])
+        resume = forge_run.HaltResume(
+            restored=True, resolution_delta="", frozen_diff="",
+            findings=[], attempt=1, state=forge_run.ConvergenceState(),
+            halt_reason="stuck",
+        )
+        outcome = forge_run.execute_task(
+            self._task1(), self.plan, self.spec, self.run_dir, self.fake,
+            self.d, {}, resume=resume,
+        )
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "task-1-reconcile.md")) as f:
+            reconcile = f.read()
+        self.assertIn("stuck", reconcile)
+        self.assertNotIn("not your job", reconcile)
+
     def test_reconcile_brief_carries_delta_and_names_resolved_finding(self):
         self._set_responses([
             {"exit": 0, "msg": ""},           # resumed worker

@@ -355,6 +355,26 @@ class RenderStatusTests(unittest.TestCase):
             self.assertNotIn("h1b", out)
             self.assertIn("already resolved: h1=repair", out)
 
+    def test_render_halt_names_the_stage_for_a_stage_freeze(self):
+        # A final-review / doc-sync halt freezes its uncommitted edits under a
+        # stage-keyed record (no `task`). Rendering it through the per-task
+        # wording would print "halted task None" and offer a `--resolve` the
+        # stage never accepts.
+        with tempfile.TemporaryDirectory() as d:
+            halt = {
+                "stage": "final-review",
+                "freeze_commit": "a" * 40,
+                "freeze_base": "b" * 40,
+                "halt_reason": "scope-decision",
+            }
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+                       halt=halt)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+            self.assertIn("final-review", out)
+            self.assertIn("a" * 40, out)
+            self.assertNotIn("task None", out)
+            self.assertNotIn("--resolve", out)
+
     def test_render_shows_halt_reason_class_for_final_review(self):
         with tempfile.TemporaryDirectory() as d:
             _write_run(d, "escalated-final-review", [_summary(1, "passed")])

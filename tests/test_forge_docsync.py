@@ -231,6 +231,65 @@ class DocSyncRunPlanGatingTests(unittest.TestCase):
         self.assertEqual(data["status"], "escalated-final-review")
         self.assertNotIn("doc_sync", data)
 
+    def test_doc_sync_contradiction_halt_freezes_edits_and_leaves_tree_clean(self):
+        # The doc-sync worker edits a doc and only then reports a contradiction
+        # it cannot mechanically reconcile. The halt returns before
+        # `_git_commit_doc_sync`, so nothing commits those edits: without a
+        # freeze the runner exits dirty and the next invocation is refused by
+        # the clean-tree precondition (Halt resolution: "no run ever accepts a
+        # dirty tree").
+        plan = self._plan(PLAN_STD_TRACKED)
+        self._init_repo()
+        readme = os.path.join(self.d, "README.md")
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},           # worker
+            {"exit": 0, "msg": _pass_msg()},  # task 1 review
+            {"exit": 0, "msg": _pass_msg()},  # final review
+            {"exit": 0, "msg": json.dumps({   # doc-sync: edited, then halted
+                "doc_sync": "contradiction",
+                "contradiction": "README claims the opposite",
+            }), "append_file": readme, "append_text": "DOCSYNCEDIT\n"},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=self.d,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(porcelain, "")
+        self.assertNotIn("docs: sync", self._log_subjects())
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        self.assertEqual(data["status"], "escalated-doc-sync")
+        halt = data.get("halt")
+        self.assertIsNotNone(halt)
+        self.assertEqual(halt.get("stage"), "doc-sync")
+        self.assertTrue(halt.get("freeze_commit"))
+        show = subprocess.run(
+            ["git", "show", halt["freeze_commit"]], cwd=self.d,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("DOCSYNCEDIT", show)
+
+    def test_reinvocation_after_a_doc_sync_halt_is_not_refused(self):
+        plan = self._plan(PLAN_STD_TRACKED)
+        self._init_repo()
+        readme = os.path.join(self.d, "README.md")
+        self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+            {"exit": 0, "msg": _pass_msg()},
+            {"exit": 0, "msg": json.dumps({
+                "doc_sync": "contradiction",
+                "contradiction": "README claims the opposite",
+            }), "append_file": readme, "append_text": "DOCSYNCEDIT\n"},
+        ])
+        res2 = self._run(plan, responses=[
+            {"exit": 0, "msg": _pass_msg()},                  # final review
+            {"exit": 0, "msg": '{"doc_sync": "clean"}'},      # doc-sync
+        ])
+        self.assertNotIn("working tree not clean", res2.stderr)
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

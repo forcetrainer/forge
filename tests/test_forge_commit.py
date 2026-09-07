@@ -242,6 +242,61 @@ class CommitDisciplineTests(unittest.TestCase):
             forge_run._git_commit_task(self.d, task)
         self.assertIn("git add", str(cm.exception).lower())
 
+    def test_final_review_halt_freezes_its_fix_edits_and_leaves_tree_clean(self):
+        # A final-review halt that follows an applied fix dispatch leaves the
+        # fixer's edits in the tree. Nothing commits them (the `fix:
+        # final-review` commit only lands on a pass), so without a freeze the
+        # runner exits dirty and the very next invocation is refused by the
+        # clean-tree precondition — the state Halt resolution exists to
+        # remove ("no run ever accepts a dirty tree").
+        plan = self._plan(PLAN_COMMIT_STD)
+        self._init_repo()
+        f1 = os.path.join(self.d, "f1.txt")
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                                    # task 1 worker
+            {"exit": 0, "msg": _pass_msg()},                           # task 1 review
+            {"exit": 0, "msg": _fix_findings_msg(                      # final a1 -> rework
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+            {"exit": 0, "msg": "", "append_file": f1,                  # fix dispatch edits
+             "append_text": "FINALFIXEDIT\n"},
+            {"exit": 0, "msg": _fix_findings_msg(                      # final a2 -> stuck
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self._git("status", "--porcelain").stdout.strip(), "")
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        self.assertEqual(data["status"], "escalated-final-review")
+        halt = data.get("halt")
+        self.assertIsNotNone(halt)
+        self.assertEqual(halt.get("stage"), "final-review")
+        self.assertTrue(halt.get("freeze_commit"))
+        # The frozen commit holds the fixer's edits, off the mainline.
+        self.assertIn("FINALFIXEDIT",
+                      self._git("show", halt["freeze_commit"]).stdout)
+        self.assertNotIn("FINALFIXEDIT", self._git("show", "HEAD").stdout)
+
+    def test_reinvocation_after_a_final_review_halt_is_not_refused(self):
+        plan = self._plan(PLAN_COMMIT_STD)
+        self._init_repo()
+        f1 = os.path.join(self.d, "f1.txt")
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+            {"exit": 0, "msg": "", "append_file": f1,
+             "append_text": "FINALFIXEDIT\n"},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # Task 1 is already `passed`, so the resumed run re-enters the final
+        # review directly; it must not be refused before it starts.
+        res2 = self._run(plan, responses=[{"exit": 0, "msg": _pass_msg()}])
+        self.assertNotIn("working tree not clean", res2.stderr)
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+
     def test_snapshot_worktree_is_retired(self):
         # The stash-snapshot per-task base is replaced by the prior commit.
         self.assertFalse(hasattr(forge_run, "_snapshot_worktree"))

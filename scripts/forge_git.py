@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from forge_common import eb, rp
+from forge_receipts import strip_ledger_annotations
 
 
 def _git_head(cwd):
@@ -155,6 +156,15 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
         raise RuntimeError(
             "review packet: " + rp.diagnose_missing_task(plan_text, task.number, plan_path)
         )
+    # The reviewer boundary is where the ledger stops. A task block carries
+    # the runner's own outcome annotation on its checkbox line, and on a
+    # resumed task that annotation reads `escalated: <reason>: <findings>` —
+    # telling a discovery reviewer that the work it is judging was frozen and
+    # what the last reviewer said about it. Stripped here, once, for every
+    # review packet rather than only the resumed path, because this is the
+    # structural guard (`discovery-review-is-cold`) and not a special case.
+    # The worker's brief is untouched: the worker may know it was paused.
+    block = strip_ledger_annotations(block)
     spec_sections = None
     spec_names = eb.parse_spec_names(block)
     if spec_names:
@@ -201,6 +211,15 @@ def freeze_ref_name(run_id, task_number):
     and — being a ref — never garbage-collected (Halt resolution: retained
     under a forge-owned ref)."""
     return "refs/forge/freeze/{}/task-{}".format(run_id, task_number)
+
+
+def freeze_stage_ref_name(run_id, stage):
+    """The forge-owned ref a halted whole-run STAGE's freeze is parked under:
+    ``refs/forge/freeze/<run_id>/<stage>`` (``final-review`` | ``doc-sync``).
+    The same shape and the same guarantees as ``freeze_ref_name``'s per-task
+    ref — a task number and a stage name can never collide, since the task
+    form is always ``task-<N>``."""
+    return "refs/forge/freeze/{}/{}".format(run_id, stage)
 
 
 def _git(cwd, args, what, env=None, stdin=None):

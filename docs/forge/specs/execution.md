@@ -523,6 +523,15 @@ keeps the checkpoint as the base for both the fix and the resumed task, which is
 makes `git diff <prior commit>` still mean "exactly this task's work" (Commit
 discipline).
 
+**The two terminal stages freeze too.** A final-review halt that follows an applied fix
+dispatch, and a doc-sync halt that had already edited, both leave edits in the tree that
+nothing commits — the `fix: final-review` commit lands only on a pass, and a doc-sync
+contradiction returns before its commit. Each is frozen under its own stage-keyed ref and
+the tree returns to the checkpoint, for exactly the reason a task halt is. The stage
+record is stage-keyed, not task-keyed, so no task is ever resumed from it, and a stage
+freeze is **recoverable, not replayed**: the stage re-runs from scratch on the committed
+diff, which is the state the human's resolution edits against.
+
 The clean-tree precondition is **unchanged**: freezing is what keeps every invocation
 boundary clean, so no run ever accepts a dirty tree, and no snapshot ref or recorded
 dirty-path set is needed.
@@ -550,7 +559,17 @@ other human edit, which the runner neither authors nor requires.
 The worker's judgment is a proposal, not a verdict: the task's own review still runs, and
 its reviewer is cold on discovery (`discovery-review-is-cold`) and is never told the work
 was frozen — the structural guard against a worker's sunk-cost bias toward keeping what
-it already built. The reconciliation outcome is recorded on the receipt.
+it already built. That is a requirement on the **packet**, not only on the agent: the
+`escalated: …` ledger annotation is stripped out of the reviewed task block, and off the
+plan file once the freeze is replayed, so it reaches the reviewer through neither the
+task block nor the review diff. The reconciliation outcome is recorded on the receipt.
+
+The reconciliation brief itself is **class-aware**. Only `scope-decision` poses a
+question, and only its brief names the consequence of resuming unanswered and forbids the
+pre-existing edit that would launder the human's decision into an auto-repair. The other
+classes are told truthfully why the run stopped and that the human has acted; telling
+them clearing the halt "is not your job" would forbid the work the resume exists to let
+them do.
 
 **Approved findings.** A human resolution — `repair` (I fixed it) or `defer` (file it
 for later) — exempts that canonical finding id from the `scope-decision` halt for the
@@ -931,6 +950,9 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-09-07: the final review and terminal doc-sync stages freeze their uncommitted edits when they halt — both left the tree dirty, so the very next invocation was refused by the clean-tree precondition the freeze design exists to satisfy. The record is stage-keyed and the stage re-runs from scratch rather than replaying it (#59)
+2026-09-07: the `escalated: …` ledger annotation is kept out of a resumed task's review packet — it rode the freeze into the review diff and the extracted task block, telling the cold discovery reviewer the work had been frozen and what the last reviewer said (`discovery-review-is-cold`) (#59)
+2026-09-07: the reconciliation brief is class-aware — the scope-decision prose ("the review's scope findings still stand … clearing it is not your job") was being handed to every resumed halt class, where it is false and forbids the work the resume exists to enable (#59)
 2026-09-07: every halt class freezes, not only `scope-decision` — the other classes are equally followed by a human fix and a re-invocation, and freezing one class alone let a resumed run strand its restored work in an unreferenced ref. `--resolve` and the approved-finding exemption stay scope-decision-specific (#59)
 2026-09-07: autonomous repair dispatch and its divert budget are dropped before implementation — a halt freezes and resumes, but the human makes and applies the fix. Autonomy is deferred to observed halt behavior rather than assumed; any future version must supply its own bound, since the attempt backstop never advances on a divert and would not catch such a loop (#59)
 2026-09-06: a `scope-decision` halt freezes the paused task, dispatches the drafted `repair_task` as a fully reviewed task, and reconciles — bounded by a 2-divert budget, no nesting, and approved-finding exemptions that regression still polices; run state survives a halt, session handles still do not (#59)

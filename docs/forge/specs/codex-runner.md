@@ -154,8 +154,9 @@ forge-run.py --status --run-dir DIR
   annotated, the runner stages all changes and commits —
   `git add -A && git commit -m "forge: task <N> — <title>"`. Nothing staged → commit
   skipped, no empty commits. `.forge/` is never staged; the ledger annotation rides in
-  the commit. Escalated tasks commit nothing — the rejected attempt stays uncommitted
-  for the human to resolve.
+  the commit. Escalated tasks commit nothing — the rejected attempt is frozen off the
+  mainline (`execution` spec, Halt resolution), never committed onto it. A halted
+  final-review or doc-sync stage is frozen the same way, for the same reason.
 - A clean tree at task start means `git add -A` captures exactly that task's own work,
   so HEAD is a clean checkpoint after every passed task — the invariant the per-task
   base and resume rely on.
@@ -251,6 +252,10 @@ Two halt classes, distinguished by exit code:
   the `execution` spec's halt taxonomy. Every halt class freezes the task's in-progress
   attempt so the run resumes rather than restarts; `--resolve` applies only to
   `scope-decision`, the one class that poses a question needing an answer.
+- **Stage escalation (exit 2)** — the final review or the terminal doc-sync stage halts.
+  Its uncommitted edits are frozen under a stage-keyed ref the same way a task's attempt
+  is, so the run exits clean; the record names the stage, not a task, and the stage
+  re-runs from scratch on the next invocation rather than replaying its freeze.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
@@ -499,6 +504,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-09-07: a halted final-review or doc-sync stage freezes its uncommitted edits too, under a stage-keyed ref — the run exits clean and re-invocation is not refused (#59)
 2026-09-07: freezing is per-halt, not per-class — `regression`, `stuck`, `backstop` and `gate` freeze too (#59)
 2026-09-07: `--resolve` records a human-applied fix rather than triggering one — autonomous repair dispatch is dropped before implementation (#59)
 2026-09-06: halted runs resume — a halted attempt is frozen in its own commit rather than left dirty, `run.json` gains the `halt` record, and `--resolve` carries a human decision back in; the clean-tree precondition now holds with no exception (#59)

@@ -119,6 +119,7 @@ from forge_git import (  # noqa: F401
     freeze_attempt,
     freeze_diff,
     freeze_ref_name,
+    freeze_stage_ref_name,
     restore_freeze,
 )
 from forge_plan import (  # noqa: F401
@@ -138,6 +139,7 @@ from forge_receipts import (  # noqa: F401
     annotate_ledger,
     ensure_forge_gitignore,
     latest_status,
+    strip_ledger_annotation,
     update_run_progress,
     utc_iso,
     write_final_review_receipt,
@@ -627,8 +629,30 @@ def _resolution_delta(cwd, freeze_base):
     return _git_diff(cwd, freeze_base)
 
 
+# Why the run stopped, per halt class, in the resumed worker's own terms — the
+# no-resolution branch of `_reconcile_brief`. `scope-decision` is absent by
+# design: it poses a human question and gets its own prose below, whose
+# prohibitions are load-bearing (they are the only thing standing between a
+# resumed worker and laundering a human scope decision into an auto-repair).
+# The other four classes pose no question — the human has already acted — and
+# telling their worker that clearing the halt "is not your job" would forbid
+# exactly the work the resume exists to let it do.
+HALT_CAUSE_FOR_WORKER = {
+    "regression": "The run stopped on a `regression` halt: a finding the "
+                  "runner had already recorded as resolved reappeared, or the "
+                  "acceptance command went from green to red.",
+    "stuck": "The run stopped on a `stuck` halt: a rework lap resolved "
+             "nothing — the outstanding findings came back unchanged.",
+    "backstop": "The run stopped on a `backstop` halt: the attempt count "
+                "reached the ceiling before the findings cleared.",
+    "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
+            "where any reviewer finding stops it for a human rather than "
+            "being auto-fixed.",
+}
+
+
 def _reconcile_brief(task, run_dir, restored, resolution_delta, frozen_diff,
-                     finding):
+                     finding, halt_reason=None):
     """The reconciliation section appended to a resumed halted task's first
     worker brief (Halt resolution: the paused task resumes against the fixed
     tree rather than restarting from scratch).
@@ -651,16 +675,27 @@ def _reconcile_brief(task, run_dir, restored, resolution_delta, frozen_diff,
     would tell the worker the tree was fixed for a question nobody answered.
     An empty list is therefore a real state, and says so.
 
-    That empty case names the consequence — this task will halt again — and
-    stops there. It must never offer a way out of the halt: the only way a
-    worker could clear a pre-existing scope finding is to edit code the plan
-    never claimed, which would reclassify the finding as in-diff, flip its
-    disposition from ``halt`` to ``fix``, and launder the human's scope
-    decision into an auto-repair through the rework loop. The runner
-    dispatches no repair of its own — the decision and the edit both stay
-    with the human (Halt resolution) — so the brief says so outright, and the
-    ``repair``/``defer`` glosses are prohibitions for the same reason.
-    ``resolution_delta`` rides every path.
+    That empty case is CLASS-AWARE (``halt_reason``). On a
+    ``scope-decision`` halt it names the consequence — this task will halt
+    again — and stops there. It must never offer a way out of that halt: the
+    only way a worker could clear a pre-existing scope finding is to edit
+    code the plan never claimed, which would reclassify the finding as
+    in-diff, flip its disposition from ``halt`` to ``fix``, and launder the
+    human's scope decision into an auto-repair through the rework loop. The
+    runner dispatches no repair of its own — the decision and the edit both
+    stay with the human (Halt resolution) — so the brief says so outright,
+    and the ``repair``/``defer`` glosses are prohibitions for the same
+    reason.
+
+    Every other class freezes and resumes the same way but poses no scope
+    question, so that text is false for it in every clause — and its "this
+    task will halt on them again / clearing it is not your job" would forbid
+    the work the resume exists to let the worker do. Those get
+    ``HALT_CAUSE_FOR_WORKER``'s truthful one-liner instead. An absent or
+    unrecognized ``halt_reason`` (a halt record written before the class was
+    persisted) falls back to the scope-decision text: over-restricting a
+    worker costs a lap, while wrongly licensing the pre-existing edit costs
+    the human's decision. ``resolution_delta`` rides every path.
 
     The section is also written to ``run_dir`` as ``task-<N>-reconcile.md``,
     like ``_resume_findings_prompt``'s prompt file, so the run dir records
@@ -698,6 +733,16 @@ def _reconcile_brief(task, run_dir, restored, resolution_delta, frozen_diff,
         ])
         lines.extend(resolved_lines)
         lines.append("")
+    elif halt_reason in HALT_CAUSE_FOR_WORKER:
+        lines.extend([
+            "{} The human has acted on it and the run is resuming — the "
+            "tree, the plan, or this task's routing may have changed while "
+            "it was paused. Work the task as written; nothing about its "
+            "contract above has changed.".format(
+                HALT_CAUSE_FOR_WORKER[halt_reason]
+            ),
+            "",
+        ])
     else:
         lines.extend([
             "This task was paused for a human decision, and the run is "
@@ -767,7 +812,13 @@ class HaltResume:
     resolved ids recorded before the pause. ``findings`` holds only the
     record entries the human RESOLVED this invocation, each stamped with its
     ``resolution`` — never the record's whole finding list (see
-    ``_reconcile_brief``)."""
+    ``_reconcile_brief``).
+
+    ``halt_reason`` is the halt record's class, carried so the reconciliation
+    brief can tell the worker the truth about why it was paused: every class
+    freezes and resumes, but only ``scope-decision`` poses a question, and
+    only its brief may forbid clearing the halt (see
+    ``HALT_CAUSE_FOR_WORKER``)."""
 
     restored: bool
     resolution_delta: str
@@ -775,6 +826,7 @@ class HaltResume:
     findings: list = field(default_factory=list)
     attempt: int = 0
     state: ConvergenceState = field(default_factory=ConvergenceState)
+    halt_reason: str | None = None
 
 
 def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings,
@@ -922,6 +974,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             reconcile = _reconcile_brief(
                 task, run_dir, resume.restored, resume.resolution_delta,
                 resume.frozen_diff, resume.findings,
+                halt_reason=resume.halt_reason,
             )
         brief_path, brief_sha = _brief_for(
             task, plan_path, spec_path, run_dir, attempt, findings_carry,
@@ -1400,6 +1453,39 @@ def _git_commit_final_review_fixes(cwd):
             )
         )
     return _git_head(cwd)
+
+
+def _freeze_stage_halt(cwd, run_dir, stage, halt_reason):
+    """Freeze a halted whole-run stage (``final-review`` | ``doc-sync``) and
+    return its halt record.
+
+    The two terminal stages halt with edits in the tree that nothing commits:
+    the ``fix: final-review`` commit lands only on a pass, and a doc-sync
+    contradiction returns before ``_git_commit_doc_sync``. Left there, those
+    edits are a dirty tree at exit, and the clean-tree precondition — which
+    must stay unbypassable — refuses the very next invocation. So they freeze
+    exactly as a halted task's attempt does (Halt resolution: "no run ever
+    accepts a dirty tree"), parked off the mainline under a forge-owned ref,
+    with the tree returned to the last committed checkpoint.
+
+    The record is stage-keyed, not task-keyed: it carries ``stage`` where a
+    task record carries ``task``, so the resume loop's ``task`` match never
+    claims it and no task is ever resumed from a stage's freeze. Unlike a
+    task freeze it is NOT replayed — the stage re-runs from scratch on the
+    committed diff, which is the state a human resolving the halt edits
+    against — so the ref is how the discarded edits stay recoverable rather
+    than a resume mechanism. A freeze failure is fail-loud here for the same
+    reason it is on the task path, and a null ``freeze_commit`` means the
+    tree already equalled the checkpoint (a halt that edited nothing)."""
+    run_id = os.path.basename(os.path.normpath(run_dir))
+    freeze_base = _git_head(cwd)
+    freeze_commit = freeze_attempt(cwd, freeze_stage_ref_name(run_id, stage))
+    return {
+        "stage": stage,
+        "freeze_commit": freeze_commit,
+        "freeze_base": freeze_base,
+        "halt_reason": halt_reason,
+    }
 
 
 def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
@@ -2205,6 +2291,15 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 restored = restore_freeze(cwd, freeze_commit)
                 if not restored:
                     frozen = freeze_diff(cwd, freeze_commit)
+            # The freeze carries the plan file's `escalated: ...` annotation
+            # (written before the freeze so the halt is recorded alongside the
+            # work it paused), and the replay puts it back in the working
+            # tree, where it would ride into this task's review diff. Take it
+            # back off: the resumed task's reviewer is a fresh agent that is
+            # never told the work was frozen (`discovery-review-is-cold`).
+            # Its counterpart guard is in `_packet_for`, which strips the same
+            # annotation out of the extracted task block.
+            strip_ledger_annotation(plan_path, task)
             # ONLY the findings this human actually resolved reach the
             # reconciliation brief, each stamped with its resolution: the
             # record's other findings are still open questions, and a brief
@@ -2227,6 +2322,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 state=ConvergenceState.from_dict(
                     halt_record.get("convergence_state")
                 ),
+                halt_reason=halt_record.get("halt_reason"),
             )
         halt_out = {}
         outcome = execute_task(
@@ -2281,8 +2377,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # scope-only below. The ledger annotation is written FIRST, so it
             # rides inside the freeze rather than being left behind as the
             # one dirty path that would refuse the very resume this exists
-            # to enable; the resume restores it, and a later pass overwrites
-            # it in place.
+            # to enable — the freeze commit is where the halt stays recorded
+            # next to the work it paused. The resume replays it with the rest
+            # of the freeze and then strips it back off
+            # (`strip_ledger_annotation`, above): the resumed task's reviewer
+            # is a cold discovery reviewer and is never told the work was
+            # frozen (`discovery-review-is-cold`). A later pass writes the
+            # `passed` annotation in its place.
             #
             # A freeze failure is fail-loud, never a silent "nothing to
             # freeze": freeze_attempt raises (an untracked nested repo cannot
@@ -2308,6 +2409,14 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             overall = "escalated"
             escalated = True
             break
+
+    if not escalated and halt_state is not None and halt_state.get("stage"):
+        # A stage halt record carried in from a prior invocation describes a
+        # stage this invocation is about to re-run from scratch (a stage
+        # freeze is never replayed). Clear it before that re-run, exactly as
+        # the task loop clears a task record once its task passes, so a
+        # resolved stage halt does not outlive itself in run.json.
+        halt_state = None
 
     # Resuming a run where every remaining task was already `passed` skips the
     # loop's own write_run_json calls entirely (each iteration just `continue`s),
@@ -2338,6 +2447,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                             stage="final-review", carried=carried_deferrals)
             if final_outcome.status == "escalated":
                 overall = "escalated-final-review"
+                # An applied fix dispatch's edits are still in the tree here
+                # (the `fix: final-review` commit lands only on a pass) —
+                # freeze them so the run exits clean and the next invocation
+                # is not refused by the clean-tree precondition.
+                halt_state = _freeze_stage_halt(
+                    cwd, run_dir, "final-review", final_outcome.halt_reason
+                )
             else:
                 # Terminal doc-sync: reconcile existing docs to the shipped diff,
                 # only now that every code gate is green (never masks a code
@@ -2357,6 +2473,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                     doc_sync_record["contradiction"] = doc_sync.contradiction
                 if doc_sync.status == "halt":
                     overall = "escalated-doc-sync"
+                    # Same reason as the final-review halt above: a doc-sync
+                    # that edited before it halted (or was killed mid-edit)
+                    # returns before `_git_commit_doc_sync`, so nothing else
+                    # takes those edits out of the tree.
+                    halt_state = _freeze_stage_halt(
+                        cwd, run_dir, "doc-sync", None
+                    )
 
     # Terminal write: no current_task/current_phase, so the pointer is cleared —
     # the monitor stops the spinner and paints the terminal-state banner. The
