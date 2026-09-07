@@ -233,10 +233,10 @@ setup.
   checkpoint. The human is never asked to commit a half-finished attempt or discard it
   to get past the precondition.
 - **`--resolve <finding-id>=repair|defer`** (repeatable) carries a human decision into a
-  resumed run after a terminal halt: `repair` dispatches the finding's drafted
-  `repair_task`, `defer` stages it as a deferral and proceeds. Either way the id is
-  exempt from further `scope-decision` halts this run and consumes no divert budget.
-  An id absent from the halt record raises naming it — never silently ignored.
+  resumed run: `repair` means the human fixed it, `defer` stages it as a deferral. Either
+  way the id is exempt from further `scope-decision` halts this run. An id absent from
+  the halt record raises naming it — never silently ignored. The runner applies no fix of
+  its own under either value.
 - Resuming a run whose recorded `freeze_commit` no longer exists (a rebase or reset
   between invocations) raises naming the missing sha. Frozen work is never silently
   discarded.
@@ -248,18 +248,18 @@ Two halt classes, distinguished by exit code:
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
   orchestrator relays the receipt's contents to the user. Which conditions escalate is
-  the `execution` spec's halt taxonomy. A `scope-decision` finding reaches this only
-  when it is terminal — budget spent, raised inside a repair dispatch, or `gate` mode;
-  otherwise the runner diverts and the run continues to its normal exit.
+  the `execution` spec's halt taxonomy. A `scope-decision` halt additionally freezes the
+  task's in-progress attempt so the run resumes rather than restarts.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
   marked `contract-error` when the run dir exists, stderr-only when it does not.
 
 Either way the runner stops before the next task and never absorbs work inline.
-Resolution — amend the brief, re-tier, bump to `max`, defer, or `--resolve` an
-outstanding finding — is a human decision before re-invocation. A resumed run continues
-the halted task against its frozen commit rather than restarting the plan.
+Resolution — amend the brief, re-tier, bump to `max`, defer, fix the named code, or
+`--resolve` an outstanding finding — is a human decision *and a human edit* before
+re-invocation; the runner dispatches no repair of its own. A resumed run continues the
+halted task against its frozen commit rather than restarting the plan.
 
 ## Session awareness — foreground execution
 
@@ -498,6 +498,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-09-07: `--resolve` records a human-applied fix rather than triggering one — autonomous repair dispatch is dropped before implementation (#59)
 2026-09-06: halted runs resume — a halted attempt is frozen in its own commit rather than left dirty, `run.json` gains the `halt` record, and `--resolve` carries a human decision back in; the clean-tree precondition now holds with no exception (#59)
 2026-09-05: consolidated from three dated specs — phase3 codex-dual-harness, codex-exec-runner, forge-run-monitor (#47)
 2026-09-05: dropped the runner spec's rework cap (`MAX_ATTEMPTS = 2`), its findings→rework→cap→escalate steps, and its single-shot final-review gate — superseded by the disposition matrix, convergence-based rework, the final-review fix loop and the doc-sync stage, all owned by the `execution` spec; the task loop keeps the Codex-mechanical half (brief, `codex exec` dispatch, acceptance, packet assembly, verdict capture) (#47)
