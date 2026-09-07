@@ -138,7 +138,9 @@ Claude the orchestrator invokes the CLI.
 | `**Spec:**` single line, no parenthetical or `;`, every name resolving uniquely in the spec | names the unresolvable or ambiguous heading |
 | `**Depends on:**` references existing task numbers, no cycles | names the missing task or the cycle |
 | `**Acceptance:**` present per task | names the task |
+| `**Tests:**` parses — bulleted form, or `none — <reason>` | names the task and quotes the offending line |
 | checklist generates for every task and for `--final` | names the task; an empty checklist is a **warning**, not an error |
+| every **changed** spec section is named by some task's `**Spec:**` line | names the unclaimed section |
 
 It **reports every defect in one run**, never the first only — the same
 anti-one-per-lap principle the reviewer's coverage requirement installs. Any error is
@@ -149,6 +151,36 @@ Lint exists because a defect in a plan or spec can never be classified `in-diff`
 task's diff contains code, not the document specifying it — so every such defect would
 otherwise land `pre-existing × contract-breaking` and halt for a human round-trip on
 what is really a syntax error.
+
+**Spec coverage is that same argument applied one level up.** The flow amends a spec
+before the plan is written **and commits it**, so the baseline is the branch's **merge
+base with the default branch**, never `HEAD`: against `HEAD` the amendment is already
+committed by the time lint runs, nothing reads as changed, and the rule is inert in the
+exact flow it exists for. Every section whose content changed since the merge base must
+be named by at least one task's `**Spec:**` line. When no merge base resolves — the
+default branch itself, an unborn or detached HEAD — the baseline falls back to `HEAD`
+and the rule degrades to inert rather than failing loudly, since a plan is not wrong
+merely because lint cannot establish what the branch changed. A spec with no committed
+version — a genuinely new system — treats every section as changed.
+
+**`## Changelog` and `## Risks / constraints` are exempt.** Both are structurally
+unbuildable: every other section states a requirement a task can deliver, while these
+two record history and judgment. No task is ever assigned to add a changelog line or a
+risk entry, so demanding they be claimed would train the reader to ignore the rule. The
+exemption is that principle, not a list to extend — a section is exempt because nothing
+in it can be built, never because claiming it is inconvenient. An unclaimed
+changed section means the plan cannot deliver what the spec now asserts, and that gap
+is not discoverable from any single task's diff: it surfaces mid-run as a reviewer
+finding against code that is doing exactly what its task asked. Catching it before the
+first line is written costs seconds; catching it at task 5 costs a halt and a
+re-plan.
+
+The rule is deliberately scoped to *changed* sections. Most sections of a living spec
+describe behavior that already shipped, and requiring a plan to claim all of them would
+warn on a dozen every run until the warning was ignored. A plan that genuinely should
+not build a changed section still has an escape that is on the record rather than
+silent: name it on a task's `**Spec:**` line and let the reviewer mark it `n/a` with a
+reason.
 
 **Lint must never reject a legal plan.** `**Spec:**`, `**Global Constraints:**` and
 prose acceptance are all optional per the planning skill; absence is never an error.
@@ -168,10 +200,46 @@ satisfy — no new authoring burden, no new plan fields.
 
 | id form | source |
 |---|---|
-| `spec:<slug>` | each spec section named on a `**Spec:**` line — the task's own for a task review, the union across all tasks for the final review, resolved via `extract-brief.py`'s `find_spec_sections` |
+| `spec:<slug>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections` |
 | `g<N>` | each clause of the plan header's `**Global Constraints:**` |
+| `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
 | `t<N>.a<M>` | each `;`-separated clause of task N's `**Acceptance:**` line **whose content is not solely an inline-code command** — those are already executed deterministically by the acceptance runner and would be dead checklist weight |
 | `t<N>` | final review only: task N's title, as an integration item |
+
+**A task's checklist is what that task promised, not what the spec asserts.** Spec
+sections are a **final-review** source only. A task is allocated a slice of a spec
+section by the plan, and nothing in the packet says which slice — so asking a per-task
+reviewer to render `coverage` on the whole section poses a question whose honest answer
+is always "not yet," and whose only truthful status (`violated`) obliges a backing
+finding. That manufactured finding cites the section, satisfies the named-evidence
+rule, and lands `in-diff × contract-breaking` → `fix`: rework generated by the
+checklist, not by a defect. The whole-spec question is real and is asked once, by
+`build_final_checklist`, at the altitude where `run_base` *is* the diff base and the
+answer can be true. This is the `seed` rationale applied to coverage: an integration
+obligation is judged at integration.
+
+The task's `**Spec:**` line is unchanged and still pulls its sections into the worker
+brief and the review packet — as **context** the reviewer reads, never as an item it
+must return a verdict on.
+
+**Covering and citing are different acts, and only covering was ever the problem.**
+Two sets exist per review:
+
+| set | what it is | what it governs |
+|---|---|---|
+| **coverage items** | the task's own promises (`t<N>.t<M>`, `t<N>.a<M>`, `g<N>`) | every id the reviewer must return a `coverage` verdict on |
+| **citable refs** | the coverage items **plus** the `spec:<slug>` id of every section the task's `**Spec:**` line names | every id a finding's `contract_ref` may cite |
+
+The coverage set is what a reviewer is *obliged to answer for*, and posing a whole spec
+section there is what manufactured findings. The citable set is what a finding may
+*point at* as the obligation it violates, and narrowing that was a mistake: a reviewer
+that finds real code contradicting the spec must be able to say which section, or the
+named-evidence rule downgrades it to an improvement and a genuine defect is deferred
+instead of halting. Observed 2026-09-06 — a reviewer correctly identified a
+`pre-existing` contract-breaking defect, had no citable id for it, emitted
+`contract_ref: null`, and the finding dispositioned to `defer` rather than reaching the
+human gate it was written for. In the final review the two sets coincide, since spec
+sections are coverage items there.
 
 CLI: `forge_checklist.py <plan.md> --spec <spec.md> [--task N | --final] [--out
 <path>]` → JSON `[{"id", "source", "text"}]` plus a rendered `## Contract checklist`
@@ -183,9 +251,11 @@ An empty checklist is a **library-level** contract error: invoked directly, CLI 
 import, `forge_checklist.py` raises naming the absent source, because an author who
 explicitly asks for a checklist and gets nothing has a defect to see. At the
 **runner/orchestrator** layer it is a **skip**, not an error: a task with no
-`**Spec:**`, no `**Global Constraints:**` and an `**Acceptance:**` of nothing but
+`**Tests:**`, no `**Global Constraints:**` and an `**Acceptance:**` of nothing but
 inline-code commands is a legal plan with no contract material to cover, and forcing an
-error there would make legal plans unexecutable. The review dispatches with no
+error there would make legal plans unexecutable. Dropping spec sections as a task
+source makes this case materially more reachable than before, which is what the plan
+lint warning on an empty checklist is for. The review dispatches with no
 checklist section, no `coverage` validation and no retry, and the receipt records
 `coverage_skipped`, surfaced in the end-of-plan summary. Skipped visibly, never
 silently: a plan that earns no coverage enforcement says so on its receipts.
@@ -206,7 +276,7 @@ identical contract.
 {
   "verdict": "pass" | "findings",
   "coverage": [
-    {"id": "spec:Convergence stop", "status": "satisfied" | "violated" | "n/a", "evidence": "file:line, hunk, or why n/a"}
+    {"id": "t3.a1", "status": "satisfied" | "violated" | "n/a" | "unverifiable", "evidence": "file:line, hunk, or why n/a / why unverifiable"}
   ],
   "findings": [
     {
@@ -214,8 +284,8 @@ identical contract.
       "summary": "one line",
       "location": {"file": "path", "lines": "12-20"},
       "provenance": "in-diff" | "pre-existing",
-      "impact": "contract-breaking" | "improvement",
-      "contract_ref": "acceptance criterion / spec §" | null,
+      "impact": "contract-breaking" | "improvement" | "unverifiable",
+      "contract_ref": "a checklist id from this review's packet" | null,
       "convergence": "resolved" | "carried" | "new" | null,
       "carried_from": "f1" | null,
       "repair_task": {"title": "…", "files": ["…"], "spec": "…", "tests": ["…"], "acceptance": ["…"], "tier": "standard"} | null
@@ -226,10 +296,45 @@ identical contract.
 
 - `provenance` as emitted is two-valued. The runner recomputes it and may resolve it to
   `in-run`, a value the reviewer never emits.
-- `impact` is `contract-breaking` only when `contract_ref` names the acceptance
-  criterion or spec section violated. A null `contract_ref` downgrades the finding to
-  `improvement` regardless of the reviewer's label — the named-evidence rule, mirroring
-  the tier-policy floor.
+- **Reporting is unconditional on provenance.** Every finding the reviewer sees is
+  emitted; the runner derives the disposition. A reviewer must never withhold a finding
+  because the code predates this diff — `pre-existing × contract-breaking` is a real cell
+  whose whole purpose is to halt for a human, and it can only fire on a finding that was
+  reported. Withholding also loses the finding outright rather than downgrading it: the
+  runner parses the verdict JSON and discards surrounding prose, so a defect mentioned
+  only in commentary reaches no receipt, no deferral, and no gate. Observed 2026-09-06 —
+  a reviewer correctly identified an unchecked-enum defect, judged it out of scope
+  itself, and omitted it from the verdict; it survived only because a human read the
+  chat transcript (#63).
+- `impact` is `contract-breaking` only when `contract_ref` names **a citable ref for
+  this review** — a coverage item, or a `spec:<slug>` section the task declares (Contract
+  checklist, above). A null `contract_ref`, or one naming anything outside that set,
+  downgrades the finding to `improvement` regardless of the reviewer's label — the
+  named-evidence rule, mirroring the tier-policy floor. Membership, not non-nullness, is
+  the test: a bare presence check costs the reviewer one arbitrary string, which makes
+  the strongest disposition in the matrix the cheapest claim to assert. The citable set
+  is deliberately wider than the coverage set, so a finding against code that
+  contradicts the spec can still name what it breaks without the reviewer being asked
+  to certify the whole section.
+
+  **Two mechanisms enforce this, and they are not the same.** Where a citable set is
+  supplied, a non-member ref is a *validation defect* — one retry naming it, then a
+  contract error — so the reviewer is asked to correct the citation rather than having
+  its finding silently reclassified. Where none is supplied (`validate_contract_refs`
+  skips a falsy set, and `derive_disposition` tests only non-nullness), the
+  named-evidence rule degrades to the presence check and the downgrade to `improvement`
+  is what remains. Membership is therefore enforced at the callers that supply the set,
+  not by the disposition matrix itself; a caller that omits it gets the weaker
+  guarantee, silently.
+- `impact: "unverifiable"` is the honest verdict for a finding the reviewer cannot
+  settle from the diff in front of it — the agent contract has always called that a
+  valid answer, and until now the schema had nowhere to put it. It requires a reason in
+  the finding's `summary`, carries no `repair_task`, and dispositions to `seed`
+  (disposition matrix, below): logged, never reworked in-loop, carried into the final
+  review where the whole-plan diff makes it answerable. Cannot-verify is not
+  wrong-and-unfixed; for an obligation whose proof is the whole chain, a per-task
+  reviewer structurally cannot answer, and ordering a repair on that basis is how a
+  speculation becomes a code change and then a green→red regression halt.
 - `convergence` and `carried_from` are set only on a re-review, labeling each current
   finding against the prior attempt's findings supplied in the packet. `resolved`
   findings may be listed or omitted; both behave identically.
@@ -263,9 +368,17 @@ proposes, the runner decides:
   defect;
 - every `violated` id is named by the `contract_ref` of at least one finding in the same
   verdict; a `violated` with no backing finding is a defect;
+- every finding's non-null `contract_ref` is a citable ref for this review — a coverage
+  item or a declared `spec:<slug>` section; one naming anything else is a defect. Together with the `violated` rule above this closes
+  the loop in both directions — a violated item must have a finding, and a finding must
+  cite a real item;
 - `evidence` is non-empty on every entry. `n/a` requires a reason in `evidence` — it is
   the honest escape for a checklist item the diff cannot touch, and it is what keeps the
   requirement from degrading into rubber-stamping.
+- `unverifiable` requires a reason in `evidence` and, unlike `violated`, obliges **no**
+  backing finding. That asymmetry is the point: `violated` demanding a finding is
+  correct for a known break and coercive for an unsettled one, and a reviewer with no
+  truthful status left reaches for the one that manufactures work.
 
 On invalid: **one retry**, re-dispatching with the specific defect named. That retry
 never advances the attempt counter or the convergence state — it is not a rework lap. A
@@ -288,11 +401,15 @@ labeled:
 
 Crossed with contract impact:
 
-| | contract-breaking | improvement |
-|---|---|---|
-| `in-diff` | **fix** | defer |
-| `in-run` | **seed** | defer |
-| `pre-existing` | **halt** | defer |
+| | contract-breaking | improvement | unverifiable |
+|---|---|---|---|
+| `in-diff` | **fix** | defer | **seed** |
+| `in-run` | **seed** | defer | **seed** |
+| `pre-existing` | **halt** | defer | **seed** |
+
+`unverifiable` collapses the provenance axis deliberately: what the runner cannot
+settle is *where the answer lives*, not where the code sits, and every cell routes to
+the final review for the same reason.
 
 - **fix** — reworked in-loop. The only auto-fix cell. An autonomous fixer's failure mode
   is over-fixing, and over-fixing is diff over-scoping wearing a new hat, so the rule is
@@ -300,10 +417,15 @@ Crossed with contract impact:
 - **defer** — logged, never fixed. The whole right column, our own new code included: no
   gold-plating what this plan just wrote.
 - **seed** — logged, the run **continues**, and the finding is carried into the final
-  review's **discovery packet** as a pre-seeded prior finding. A cross-task defect is an
-  integration defect, and integration review is where it can actually be judged; a
-  task's rework loop editing another task's committed work would break the linear
-  vertical-slice history the per-task review base depends on.
+  review's **discovery packet** as a pre-seeded prior finding. Two routes reach it, for
+  one reason. A cross-task defect (`in-run × contract-breaking`) is an integration
+  defect, and integration review is where it can actually be judged; a task's rework
+  loop editing another task's committed work would break the linear vertical-slice
+  history the per-task review base depends on. An `unverifiable` finding, at any
+  provenance, is the same shape of problem seen from the other side — the evidence that
+  would settle it is not in this review's diff. Both say the answer lives at
+  integration, so both go there rather than driving a repair on a question nobody has
+  answered yet.
 - **halt** — a genuine human scope decision. This is the one cell that must never be
   silently fixed *or* silently deferred, and the halt carries a drafted `repair_task`
   for the human to approve.
@@ -693,12 +815,21 @@ Any cost claim requires measurement against a comparable run.
   than raw diff.
 - **Lint rejecting a legal plan** — mitigated by checking only documented grammar and by
   warning rather than failing on an empty checklist; the legal-minimal-plan case is the
-  guard.
+  guard. The changed-section mapping rule extends what *legal* means rather than
+  bending this: a plan silently omitting what its own spec amendment now asserts is a
+  defect, and the `n/a` escape keeps a deliberate omission expressible.
 - **Reviewer misclassification of contract impact** → over- or under-fixing. Provenance is
-  runner-verified rather than trusted, and contract-breaking requires a named
-  `contract_ref` or is downgraded. The residual risk is a reviewer citing a spurious
-  `contract_ref`, bounded to the in-diff surface, so the blast radius is the plan's own
-  code.
+  runner-verified rather than trusted, and contract-breaking requires a `contract_ref`
+  naming a checklist id supplied in the packet — validated, not merely present — or is
+  downgraded. The residual risk is a reviewer citing a *real* checklist id spuriously,
+  bounded to the in-diff surface, so the blast radius is the plan's own code.
+- **A thinner per-task checklist reviews less.** Dropping spec sections as a task source
+  is deliberate, and it does mean a task whose plan under-specified its obligations gets
+  a shallower review, with the gap surfacing at final review — later, and possibly
+  entangled across tasks. The compensating gates are plan lint's changed-section
+  mapping rule and the final review's unchanged whole-spec checklist; if the mapping
+  rule proves weak in practice, this trades early false positives for late true
+  positives, which is a worse bargain than the one it replaced.
 - **Honoring `resolved` increases trust in the reviewer.** Bounded by the carried-set
   guard and by the regression rule, which remains authoritative.
 - **Orchestrator drift on the Claude path** — the loop is prose the session follows. The
@@ -708,6 +839,13 @@ Any cost claim requires measurement against a comparable run.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
 
 ## Changelog
+
+2026-09-07: `t<N>.t<M>` is coverage-per-task but citable at the final review; membership is enforced by the callers that supply a citable set, not by the matrix (#60)
+2026-09-06: Plan lint's check table gains the `**Tests:**` grammar row (#60)
+2026-09-06: spec-coverage lint reads the merge base, not HEAD; Risks / constraints joins Changelog as exempt (#60)
+2026-09-06: coverage items and citable refs are separate sets — spec sections stay citable, only coverage narrowed (#60)
+2026-09-06: reviewers report every finding regardless of provenance; the runner derives disposition (#63)
+2026-09-06: a task's checklist is its own promises (Tests + Acceptance + globals); spec sections are final-review-only and packet context per task; `contract_ref` must name a checklist id; `unverifiable` added to coverage status and finding impact, seeding to final review; plan lint requires every changed spec section to be claimed by a task (#60)
 
 2026-09-05: consolidated from seven dated specs — phase7 scope-autonomy, tier-policy-recalibration, phase10 codex-inline, phase11 inline-finding-process, phase12b claude-dispatch-parity, halt-precision, review-continuity (#47)
 2026-09-05: dropped the "Testing" section of the four sources carrying one (halt-precision, review-continuity, phase12b, phase7); every source's "Acceptance"/"Acceptance criteria" section, all seven; halt-precision's and review-continuity's "Touch points"; phase7's and phase12b's "Retirements / doc changes"; phase12b's "Runner refactor"; and phase10's and phase11's "Changes" sections with their numbered subsections — one-time phase gates and implementation worklists, all satisfied and expired. Their standing rules are stated in place: `review-packet.py` is Codex-path-only (The dispatch loop), reviewer routing reads the single tier table (Reviewer model), and the shared-module import discipline that keeps one `Finding` class identity (The shared decision helper) (#47)

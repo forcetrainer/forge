@@ -474,6 +474,87 @@ class ExtractBriefTests(unittest.TestCase):
         with open(default_path) as f:
             self.assertTrue(f.read())
 
+    # --- parse_test_cases (Task 1: Tests-line parser) ---
+    # Legal form: the '**Tests:**' marker alone on its line, followed by
+    # '-' bullets; the block ends at the first blank line or the next
+    # '**Field:**' marker. The inline joined form is no longer legal.
+
+    def test_parse_test_cases_multi_case_in_order(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- rejects empty email\n"
+            "- retries 3 times then throws\n"
+            "- logs a warning on retry\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block),
+            [
+                "rejects empty email",
+                "retries 3 times then throws",
+                "logs a warning on retry",
+            ],
+        )
+
+    def test_parse_test_cases_stops_at_first_blank_line(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- case one\n"
+            "- case two\n"
+            "\n"
+            "- not a test case, trailing prose after the blank line\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block), ["case one", "case two"]
+        )
+
+    def test_parse_test_cases_stops_at_next_field_marker(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- case one\n"
+            "- case two\n"
+            "**Acceptance:** `pytest` passes.\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block), ["case one", "case two"]
+        )
+
+    def test_parse_test_cases_absent_returns_empty_list(self):
+        self.assertEqual(extract_brief.parse_test_cases(self._TASK), [])
+
+    def test_parse_test_cases_none_with_dash_prose_returns_empty_list(self):
+        block = self._TASK + "\n**Tests:** none — prose.\n"
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_none_with_any_trailing_reason_returns_empty_list(self):
+        block = self._TASK + "\n**Tests:** none because it's a doc-only change\n"
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_ignores_fenced_tests_marker(self):
+        block = (
+            self._TASK + "\n"
+            "```markdown\n"
+            "**Tests:**\n"
+            "- fenced case that must not count\n"
+            "```\n"
+        )
+        self.assertEqual(extract_brief.parse_test_cases(block), [])
+
+    def test_parse_test_cases_inline_joined_form_raises_naming_line(self):
+        block = self._TASK + "\n**Tests:** a; b; c\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            extract_brief.parse_test_cases(block)
+        self.assertIn("a; b; c", str(ctx.exception))
+
+    def test_parse_test_cases_marker_with_no_bullets_and_no_none_raises(self):
+        block = self._TASK + "\n**Tests:**\nnot a bullet, not none\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            extract_brief.parse_test_cases(block)
+        self.assertIn("Tests", str(ctx.exception))
+
+    def test_parse_test_cases_semicolon_inside_bullet_is_literal(self):
+        block = self._TASK + "\n**Tests:**\n- rejects a; keeps b\n"
+        self.assertEqual(extract_brief.parse_test_cases(block), ["rejects a; keeps b"])
+
     def test_last_task_in_file_eof_terminated_extracts_fully(self):
         code, out, err = self._run([self.plan_no_spec, "2", "--out", self.tmpdir.name])
         self.assertEqual(code, 0, err)

@@ -97,8 +97,9 @@ REVIEW_VERDICT_INSTRUCTION = (
     "finding object: {\"id\": \"f1\", \"summary\": \"one line\", "
     "\"location\": {\"file\": \"path\", \"lines\": \"12-20\"}, \"provenance\": "
     "\"in-diff\" | \"pre-existing\", \"impact\": \"contract-breaking\" | "
-    "\"improvement\", \"contract_ref\": \"acceptance criterion or spec "
-    "section it violates\" | null, \"convergence\": \"resolved\" | \"carried\" "
+    "\"improvement\" | \"unverifiable\", \"contract_ref\": \"a checklist id "
+    "from this review's packet, or a spec:<slug> section the task declares\" "
+    "| null, \"convergence\": \"resolved\" | \"carried\" "
     "| \"new\" | null, \"carried_from\": \"prior finding id\" | null, "
     "\"repair_task\": {\"title\": ..., \"files\": [...], \"spec\": ..., "
     "\"tests\": [...], \"acceptance\": [...], \"tier\": ...} | null}. "
@@ -107,17 +108,22 @@ REVIEW_VERDICT_INSTRUCTION = (
     "names which one this review is; a verification verdict that includes "
     "coverage anyway is also accepted. On a discovery verdict: one entry per "
     "checklist id supplied in the packet, each {\"id\": \"<checklist id>\", "
-    "\"status\": \"satisfied\" | \"violated\" | \"n/a\", \"evidence\": "
+    "\"status\": \"satisfied\" | \"violated\" | \"n/a\" | \"unverifiable\", "
+    "\"evidence\": "
     "\"file:line, hunk, or reason\"} — evidence must be non-empty on every "
     "entry, and \"n/a\" requires a reason in evidence (why the diff cannot "
     "touch that item), never a rubber-stamped satisfied. "
+    "\"unverifiable\" requires a reason in evidence and obliges no backing "
+    "finding — unlike \"violated\", which does require one. "
     "location.lines accepts a single line (\"12\"), a single range "
     "(\"12-20\"), or a comma-separated list of either (\"12-20,45,60-62\") — "
     "a finding is in-diff when any one of those ranges falls inside the "
     "diff. "
     "Classification rules: label impact \"contract-breaking\" only when "
-    "contract_ref names the acceptance criterion or spec section it violates — "
-    "a contract-breaking finding with no contract_ref is treated as "
+    "contract_ref names a checklist id from this review's packet, or a "
+    "spec:<slug> section the task declares — a contract-breaking finding "
+    "with no contract_ref, or one naming anything outside that set, is "
+    "treated as "
     "improvement; a contract-breaking finding must carry a parseable "
     "location.lines — an absent or unparseable location on a contract-"
     "breaking finding is rejected and re-dispatched, never silently treated "
@@ -125,7 +131,12 @@ REVIEW_VERDICT_INSTRUCTION = (
     "diff is pre-existing, never in-diff, regardless of how it reads; "
     "repair_task is "
     "required only when the finding is pre-existing and contract-breaking, "
-    "optional otherwise. Set convergence and carried_from only on a re-review, "
+    "optional otherwise; a finding with impact \"unverifiable\" requires a "
+    "reason in its summary; a finding with impact \"unverifiable\" carries "
+    "no repair_task. Every finding you see is reported regardless of "
+    "provenance — the runner derives the disposition; never withhold a "
+    "finding on the grounds that the code predates this diff. Set "
+    "convergence and carried_from only on a re-review, "
     "labeling each current finding resolved, carried, or new against the prior "
     "attempt's findings supplied in the packet — omit both on a first review. "
     "The runner parses the last JSON object in your message; emit nothing "
@@ -171,7 +182,7 @@ class Finding:
     file: str
     lines: str  # "12-20" or "12"
     provenance: str  # "in-diff" | "pre-existing" (reviewer-proposed)
-    impact: str  # "contract-breaking" | "improvement"
+    impact: str  # "contract-breaking" | "improvement" | "unverifiable"
     contract_ref: str | None = None
     convergence: str | None = None  # "resolved" | "carried" | "new" | None
     carried_from: str | None = None
@@ -182,7 +193,7 @@ class Finding:
 @dataclass
 class CoverageEntry:
     id: str
-    status: str  # "satisfied" | "violated" | "n/a"
+    status: str  # "satisfied" | "violated" | "n/a" | "unverifiable"
     evidence: str
 
 

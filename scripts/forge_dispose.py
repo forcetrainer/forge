@@ -353,6 +353,51 @@ def validate_finding_ids(verdict):
     ]
 
 
+def validate_contract_refs(verdict, citable):
+    """Validate that every finding's non-null ``contract_ref`` names a
+    citable ref for this review — a coverage item, or (per-task review only)
+    a ``spec:<slug>`` section the task declares (Contract checklist: covering
+    and citing are different acts). Returns a list of human-readable defect
+    strings — empty means valid — in the same shape as ``validate_coverage``/
+    ``validate_locations``/``validate_finding_ids``, so it feeds the same
+    retry-once-then-contract-error mechanism (``forge-run.py``'s ``_review_
+    with_coverage``).
+
+    ``citable`` is the caller-assembled set/list of ids a finding may cite —
+    for a per-task review, ``forge_checklist.citable_refs``' coverage-items-
+    plus-declared-spec-sections union; for the final review, the checklist
+    itself, since spec sections are already coverage items there. Returns
+    ``[]`` when ``citable`` is falsy: with nothing supplied for this task
+    there is nothing to check membership against, mirroring ``validate_
+    coverage``'s empty-checklist skip.
+
+    Membership, not non-nullness, is the test (Reviewer verdict contract):
+    a null ``contract_ref`` is not a defect here — that is the named-evidence
+    downgrade to ``improvement`` handled at disposition (``derive_
+    disposition``) — but a non-null ref naming anything outside the citable
+    set is, and is exactly what let a `contract-breaking` claim cost the
+    reviewer one arbitrary string."""
+    if not citable:
+        return []
+    if verdict.kind != "findings":
+        return []
+    citable_id_set = (
+        citable if isinstance(citable, (set, frozenset))
+        else {_checklist_id(it) for it in citable}
+    )
+    defects = []
+    for finding in verdict.findings or []:
+        if finding.contract_ref is None:
+            continue
+        if finding.contract_ref not in citable_id_set:
+            defects.append(
+                "finding {!r} contract_ref {!r} is not a citable ref".format(
+                    finding.id, finding.contract_ref
+                )
+            )
+    return defects
+
+
 def derive_disposition(finding):
     """Disposition matrix over (verified provenance × contract-gated impact).
     Impact is ``contract-breaking`` only when the reviewer named the violated
@@ -364,7 +409,14 @@ def derive_disposition(finding):
     run continues, and it is carried into the final review's discovery packet
     rather than halting this task over another task's work);
     pre-existing×contract-breaking → ``halt`` (a real scope decision); every
-    improvement → ``defer``."""
+    improvement → ``defer``. ``unverifiable`` collapses the provenance axis
+    deliberately — what the reviewer cannot settle from this diff is not a
+    question of where the code sits, so it routes to ``seed`` at every
+    provenance (including a null ``contract_ref``, which never applies to
+    this axis in the first place) rather than being downgraded like an
+    ungrounded contract-breaking claim."""
+    if finding.impact == "unverifiable":
+        return "seed"
     contract_breaking = (
         finding.impact == "contract-breaking" and finding.contract_ref is not None
     )
@@ -731,7 +783,16 @@ def main(argv=None):
         help="path to the checklist JSON (forge_checklist.py --format json "
              "output); when given, decision.json gains coverage_valid/"
              "coverage_defects. Omitted: decision.json is unchanged from "
-             "today's output.",
+             "today's output. Coverage validation only — never drives "
+             "contract_ref membership; see --citable.",
+    )
+    parser.add_argument(
+        "--citable", default=None,
+        help="path to a JSON array of citable ref id strings (forge_"
+             "checklist.citable_refs output — coverage items plus declared "
+             "spec:<slug> sections); when given, a finding's non-null "
+             "contract_ref outside this set is a defect. Omitted: contract_ref "
+             "membership is not enforced.",
     )
     args = parser.parse_args(argv)
 
@@ -762,6 +823,34 @@ def main(argv=None):
         state = ConvergenceState()
 
     acceptance_ok = args.acceptance_ok == "true"
+
+    checklist = None
+    if args.checklist:
+        try:
+            with open(args.checklist, "r", encoding="utf-8") as f:
+                checklist = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read checklist file {}: {}".format(
+                    args.checklist, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+    citable = None
+    if args.citable:
+        try:
+            with open(args.citable, "r", encoding="utf-8") as f:
+                citable = set(json.load(f))
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read citable file {}: {}".format(
+                    args.citable, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
 
     verdict = None
     try:
@@ -794,8 +883,28 @@ def main(argv=None):
                         "reviewer verdict has invalid finding location(s): "
                         + "; ".join(location_defects)
                     )
+                # Membership enforcement (Task 4) reaches this CLI too, gated
+                # on --citable — the wider coverage-items-plus-declared-
+                # spec-sections union forge_checklist.citable_refs builds,
+                # not --checklist (coverage items only, coverage validation
+                # only: Contract checklist spec — covering and citing are
+                # different acts). Checked before classify_findings, same
+                # precedence as validate_locations above, so a
+                # contract-breaking claim citing a bogus ref never reaches a
+                # decision.
+                if citable:
+                    contract_ref_defects = validate_contract_refs(
+                        verdict, citable
+                    )
+                    if contract_ref_defects:
+                        raise RuntimeError(
+                            "reviewer verdict has invalid contract_ref(s): "
+                            + "; ".join(contract_ref_defects)
+                        )
                 diff_text = _run_git_diff(args.base)
-                verdict = classify_findings(verdict, diff_text)
+                verdict = classify_findings(
+                    verdict, diff_text, carried_ids=state.carried_ids
+                )
             findings = verdict.findings
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
@@ -807,18 +916,7 @@ def main(argv=None):
     advance_state(state, findings, acceptance_ok)
 
     decision = _build_decision(action, halt_reason, findings, state)
-    if args.checklist and verdict is not None:
-        try:
-            with open(args.checklist, "r", encoding="utf-8") as f:
-                checklist = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            print(
-                "error: cannot read checklist file {}: {}".format(
-                    args.checklist, e
-                ),
-                file=sys.stderr,
-            )
-            return 1
+    if checklist is not None and verdict is not None:
         defects = validate_coverage(verdict, checklist)
         decision["coverage_valid"] = not defects
         decision["coverage_defects"] = defects

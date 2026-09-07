@@ -9,7 +9,7 @@ spec).
 import os
 import subprocess
 
-from forge_common import rp
+from forge_common import eb, rp
 
 
 def _git_head(cwd):
@@ -129,7 +129,7 @@ def _git_diff(cwd, base):
 
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
-                 checklist=None):
+                 checklist=None, spec_path=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -139,7 +139,14 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     of forge_checklist.ChecklistItem, or None) threads the contract checklist
     into the packet, rendered after the diff and before the prior-findings
     section — omitted (None, the empty-checklist skip case) leaves the packet
-    unchanged (Contract checklist spec)."""
+    unchanged (Contract checklist spec).
+
+    ``spec_path`` (optional), when the task declares a ``**Spec:**`` line,
+    resolves that line's names via ``find_spec_sections`` and passes the
+    resulting ``(heading, body)`` pairs into ``build_packet`` as
+    ``spec_sections`` — context the reviewer reads for understanding, not a
+    checklist item (Contract checklist spec). A task declaring no
+    ``**Spec:**`` gets no spec-context section, ``spec_path`` or not."""
     with open(plan_path, "r", encoding="utf-8") as f:
         plan_text = f.read()
     block = rp.extract_task_block(plan_text, task.number)
@@ -147,10 +154,15 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
         raise RuntimeError(
             "review packet: " + rp.diagnose_missing_task(plan_text, task.number, plan_path)
         )
+    spec_sections = None
+    spec_names = eb.parse_spec_names(block)
+    if spec_names:
+        spec_lines = eb.read_lines(spec_path)
+        spec_sections = eb.find_spec_sections(spec_lines, spec_names)
     diff = _git_diff(cwd, base)
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
-        review_kind="discovery",
+        review_kind="discovery", spec_sections=spec_sections,
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:

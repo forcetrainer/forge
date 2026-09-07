@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import shutil
@@ -8,6 +9,16 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "review-packet.py")
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
+
+# review-packet.py's filename is hyphenated, so it cannot be a normal
+# import — load it once by path (mirrors forge_common._load_sibling) for
+# tests that call build_packet directly rather than through the CLI.
+_rp_spec = importlib.util.spec_from_file_location("test_rp_direct", SCRIPT)
+rp = importlib.util.module_from_spec(_rp_spec)
+_rp_spec.loader.exec_module(rp)
 
 PLAN_TASK1 = """# Fixture Plan
 
@@ -525,3 +536,182 @@ class UntrackedFilesInDiffTests(unittest.TestCase):
         self.assertIn("+++ b/brand_new.py", content)
         self.assertIn("+z = 3", content)
         self.assertNotIn("no changes vs", content)
+
+
+# --- build_packet(spec_sections=...) — Task 8: packet carries spec context ---
+
+
+class BuildPacketSpecContextTests(unittest.TestCase):
+    def test_spec_sections_render_a_spec_context_heading(self):
+        packet = rp.build_packet(
+            "### Task 1: First task\n- [ ] Done\n",
+            "HEAD",
+            "",
+            spec_sections=[("Contract checklist", "Some spec body.")],
+        )
+        self.assertIn("## Spec context", packet)
+
+    def test_spec_sections_carry_each_heading_and_body(self):
+        packet = rp.build_packet(
+            "### Task 1: First task\n- [ ] Done\n",
+            "HEAD",
+            "",
+            spec_sections=[
+                ("Contract checklist", "Body one."),
+                ("Halt", "Body two."),
+            ],
+        )
+        self.assertIn("Contract checklist", packet)
+        self.assertIn("Body one.", packet)
+        self.assertIn("Halt", packet)
+        self.assertIn("Body two.", packet)
+
+    def test_none_spec_sections_omits_heading(self):
+        packet = rp.build_packet(
+            "### Task 1: First task\n- [ ] Done\n", "HEAD", "",
+        )
+        self.assertNotIn("## Spec context", packet)
+
+    def test_empty_spec_sections_omits_heading(self):
+        packet = rp.build_packet(
+            "### Task 1: First task\n- [ ] Done\n", "HEAD", "", spec_sections=[],
+        )
+        self.assertNotIn("## Spec context", packet)
+
+    def test_cli_output_unchanged_when_no_spec_sections_supplied(self):
+        # The CLI never passes spec_sections — its output must stay
+        # byte-identical to pre-Task-8 behavior.
+        repo_dir = tempfile.mkdtemp(prefix="review-packet-repo-")
+        self.addCleanup(shutil.rmtree, repo_dir, ignore_errors=True)
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repo_dir, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=repo_dir, check=True, capture_output=True,
+        )
+        plan_path = os.path.join(repo_dir, "plan.md")
+        with open(plan_path, "w") as f:
+            f.write(PLAN_TASK1)
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"], cwd=repo_dir, check=True,
+            capture_output=True,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script([plan_path, "1", "--base", base, "--out", out_dir])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            content = f.read()
+        expected = (
+            "### Task 1: First task\n- [ ] Done\n\n**Files:**\n"
+            "- Modify: `foo.txt`\n\n**Acceptance:** `true`\n\n"
+            "**Tier:** trivial\n\n**Depends on:** nothing\n\n"
+            "no changes vs {}\n".format(base)
+        )
+        self.assertIn("```diff\nno changes vs {}\n```\n".format(base), content)
+        self.assertNotIn("## Spec context", content)
+
+
+# --- forge_git._packet_for(spec_path=...) — Task 8 ---
+
+
+class PacketForSpecContextTests(unittest.TestCase):
+    def setUp(self):
+        from _forge_support import forge_run  # noqa: F401  (loads sys.path setup)
+        import forge_git as _forge_git
+
+        self.forge_run = forge_run
+        self.forge_git = _forge_git
+
+        self.repo_dir = tempfile.mkdtemp(prefix="packet-for-repo-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+
+        self.plan_path = os.path.join(self.repo_dir, "plan.md")
+        self.spec_path = os.path.join(self.repo_dir, "spec.md")
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", *args], cwd=self.repo_dir, check=True, capture_output=True,
+            text=True,
+        )
+
+    def _commit_all(self, msg):
+        self._git("add", ".")
+        self._git("commit", "-m", msg)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    def test_task_with_spec_line_produces_spec_context_section(self):
+        with open(self.spec_path, "w") as f:
+            f.write("# Spec\n\n## Widget behavior\n\nWidgets must widget.\n")
+        with open(self.plan_path, "w") as f:
+            f.write(
+                "# Plan\n\n**Goal:** Do it.\n\n"
+                "### Task 1: Build the widget\n- [ ] Done\n\n"
+                "**Files:**\n- Modify: `foo.txt`\n\n"
+                "**Spec:** Widget behavior\n\n"
+                "**Acceptance:** `true`\n\n**Tier:** standard\n\n"
+                "**Depends on:** nothing\n"
+            )
+        with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:
+            f.write("x\n")
+        base = self._commit_all("initial")
+        with open(os.path.join(self.repo_dir, "foo.txt"), "a") as f:
+            f.write("y\n")
+
+        task = self.forge_run.Task(number=1, title="Build the widget", tier="standard")
+        run_dir = tempfile.mkdtemp(prefix="packet-for-out-")
+        self.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+
+        path = self.forge_git._packet_for(
+            task, self.plan_path, run_dir, base, self.repo_dir,
+            spec_path=self.spec_path,
+        )
+        with open(path) as f:
+            content = f.read()
+        self.assertIn("## Spec context", content)
+        self.assertIn("Widget behavior", content)
+        self.assertIn("Widgets must widget.", content)
+
+    def test_task_with_no_spec_line_omits_spec_context_section(self):
+        with open(self.spec_path, "w") as f:
+            f.write("# Spec\n\n## Widget behavior\n\nWidgets must widget.\n")
+        with open(self.plan_path, "w") as f:
+            f.write(
+                "# Plan\n\n**Goal:** Do it.\n\n"
+                "### Task 1: Build the widget\n- [ ] Done\n\n"
+                "**Files:**\n- Modify: `foo.txt`\n\n"
+                "**Acceptance:** `true`\n\n**Tier:** standard\n\n"
+                "**Depends on:** nothing\n"
+            )
+        with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:
+            f.write("x\n")
+        base = self._commit_all("initial")
+        with open(os.path.join(self.repo_dir, "foo.txt"), "a") as f:
+            f.write("y\n")
+
+        task = self.forge_run.Task(number=1, title="Build the widget", tier="standard")
+        run_dir = tempfile.mkdtemp(prefix="packet-for-out-")
+        self.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+
+        path = self.forge_git._packet_for(
+            task, self.plan_path, run_dir, base, self.repo_dir,
+            spec_path=self.spec_path,
+        )
+        with open(path) as f:
+            content = f.read()
+        self.assertNotIn("## Spec context", content)

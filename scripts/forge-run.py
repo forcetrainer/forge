@@ -461,9 +461,9 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
 def _checklist_or_skip(builder, *args):
     """Call a forge_checklist builder (build_task_checklist / build_final_
     checklist). An empty checklist is a *runner-level* skip, not an error: a
-    task with no ``**Spec:**``, no plan ``**Global Constraints:**``, and only
+    task with no ``**Tests:**``, no plan ``**Global Constraints:**``, and only
     command-only ``**Acceptance:**`` clauses is a legal plan (both fields are
-    optional) with no contract material for a reviewer to cover — forcing an
+    optional; spec sections stopped being a task-checklist source in #60) with no contract material for a reviewer to cover — forcing an
     error there would make legal plans unexecutable (Contract checklist spec,
     2026-08-21 amendment). forge_checklist.py's own CLI/library contract is
     unchanged: it still raises on an empty checklist; this only catches that
@@ -504,7 +504,7 @@ def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
     return path
 
 
-def _verdict_defects(verdict, checklist, review_kind="discovery"):
+def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
     empty-checklist skip case, Contract checklist spec — OR when
@@ -525,34 +525,52 @@ def _verdict_defects(verdict, checklist, review_kind="discovery"):
     every review kind, with or without a checklist, because the id is the
     runner's only handle on a finding (carried/resolved convergence
     tracking, and the staged deferrals `defer --finding-id` selects
-    from)."""
+    from).
+
+    ``validate_contract_refs`` (Task 4) is likewise checked on both review
+    kinds, not gated to discovery like the full coverage sweep. It validates
+    against ``citable`` — the wider citable-refs set (coverage items plus
+    declared spec sections; Contract checklist: covering and citing are
+    different acts), not ``checklist`` — because a per-task checklist no
+    longer carries spec items at all, yet a finding must still be able to
+    name the spec section it breaks. ``citable`` defaults to ``checklist``
+    when the caller has nothing wider to offer (the final review, where the
+    two sets coincide since spec sections are coverage items there). The
+    function itself is the presence gate: it returns no defects when
+    ``citable`` is falsy, exactly like ``validate_coverage``'s
+    empty-checklist skip, so calling it unconditionally here is safe on a
+    checklist-less task too."""
     defects = (
         list(forge_dispose.validate_coverage(verdict, checklist))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)
     defects += forge_dispose.validate_finding_ids(verdict)
+    defects += forge_dispose.validate_contract_refs(
+        verdict, citable if citable is not None else checklist
+    )
     return defects
 
 
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
-                           review_kind="discovery"):
+                           review_kind="discovery", citable=None):
     """Dispatch a review and validate its verdict against ``checklist``
-    (coverage, discovery only) and its findings' locations (both kinds) via
-    ``_verdict_defects``. Validate the first verdict; on any defects,
-    re-dispatch **exactly once** with the defects named in the retry
-    packet's prompt; a second invalid verdict is a contract error (raised,
-    uncaught — same class as an unparseable verdict, never a halt). This is
-    not a rework attempt: the caller must not advance the convergence
-    attempt counter or touch ConvergenceState for the retry. Returns
-    ``(verdict, retried)``."""
+    (coverage, discovery only), its findings' locations (both kinds), and its
+    findings' ``contract_ref`` membership against ``citable`` (both kinds;
+    defaults to ``checklist`` — see ``_verdict_defects``) via ``_verdict_
+    defects``. Validate the first verdict; on any defects, re-dispatch
+    **exactly once** with the defects named in the retry packet's prompt; a
+    second invalid verdict is a contract error (raised, uncaught — same class
+    as an unparseable verdict, never a halt). This is not a rework attempt:
+    the caller must not advance the convergence attempt counter or touch
+    ConvergenceState for the retry. Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
-    defects = _verdict_defects(verdict, checklist, review_kind)
+    defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
     verdict = dispatch_call(retry_path)
-    defects = _verdict_defects(verdict, checklist, review_kind)
+    defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if defects:
         raise RuntimeError(
             "reviewer verdict still invalid after one retry: {}".format(
@@ -752,6 +770,16 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 forge_checklist.build_task_checklist, plan_path, spec_path,
                 task.number,
             )
+            # citable_refs is wider than checklist: this task's coverage
+            # items plus the spec:<slug> id of every section its **Spec:**
+            # line names — a finding may cite a spec section it must never
+            # be asked to render coverage on (Contract checklist: covering
+            # and citing are different acts). Never raises "is empty" (no
+            # skip semantics needed — validate_contract_refs already treats
+            # a falsy citable set as nothing to check).
+            citable = forge_checklist.citable_refs(
+                plan_path, spec_path, task.number,
+            )
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
             # separate reviewer (constraint: discovery-review-is-cold);
@@ -805,6 +833,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
+                    spec_path=spec_path,
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
@@ -831,7 +860,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             verdict, coverage_retry = _review_with_coverage(
                 _reviewer_dispatch_call,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
-                review_kind=packet_review_kind,
+                review_kind=packet_review_kind, citable=citable,
             )
             review_attempts += 1
             run_diff_text = _git_diff(cwd, run_base) if run_base else None
@@ -1162,10 +1191,21 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
 
     checklist = None
     coverage_skipped = None
+    # The whole-plan citable set, computed ONCE and passed on every lap — the
+    # same treatment the per-task path gives `citable_refs` (see execute_task).
+    # It must not be re-derived from the packet's checklist: a verification
+    # lap's packet carries the REDUCED checklist, so falling back to it would
+    # reject a legitimate whole-plan ref (a `spec:<slug>`, or a `t<N>`
+    # integration item) no outstanding finding happened to name. It is also
+    # wider than the final checklist by every task's `t<N>.t<M>` id, so a
+    # seeded per-task finding replayed into the discovery packet can re-cite
+    # the test case it was raised against (final_citable_refs).
+    final_citable = None
     if plan_path is not None:
         checklist, coverage_skipped = _checklist_or_skip(
             forge_checklist.build_final_checklist, plan_path, spec_path,
         )
+        final_citable = forge_checklist.final_citable_refs(plan_path, spec_path)
 
     attempt = 0
     while True:
@@ -1295,7 +1335,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
             verdict, coverage_retry = _review_with_coverage(
                 _final_reviewer_dispatch_call,
                 packet_path, packet_checklist, run_dir, "final",
-                review_kind=packet_review_kind,
+                review_kind=packet_review_kind, citable=final_citable,
             )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run

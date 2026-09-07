@@ -252,6 +252,61 @@ def parse_spec_names(task_block):
     return [name.strip() for name in content.split(",") if name.strip()]
 
 
+NONE_TESTS_RE = re.compile(r'^none\b')
+BULLET_RE = re.compile(r'^-\s+(.*)$')
+
+
+def parse_test_cases(task_block):
+    """Parse a task's ``**Tests:**`` field into a list of test case names.
+
+    The only legal forms are the marker alone on its line followed by ``-``
+    bullets (one entry per bullet, in document order — the block ends at the
+    first blank line or the next ``**Field:**`` marker), or
+    ``**Tests:** none — <reason>`` on a single line. Returns ``[]`` when the
+    field is absent or is the ``none`` form. Raise on the inline joined form
+    (a test description is prose that may itself contain ``;``, so splitting
+    on one would guess intent) and on a marker followed by neither bullets
+    nor ``none`` — both are malformed, and a silently empty list would be
+    indistinguishable from "no field at all". Fence-masked like
+    ``parse_spec_names``.
+    """
+    lines = task_block.splitlines()
+    mask = fence_mask(lines)
+    idx = next(
+        (
+            i
+            for i, ln in enumerate(lines)
+            if not mask[i] and ln.startswith("**Tests:**")
+        ),
+        None,
+    )
+    if idx is None:
+        return []
+    content = lines[idx][len("**Tests:**"):].strip()
+    if content:
+        if NONE_TESTS_RE.match(content):
+            return []
+        raise RuntimeError(
+            "**Tests:** must be the marker alone on its line followed by "
+            "'-' bullets, or 'none — <reason>' on one line — inline joined "
+            f"cases are not legal; found: {lines[idx]!r}"
+        )
+    cases = []
+    for j in range(idx + 1, len(lines)):
+        line = lines[j]
+        if line.strip() == "" or FIELD_LINE_RE.match(line):
+            break
+        m = BULLET_RE.match(line)
+        if not m:
+            break
+        cases.append(m.group(1).strip())
+    if not cases:
+        raise RuntimeError(
+            f"**Tests:** is declared but lists no '-' bullets: {lines[idx]!r}"
+        )
+    return cases
+
+
 def strip_heading_text(text):
     """Drop a leading numbering token (e.g. '1.', '2.3') before prefix matching."""
     return re.sub(r'^\d+(\.\d+)*\.?\s+', '', text).strip()

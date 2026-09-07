@@ -206,6 +206,20 @@ class BuildVerificationPacketTests(unittest.TestCase):
         # only the delta's own file appears.
         self.assertNotIn("b/unrelated-plan-file.py", packet)
 
+    def test_unaffected_by_spec_context_task_8(self):
+        # Task 8 (Contract checklist: spec context) adds spec_sections to
+        # build_packet only — a resumed reviewer already holds the spec in
+        # session, so a verification packet never renders a '## Spec context'
+        # section. Asserted as absent OUTPUT, not as a rejected parameter: a
+        # test that requires TypeError on an unexpected kwarg fails the day
+        # someone legitimately adds one, which is a change about this
+        # function's signature, not about what a verification packet contains.
+        packet = rp.build_verification_packet(
+            self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n",
+            self._checklist()[:1],
+        )
+        self.assertNotIn("## Spec context", packet)
+
     def test_checklist_none_omits_section(self):
         packet = rp.build_verification_packet(
             self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n", None

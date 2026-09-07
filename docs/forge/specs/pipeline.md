@@ -173,6 +173,23 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   single line of bare comma-separated heading names — no parentheticals, no `;`, no
   wrapping — and one spec file per task, since `--spec` takes one. Wrapped or
   parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
+- **`**Tests:**`** lists the task's test cases by behavior, descriptions not code
+  ("rejects empty email", "retries 3 times then throws"). Exactly one form is legal: the
+  marker alone on its line, followed by one `-` bullet per case, the block ending at the
+  first blank line or next `**Field:**`. `**Tests:** none — <reason>` on a single line is
+  the legal empty form. The inline joined form (`**Tests:** a; b; c`) is **rejected**, not
+  silently accepted: a test description is prose and may itself contain a `;`, so
+  splitting on one guesses whether "rejects empty email; rejects a malformed domain" is
+  one case or two — the guess `parsers-fail-loud` exists to forbid. It is **machine-read**:
+  each case becomes a `t<N>.t<M>` item on that task's contract checklist (`execution`
+  spec), so it is contract text, not commentary, and plan lint checks the grammar. A
+  malformed block raises at extraction rather than yielding silently zero items.
+
+  This field drifted for as long as nothing read it — four plans in this repo use both
+  forms *within one document*. Every other plan field is lint-checked and none of them
+  drifted; a field authored like a contract and validated like prose is the whole
+  explanation. Historical plans are not migrated: a completed plan is never re-executed,
+  and lint runs on the plan about to run.
 - **Decomposition** minimizes dependency chains: wall-clock is the critical path, not
   task count — prefer decompositions that share interfaces over ones that impose
   sequence.
@@ -264,6 +281,9 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-06: `**Tests:**` is bulleted-form only; the inline `;`-joined form is rejected and lint-checked (#60)
+2026-09-06: amended by [execution] — `**Tests:**` is machine-read plan grammar, one `t<N>.t<M>` checklist item per case (#60)
 
 2026-09-05: consolidated from three dated specs — phase1 pipeline-skill-edits, phase2 execution-efficiency, living-specs (#47)
 2026-09-05: deliberate exception to newest-is-anchor — living-specs (2026-09-05) is the newest source but covers only the spec-document convention, so phase2 execution-efficiency (2026-07-02) supplies the spine and living-specs contributes the Spec documents section; its Self-migration section is dropped, having been performed by this merge (#47)
