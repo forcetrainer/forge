@@ -23,7 +23,8 @@ CLAUDE_HOOKS_MANIFEST = HOOKS_DIR / "hooks.json"
 CODEX_HOOKS_MANIFEST = HOOKS_DIR / "codex-hooks.json"
 
 KEBAB_CASE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Releases may carry a prerelease suffix — the beta channel ships 0.12.1-beta.
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 
 
 def _load_json(path):
