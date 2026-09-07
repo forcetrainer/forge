@@ -71,7 +71,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
                     autofix="auto", state_path=None, checklist_path=None,
-                    citable_path=None):
+                    citable_path=None, approved=None):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
@@ -85,6 +85,8 @@ class ForgeDisposeCLITests(unittest.TestCase):
             args += ["--checklist", checklist_path]
         if citable_path:
             args += ["--citable", citable_path]
+        for approved_id in approved or []:
+            args += ["--approved", approved_id]
         return args
 
     # --- quadrant / decision.json shape -------------------------------------
@@ -418,6 +420,64 @@ class ForgeDisposeCLITests(unittest.TestCase):
             )
         self.assertEqual(decision["action"], "halt")
         self.assertEqual(decision["halt_reason"], "backstop")
+
+    # --- approved-finding exemption (--approved) -------------------------------
+
+    def test_approved_finding_exempt_from_scope_decision(self):
+        v = self._write_json("va1.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "race condition",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": "AC-2",
+             "repair_task": {"title": "fix race", "files": ["src.txt"],
+                              "spec": "x", "tests": [], "acceptance": [],
+                              "tier": "standard"}},
+        ]})
+        result = self.run_dispose(self._base_args(v, approved=["f1"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "pass")
+        self.assertIsNone(decision["halt_reason"])
+
+    def test_repeated_approved_flags_all_exempt(self):
+        v = self._write_json("va2.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "race condition",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": "AC-2",
+             "repair_task": {"title": "fix race", "files": ["src.txt"],
+                              "spec": "x", "tests": [], "acceptance": [],
+                              "tier": "standard"}},
+            {"id": "f2", "summary": "another pre-existing issue",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": "AC-3",
+             "repair_task": {"title": "fix other", "files": ["src.txt"],
+                              "spec": "x", "tests": [], "acceptance": [],
+                              "tier": "standard"}},
+        ]})
+        result = self.run_dispose(self._base_args(v, approved=["f1", "f2"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "pass")
+
+    def test_unapproved_finding_still_halts_with_other_approved(self):
+        v = self._write_json("va3.json", {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "race condition",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": "AC-2",
+             "repair_task": {"title": "fix race", "files": ["src.txt"],
+                              "spec": "x", "tests": [], "acceptance": [],
+                              "tier": "standard"}},
+            {"id": "f2", "summary": "another pre-existing issue",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": "AC-3",
+             "repair_task": {"title": "fix other", "files": ["src.txt"],
+                              "spec": "x", "tests": [], "acceptance": [],
+                              "tier": "standard"}},
+        ]})
+        result = self.run_dispose(self._base_args(v, approved=["f1"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "halt")
+        self.assertEqual(decision["halt_reason"], "scope-decision")
 
     # --- autofix gate ---------------------------------------------------------
 

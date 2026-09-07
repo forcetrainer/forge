@@ -224,6 +224,78 @@ class ConvergenceDecisionTests(unittest.TestCase):
             ("halt", "gate"),
         )
 
+    # --- approved-finding exemption (Task 3) --------------------------------
+
+    def test_approved_halt_finding_falls_through_to_remaining_rules(self):
+        # h1 is approved -> step 2 no longer halts on it; with no fix findings
+        # and acceptance green, the decision falls through to pass.
+        state = forge_run.ConvergenceState()
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_halt("h1")], state, True, 1, "auto", approved_ids={"h1"}),
+            ("pass", None),
+        )
+
+    def test_non_approved_halt_finding_still_halts_when_another_is_approved(self):
+        state = forge_run.ConvergenceState()
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_halt("h1"), _halt("h2")], state, True, 1, "auto",
+                approved_ids={"h1"}),
+            ("halt", "scope-decision"),
+        )
+
+    def test_approved_finding_still_trips_regression_on_reappearance(self):
+        # h1 was approved and its canonical id landed in the runner's resolved
+        # set from a prior attempt; it reappears now -> regression still fires,
+        # even though it is exempt from the scope-decision rule.
+        state = forge_run.ConvergenceState()
+        forge_run.advance_state(state, [_fix("h1")], True)
+        forge_run.advance_state(state, [_fix("f2")], True)
+        self.assertIn("h1", state.resolved_ids)
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_halt("h1")], state, True, 3, "auto", approved_ids={"h1"}),
+            ("halt", "regression"),
+        )
+
+    def test_approval_matches_canonical_id_via_carried_from(self):
+        # h1 is approved; the reviewer re-issues it under a new id h2 pointing
+        # carried_from back at h1 -> still exempt.
+        state = forge_run.ConvergenceState()
+        reissued = forge_common.Finding(
+            id="h2", summary="scope", file="foo.py", lines="99",
+            provenance="pre-existing", impact="contract-breaking",
+            contract_ref="AC2", carried_from="h1", disposition="halt",
+        )
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [reissued], state, True, 1, "auto", approved_ids={"h1"}),
+            ("pass", None),
+        )
+
+    def test_gate_mode_still_halts_on_approved_finding(self):
+        # Gate mode (step 1) precedes the approval exemption (step 2) — an
+        # approved finding still halts under --gate.
+        state = forge_run.ConvergenceState()
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_halt("h1")], state, True, 1, "gate", approved_ids={"h1"}),
+            ("halt", "gate"),
+        )
+
+    def test_empty_approved_ids_reproduces_existing_behavior(self):
+        state = forge_run.ConvergenceState()
+        self.assertEqual(
+            forge_run.convergence_decision([_halt("h1")], state, True, 1, "auto"),
+            ("halt", "scope-decision"),
+        )
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_halt("h1")], state, True, 1, "auto", approved_ids=frozenset()),
+            ("halt", "scope-decision"),
+        )
+
 
 class AdvanceStateTests(unittest.TestCase):
     """advance_state folds one attempt into the convergence state: authoritative

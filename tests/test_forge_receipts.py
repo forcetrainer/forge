@@ -12,6 +12,7 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 import forge_common
+import forge_receipts
 
 
 class WriteRunJsonProgressTests(unittest.TestCase):
@@ -46,7 +47,7 @@ class WriteRunJsonProgressTests(unittest.TestCase):
             data = json.load(f)
         for k in (
             "current_task", "current_phase", "started_at", "updated_at", "pid",
-            "deferrals", "autofix_mode", "doc_sync", "seeded_findings",
+            "deferrals", "autofix_mode", "doc_sync", "seeded_findings", "halt",
         ):
             self.assertNotIn(k, data)
 
@@ -93,6 +94,64 @@ class WriteRunJsonProgressTests(unittest.TestCase):
         self.assertIn("/abs/scripts/forge-monitor.py", content)
         self.assertIn("--follow", content)
         self.assertTrue(os.access(p, os.X_OK))
+
+
+class HaltRecordTests(unittest.TestCase):
+    def _dir(self):
+        d = tempfile.mkdtemp(prefix="forge-runjson-halt-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _halt(self):
+        return {
+            "task": 3, "attempt": 2, "freeze_commit": "deadbeef",
+            "freeze_base": "cafef00d",
+            "convergence_state": {"laps": 1, "history": []},
+            "halt_reason": "scope-decision",
+            "findings": [{"id": "f1", "summary": "needs a human call"}],
+            "repair_task": {"title": "fix f1"},
+            "approved": {"f1": "repair"},
+        }
+
+    def test_written_halt_round_trips_through_read_halt(self):
+        d = self._dir()
+        halt = self._halt()
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "running", [], "base", halt=halt,
+        )
+        self.assertEqual(forge_receipts._read_halt(d), halt)
+
+    def test_read_halt_none_for_missing_run_json(self):
+        d = self._dir()
+        self.assertIsNone(forge_receipts._read_halt(d))
+
+    def test_read_halt_none_when_run_json_has_no_halt_key(self):
+        d = self._dir()
+        forge_run.write_run_json(d, "/p/plan.md", "/p/spec.md", "running", [], "base")
+        self.assertIsNone(forge_receipts._read_halt(d))
+
+    def test_read_halt_raises_naming_file_on_malformed_json(self):
+        d = self._dir()
+        path = os.path.join(d, "run.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not valid json")
+        with self.assertRaises(RuntimeError) as cm:
+            forge_receipts._read_halt(d)
+        self.assertIn(path, str(cm.exception))
+
+    def test_later_write_run_json_with_halt_none_clears_prior_record(self):
+        d = self._dir()
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "running", [], "base", halt=self._halt(),
+        )
+        self.assertIsNotNone(forge_receipts._read_halt(d))
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "running", [], "base", halt=None,
+        )
+        self.assertIsNone(forge_receipts._read_halt(d))
+        with open(os.path.join(d, "run.json")) as f:
+            data = json.load(f)
+        self.assertNotIn("halt", data)
 
 
 class WriteFinalReviewReceiptTests(unittest.TestCase):

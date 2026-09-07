@@ -10,7 +10,7 @@ import json
 import os
 import re
 
-from forge_common import verdict_to_dict
+from forge_common import eb, verdict_to_dict
 
 
 def utc_iso():
@@ -118,11 +118,37 @@ def _read_deferrals(run_dir):
         return None
 
 
+def _read_halt(run_dir):
+    """The ``halt`` record from an existing ``run.json`` (used on resume to
+    continue a frozen task against the human's fix rather than restarting
+    into the same halt), or ``None`` when there is no prior run.json or its
+    ``halt`` key is absent.
+
+    Unlike its siblings (``_read_base_commit`` and friends), a run.json that
+    exists but fails to parse is not treated as "no prior state" here: a halt
+    record is exactly what a scope-decision resume needs to proceed safely,
+    so silently returning ``None`` for corrupt JSON would resume into a fresh
+    task run against a frozen tree instead of surfacing the corruption. This
+    raises, naming the file, on malformed JSON (parsers-fail-loud); a missing
+    file is not malformed, so it still returns ``None``."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError("{}: malformed JSON ({})".format(path, e))
+    return data.get("halt")
+
+
 def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
-                   seeded_findings=None):
+                   seeded_findings=None, halt=None):
     """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
     ``started_at``/``updated_at``/``pid``) and the scope-autonomy fields
     (``deferrals``/``autofix_mode``/``doc_sync``/``seeded_findings``) are
@@ -142,7 +168,17 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     reset by the caller at the start of every invocation — never carried across
     a resume — so it is written whenever the caller passes even an empty dict
     (unlike the other optional fields, which omit on None: an empty ``threads``
-    on resume must overwrite a prior invocation's stale map, not be skipped)."""
+    on resume must overwrite a prior invocation's stale map, not be skipped).
+    ``halt`` is the scope-decision freeze record (Receipts and run state spec)
+    — task/attempt, the freeze commit and its base, the serialized convergence
+    state, the halt reason, the outstanding findings with their drafted
+    ``repair_task``, and the accumulated human-approved finding ids. Like
+    ``deferrals``/``seeded_findings`` it omits on None and is read back on
+    resume; unlike ``threads`` it is *not* forced onto every call, so a
+    resumed run's terminal write that passes ``halt=None`` after the human's
+    fix has been folded in correctly clears the record rather than preserving
+    it — each call rebuilds ``run.json`` from scratch, so omitting the key is
+    already sufficient to erase a prior invocation's value."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -165,6 +201,7 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
         ("autofix_mode", autofix_mode),
         ("doc_sync", doc_sync),
         ("seeded_findings", seeded_findings),
+        ("halt", halt),
     ):
         if value is not None:
             data[key] = value
@@ -280,6 +317,68 @@ def write_watch_launcher(cwd, monitor_path):
     except OSError:
         pass
     return path
+
+
+# A ledger annotation is exactly what `annotate_ledger` appends: ` — <status>`
+# on a task's checkbox line. One regex, used to write it and to take it back
+# off again, so the two can never drift.
+_LEDGER_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\]")
+_LEDGER_ANNOTATION_RE = re.compile(r"\s+—\s.*$")
+
+
+def strip_ledger_annotations(text):
+    """``text`` with the ledger annotation removed from every checkbox line
+    outside a fence — the inverse of ``annotate_ledger``, at text level.
+
+    Used to keep a halted task's ``escalated: ...`` annotation out of a cold
+    discovery reviewer's task block (``discovery-review-is-cold``: the
+    reviewer of a resumed task is never told the work was frozen). Fenced
+    lines are skipped for the same reason ``extract_task_block`` skips them:
+    a checkbox inside a fenced example is illustrative text, not a ledger
+    entry.
+
+    An em-dash suffix a human wrote on a checkbox line is removed too —
+    ``annotate_ledger`` already overwrites one on every annotation, so the
+    checkbox line's text after ``—`` is the runner's field, not the plan
+    author's."""
+    lines = text.splitlines(keepends=True)
+    mask = eb.fence_mask(lines)
+    for i, line in enumerate(lines):
+        if mask[i] or not _LEDGER_CHECKBOX_RE.match(line):
+            continue
+        nl = line[len(line.rstrip("\r\n")):]
+        lines[i] = _LEDGER_ANNOTATION_RE.sub("", line[: len(line) - len(nl)]) + nl
+    return "".join(lines)
+
+
+def strip_ledger_annotation(plan_path, task):
+    """Remove the ledger annotation from ``task``'s checkbox line in the plan
+    file, in place. Idempotent, and a no-op when the task has no checkbox line
+    or no annotation.
+
+    Called on resume once the freeze is replayed: the ``escalated: ...``
+    annotation is written before the freeze so it rides inside the freeze
+    commit (which is where the halt stays durably recorded next to the work
+    it paused), and `restore_freeze` replays it into the working tree along
+    with everything else. Left there it would reach the resumed task's cold
+    reviewer twice over — in the extracted task block and as a plan-file hunk
+    in the review diff — which is exactly the independence
+    ``discovery-review-is-cold`` exists to protect."""
+    if task.checkbox_line < 0:
+        return
+    with open(plan_path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines(keepends=True)
+    if task.checkbox_line >= len(lines):
+        return
+    raw = lines[task.checkbox_line]
+    nl = raw[len(raw.rstrip("\r\n")):]
+    body = raw[: len(raw) - len(nl)]
+    stripped = _LEDGER_ANNOTATION_RE.sub("", body)
+    if stripped == body:
+        return
+    lines[task.checkbox_line] = stripped + nl
+    with open(plan_path, "w", encoding="utf-8") as f:
+        f.write("".join(lines))
 
 
 def annotate_ledger(plan_path, task, status_line):

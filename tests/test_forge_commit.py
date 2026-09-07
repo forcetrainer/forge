@@ -12,6 +12,8 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 
+import forge_git
+
 
 class CommitDisciplineTests(unittest.TestCase):
     """Phase 5: the runner commits each passed task, refuses a dirty tree at
@@ -240,6 +242,61 @@ class CommitDisciplineTests(unittest.TestCase):
             forge_run._git_commit_task(self.d, task)
         self.assertIn("git add", str(cm.exception).lower())
 
+    def test_final_review_halt_freezes_its_fix_edits_and_leaves_tree_clean(self):
+        # A final-review halt that follows an applied fix dispatch leaves the
+        # fixer's edits in the tree. Nothing commits them (the `fix:
+        # final-review` commit only lands on a pass), so without a freeze the
+        # runner exits dirty and the very next invocation is refused by the
+        # clean-tree precondition — the state Halt resolution exists to
+        # remove ("no run ever accepts a dirty tree").
+        plan = self._plan(PLAN_COMMIT_STD)
+        self._init_repo()
+        f1 = os.path.join(self.d, "f1.txt")
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},                                    # task 1 worker
+            {"exit": 0, "msg": _pass_msg()},                           # task 1 review
+            {"exit": 0, "msg": _fix_findings_msg(                      # final a1 -> rework
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+            {"exit": 0, "msg": "", "append_file": f1,                  # fix dispatch edits
+             "append_text": "FINALFIXEDIT\n"},
+            {"exit": 0, "msg": _fix_findings_msg(                      # final a2 -> stuck
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self._git("status", "--porcelain").stdout.strip(), "")
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            data = json.load(f)
+        self.assertEqual(data["status"], "escalated-final-review")
+        halt = data.get("halt")
+        self.assertIsNotNone(halt)
+        self.assertEqual(halt.get("stage"), "final-review")
+        self.assertTrue(halt.get("freeze_commit"))
+        # The frozen commit holds the fixer's edits, off the mainline.
+        self.assertIn("FINALFIXEDIT",
+                      self._git("show", halt["freeze_commit"]).stdout)
+        self.assertNotIn("FINALFIXEDIT", self._git("show", "HEAD").stdout)
+
+    def test_reinvocation_after_a_final_review_halt_is_not_refused(self):
+        plan = self._plan(PLAN_COMMIT_STD)
+        self._init_repo()
+        f1 = os.path.join(self.d, "f1.txt")
+        res = self._run(plan, responses=[
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+            {"exit": 0, "msg": "", "append_file": f1,
+             "append_text": "FINALFIXEDIT\n"},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs work", contract_ref="t1")},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # Task 1 is already `passed`, so the resumed run re-enters the final
+        # review directly; it must not be refused before it starts.
+        res2 = self._run(plan, responses=[{"exit": 0, "msg": _pass_msg()}])
+        self.assertNotIn("working tree not clean", res2.stderr)
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+
     def test_snapshot_worktree_is_retired(self):
         # The stash-snapshot per-task base is replaced by the prior commit.
         self.assertFalse(hasattr(forge_run, "_snapshot_worktree"))
@@ -284,3 +341,274 @@ class UntrackedFilesReviewedTests(CommitDisciplineTests):
         self.assertNotIn("no changes vs", packet)
         # Commit discipline unchanged: the new file rides in the task commit.
         self.assertIn("brand_new.py", self._git("show", "--stat", "HEAD").stdout)
+
+
+class FreezeAttemptTests(unittest.TestCase):
+    """Task 1 (halt-resume): the freeze/restore primitives. A halted task's
+    in-progress attempt — tracked AND untracked non-ignored changes — is
+    captured as a commit parked off the mainline under a forge-owned ref, the
+    working tree returns to HEAD with nothing staged, and the frozen change is
+    replayed (or reported as conflicting) on resume."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-freeze-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+
+    def _git(self, *args, check=True):
+        return subprocess.run(
+            ["git", *args], cwd=self.d, check=check, capture_output=True, text=True
+        )
+
+    def _init_repo(self):
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("ignored.txt\n.forge/\n")
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+
+    def _write(self, name, text):
+        path = os.path.join(self.d, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def _head(self):
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
+    def _status(self):
+        return self._git("status", "--porcelain").stdout
+
+    def _ref(self):
+        return forge_git.freeze_ref_name("20260907T101954", 3)
+
+    def test_freeze_ref_name_shape(self):
+        self.assertEqual(
+            forge_git.freeze_ref_name("20260907T101954", 3),
+            "refs/forge/freeze/20260907T101954/task-3",
+        )
+
+    def test_freezes_tracked_modification_tree_clean_and_ref_resolves(self):
+        self._init_repo()
+        head = self._head()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        self.assertIsNotNone(sha)
+        # Working tree back at the checkpoint.
+        self.assertEqual(self._status(), "")
+        with open(os.path.join(self.d, "f1.txt")) as f:
+            self.assertEqual(f.read(), "base\n")
+        # The ref resolves to the captured commit, whose parent is HEAD and
+        # whose content is the frozen work.
+        self.assertEqual(
+            self._git("rev-parse", self._ref()).stdout.strip(), sha)
+        self.assertEqual(
+            self._git("rev-parse", sha + "^").stdout.strip(), head)
+        self.assertIn(
+            "in progress", self._git("show", sha + ":f1.txt").stdout)
+
+    def test_freezes_and_restores_an_untracked_new_file(self):
+        # `git stash create` never sees untracked files; a task built entirely
+        # from new files would freeze as empty. This is the case that exists.
+        self._init_repo()
+        self._write("brand_new.py", "def added():\n    return 1\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        self.assertIsNotNone(sha)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "brand_new.py")))
+        self.assertEqual(self._status(), "")
+        self.assertTrue(forge_git.restore_freeze(self.d, sha))
+        with open(os.path.join(self.d, "brand_new.py")) as f:
+            self.assertIn("def added():", f.read())
+
+    def test_gitignored_path_is_left_out_of_the_freeze(self):
+        self._init_repo()
+        self._write("f1.txt", "base\nchange\n")
+        self._write("ignored.txt", "secret\n")
+        os.makedirs(os.path.join(self.d, ".forge"))
+        self._write(os.path.join(".forge", "state.json"), "{}\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        names = self._git("show", "--name-only", "--format=", sha).stdout
+        self.assertIn("f1.txt", names)
+        self.assertNotIn("ignored.txt", names)
+        self.assertNotIn(".forge", names)
+        # The freeze never deletes an ignored path from the working tree.
+        self.assertTrue(os.path.exists(os.path.join(self.d, "ignored.txt")))
+        self.assertTrue(
+            os.path.exists(os.path.join(self.d, ".forge", "state.json")))
+
+    def test_index_left_unstaged_so_a_later_add_all_sweeps_nothing(self):
+        # The recorded prior failure: a `git add -A` capture left the attempt
+        # staged, and the next task's `git add -A && git commit` swept it in.
+        self._init_repo()
+        self._write("f1.txt", "base\nin progress\n")
+        self._write("brand_new.py", "x = 1\n")
+        forge_git.freeze_attempt(self.d, self._ref())
+        self.assertEqual(self._git("diff", "--cached", "--stat").stdout, "")
+        self._git("add", "-A")
+        commit = self._git("commit", "-m", "later", check=False)
+        self.assertNotEqual(commit.returncode, 0, commit.stdout)
+        self.assertIn("nothing to commit", commit.stdout + commit.stderr)
+
+    def test_returns_none_and_writes_no_ref_when_tree_equals_head(self):
+        self._init_repo()
+        self.assertIsNone(forge_git.freeze_attempt(self.d, self._ref()))
+        self.assertNotEqual(
+            self._git("rev-parse", "--verify", self._ref(), check=False).returncode, 0)
+
+    def test_does_not_move_head_or_the_branch_ref(self):
+        self._init_repo()
+        head = self._head()
+        branch = self._git("symbolic-ref", "HEAD").stdout.strip()
+        branch_sha = self._git("rev-parse", branch).stdout.strip()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        self.assertEqual(self._head(), head)
+        self.assertEqual(self._git("symbolic-ref", "HEAD").stdout.strip(), branch)
+        self.assertEqual(self._git("rev-parse", branch).stdout.strip(), branch_sha)
+        # The freeze is reachable only through its own ref.
+        self.assertNotIn(
+            sha, self._git("rev-list", branch).stdout.split())
+
+    def test_restores_onto_a_head_that_advanced_by_an_unrelated_commit(self):
+        self._init_repo()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        # The human fixes something unrelated and commits.
+        self._write("other.txt", "fix\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "human fix")
+        head = self._head()
+        self.assertTrue(forge_git.restore_freeze(self.d, sha))
+        with open(os.path.join(self.d, "f1.txt")) as f:
+            self.assertIn("in progress", f.read())
+        with open(os.path.join(self.d, "other.txt")) as f:
+            self.assertEqual(f.read(), "fix\n")
+        self.assertEqual(self._head(), head)
+
+    def test_conflicting_replay_returns_false_and_leaves_tree_clean(self):
+        self._init_repo()
+        self._write("f1.txt", "base\nfrozen version\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        # The human's fix rewrites the same lines.
+        self._write("f1.txt", "base\nhuman version\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "human fix on the same lines")
+        head = self._head()
+        self.assertFalse(forge_git.restore_freeze(self.d, sha))
+        self.assertEqual(self._status(), "")
+        self.assertEqual(self._head(), head)
+        with open(os.path.join(self.d, "f1.txt")) as f:
+            body = f.read()
+        self.assertIn("human version", body)
+        self.assertNotIn("<<<<<<<", body)
+
+    def test_freeze_diff_returns_patch_text_for_a_tracked_change(self):
+        self._init_repo()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        patch = forge_git.freeze_diff(self.d, sha)
+        self.assertIn("f1.txt", patch)
+        self.assertIn("+in progress", patch)
+
+    def test_freeze_diff_returns_patch_text_for_an_untracked_freeze(self):
+        self._init_repo()
+        self._write("brand_new.py", "def added():\n    return 1\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        patch = forge_git.freeze_diff(self.d, sha)
+        self.assertIn("+++ b/brand_new.py", patch)
+        self.assertIn("+def added():", patch)
+
+    def test_restore_freeze_raises_naming_the_sha_when_object_is_missing(self):
+        self._init_repo()
+        missing = "0" * 40
+        with self.assertRaises(RuntimeError) as cm:
+            forge_git.restore_freeze(self.d, missing)
+        self.assertIn(missing, str(cm.exception))
+
+    def test_freeze_diff_raises_naming_the_sha_when_object_is_missing(self):
+        self._init_repo()
+        missing = "0" * 40
+        with self.assertRaises(RuntimeError) as cm:
+            forge_git.freeze_diff(self.d, missing)
+        self.assertIn(missing, str(cm.exception))
+
+    def test_freeze_attempt_returns_none_outside_a_git_repo(self):
+        self._write("f1.txt", "loose\n")
+        self.assertIsNone(forge_git.freeze_attempt(self.d, self._ref()))
+
+    # --- Rework lap: diff-driver immunity and untracked nested repos --------
+
+    def _install_textconv_driver(self):
+        """A repo-local textconv driver on ``*.txt`` — the shape a real repo
+        gets from an LFS/binary-doc setup. Committed, so it is part of the
+        checkpoint rather than part of the frozen change."""
+        self._git("config", "diff.forgetest.textconv", "sed s/.*/CONVERTED/")
+        self._write(".gitattributes", "*.txt diff=forgetest\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "textconv driver")
+
+    def test_freeze_diff_is_immune_to_a_textconv_driver(self):
+        self._init_repo()
+        self._install_textconv_driver()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        patch = forge_git.freeze_diff(self.d, sha)
+        self.assertIn("+in progress", patch)
+        self.assertNotIn("CONVERTED", patch)
+
+    def test_freeze_diff_is_immune_to_an_external_diff_driver(self):
+        self._init_repo()
+        self._git("config", "diff.external", "sh -c 'echo EXTERNAL' --")
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        patch = forge_git.freeze_diff(self.d, sha)
+        self.assertIn("+in progress", patch)
+        self.assertNotIn("EXTERNAL", patch)
+
+    def test_restore_freeze_is_immune_to_a_textconv_driver(self):
+        # A converted patch does not apply, so a driver-configured repo would
+        # report a conflict that does not exist and discard the frozen work.
+        self._init_repo()
+        self._install_textconv_driver()
+        self._write("f1.txt", "base\nin progress\n")
+        sha = forge_git.freeze_attempt(self.d, self._ref())
+        self.assertTrue(forge_git.restore_freeze(self.d, sha))
+        with open(os.path.join(self.d, "f1.txt")) as f:
+            self.assertEqual(f.read(), "base\nin progress\n")
+
+    def test_untracked_nested_repo_raises_naming_the_path(self):
+        # `git add -A` records an untracked nested repo as a gitlink whose
+        # commit the outer store does not have, and `git clean -fd` will not
+        # remove it — the freeze would be unrestorable and the tree would not
+        # be back at HEAD. Both a nested repo with a commit and an unborn one.
+        for label, commit_inner in (("committed", True), ("unborn", False)):
+            with self.subTest(label):
+                self.setUp()
+                self._init_repo()
+                self._write("f1.txt", "base\nin progress\n")
+                nested = os.path.join(self.d, "nested")
+                os.makedirs(nested)
+                with open(os.path.join(nested, "a.txt"), "w") as f:
+                    f.write("inner\n")
+                for args in (("init",), ("config", "user.email", "t@example.com"),
+                             ("config", "user.name", "Test")):
+                    subprocess.run(["git", *args], cwd=nested, check=True,
+                                   capture_output=True, text=True)
+                if commit_inner:
+                    for args in (("add", "-A"), ("commit", "-m", "inner")):
+                        subprocess.run(["git", *args], cwd=nested, check=True,
+                                       capture_output=True, text=True)
+                with self.assertRaises(RuntimeError) as cm:
+                    forge_git.freeze_attempt(self.d, self._ref())
+                self.assertIn("nested", str(cm.exception))
+                # Nothing captured, nothing destroyed: no ref, the attempt is
+                # still in the tree, and the nested repo is untouched.
+                self.assertNotEqual(
+                    self._git("rev-parse", "--verify", self._ref(),
+                              check=False).returncode, 0)
+                with open(os.path.join(self.d, "f1.txt")) as f:
+                    self.assertIn("in progress", f.read())
+                self.assertTrue(os.path.exists(os.path.join(nested, "a.txt")))

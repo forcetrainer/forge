@@ -34,12 +34,20 @@ callers, so the two harnesses' rework/halt rules can't drift apart.
 
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> \
-  --run-dir .forge/runs/<name> --timeout 900 --autofix auto
+  --run-dir .forge/runs/<name> --timeout 900 --autofix auto \
+  [--resolve <finding-id>=repair|defer ...]
 ```
+
+**`--resolve <finding-id>=repair|defer`** (repeatable, resume-only): carries the human's
+resolution of a `scope-decision` halt's drafted `repair_task` into the re-invocation.
+`repair` means the human fixed it; `defer` files it for later. Either exempts that finding
+id from the `scope-decision` halt for the rest of the run. It applies only to
+`scope-decision` halts — an id from any other halt class, or an id the runner never
+raised, is a contract error naming it. The runner applies no fix of its own.
 
 **`--autofix auto|gate`** (chosen at the execution offer, alongside the disclosed tier routing; default `auto`): `auto` runs the fix/defer/halt disposition matrix (below) so the runner reworks its own in-diff, contract-breaking findings without stopping; `gate` is the conservative escape hatch — any reviewer finding halts, no auto-fix, matching pre-Phase-7 behavior. Disclose the chosen mode in the offer alongside tier routing.
 
-**Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. The runner never resets or stashes user work.
+**Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. This is not the halted-run path: every halt freezes before the runner exits and returns the tree to the last committed checkpoint — a task halt freezes the in-progress attempt, and a final-review or doc-sync halt freezes the uncommitted edits that stage was holding — so a resume finds a clean tree with no human git work required. The precondition still refuses a tree left dirty for an unrelated reason — no flag bypasses it. The runner never resets or stashes user work.
 
 **Plan lint (`run_plan`, right after the clean-tree check, before the run dir is created or anything dispatches):** `forge_lint.lint_plan(plan_path, spec_path)` validates the plan/spec against documented grammar only — task headings, `Tier:`, `Goal:`, `Spec:`, `Depends on:`, `Acceptance:`, `Tests:` grammar, every changed spec section claimed by some task, and checklist generation for every task and `--final` — and reports every defect in one run, not the first. Every defect line (`[error]`/`[warning]`) prints; any `error` raises a contract error (exit 1) naming the full list, before `run.json` exists. An empty checklist is a `warning` only — it never fails the run.
 
@@ -52,7 +60,7 @@ plan-checkbox ledger annotations. It reuses `extract-brief.py` and
 
 **The review diff includes untracked files.** Every diff the runner hands a reviewer or feeds the finding classifier — the per-task discovery packet, the repair delta on verification laps, the final-review packet and its fix loop, `forge_dispose.py`'s own recomputed diff, and the standalone `review-packet.py` CLI — comes from one helper, `review-packet.py`'s `git_diff(cwd, base)`: `git diff <base>` followed by a `git diff --no-index /dev/null <path>` new-file hunk for each untracked, non-ignored file (`git ls-files --others --exclude-standard`, so the gitignored `.forge/` never leaks in). Plain `git diff` never looks at untracked files, and the runner only stages a task's work in the commit *after* its review passes, so before 0.10.3 a task whose whole implementation was new files reviewed as "no changes" and a finding on a new file classified as pre-existing. The helper is read-only — nothing is staged, the index is never touched — so the single-commit discipline and `git stash create` snapshots are undisturbed. One consequence: the pre-repair snapshot cannot record untracked files, so a verification lap's delta shows every still-uncommitted new file the task has created, not only the ones this repair touched (DEFERRALS 2026-09-02).
 
-**Commit discipline:** after each task reaches `passed` and its ledger checkbox is annotated, the runner stages all changes and commits with message `forge: task N — <title>`. Nothing staged (e.g., uncommitted changes from a human pre-fix on resume) means the commit is skipped; no empty commits are created. The `.forge/` directory is never staged; the ledger annotation rides in the task's commit. Escalated tasks commit nothing — the rejected attempt stays uncommitted for the human to resolve. This establishes a clean checkpoint after every passed task, so HEAD is a reliable base for per-task review and resume.
+**Commit discipline:** after each task reaches `passed` and its ledger checkbox is annotated, the runner stages all changes and commits with message `forge: task N — <title>`. Nothing staged (e.g., uncommitted changes from a human pre-fix on resume) means the commit is skipped; no empty commits are created. The `.forge/` directory is never staged; the ledger annotation rides in the task's commit. A task that halts freezes instead: the in-progress attempt — untracked files included — is captured as a commit under a forge-owned ref off the mainline, never stacked on it, and the working tree returns to the last committed checkpoint. The two terminal stages freeze the same way when they halt: a final-review halt after an applied fix dispatch, and a doc-sync halt that had already edited, both leave edits nothing commits, so each is parked under `refs/forge/freeze/<run-id>/<stage>` and the tree returns to the checkpoint. A stage freeze is recoverable, not replayed — the stage re-runs from scratch on the committed diff. This establishes a clean checkpoint after every passed task and after every halt alike, so HEAD is a reliable base for per-task review and resume.
 
 **Orchestrator's role is reduced to four things:** invoke the runner, relay
 escalation receipts to the user verbatim, hold the human gates (execution
@@ -100,9 +108,14 @@ not summarizing, not softening, not attempting the fix itself.
 human has resolved the halt. The runner skips every task whose latest
 receipt status is `passed` and resumes at the escalated task. Since passed
 tasks are already committed, the clean working tree precondition at resume
-start is the normal state. If an escalated task was attempted but not passed,
-its uncommitted work must be committed (as a fix) or discarded by the human
-before re-invoking — the precondition enforces this.
+start is the normal state. The escalated task's frozen attempt is replayed
+onto current HEAD: if it applies cleanly, it is restored to the working tree
+and the worker's reconciliation brief carries the resolution delta —
+everything that changed while the task was paused — plus the resolved
+finding, and the worker decides whether to keep it, adjust it, or discard and
+rebuild. If it conflicts, it is not restored; the task restarts from the
+clean checkpoint with the frozen diff supplied as reference text alongside
+the resolution delta. The runner never resolves a conflict itself.
 
 If `--run-dir` was not specified on first invocation, it defaults to
 `.forge/runs/<timestamp>/` where the timestamp matches the run start time
@@ -117,10 +130,14 @@ is a human decision among:
   human-only escalation, never a default, and never `ultra` at any tier
   (prohibited everywhere because it spawns subagents inside the worker,
   breaking brief isolation);
-- fix the code directly, matching or accepting the halt's drafted
-  `repair_task` (a `scope-decision` halt only — the disposition matrix already
-  auto-defers harmless improvement findings, so anything reaching a human halt
-  is by construction a real pre-existing/contract-breaking call), then resume.
+- resolve the halt's drafted `repair_task` (a `scope-decision` halt only — the
+  disposition matrix already auto-defers harmless improvement findings, so
+  anything reaching a human halt is by construction a real
+  pre-existing/contract-breaking call): fix the code directly and pass
+  `--resolve <finding-id>=repair` on resume, or pass
+  `--resolve <finding-id>=defer` to file it for later instead — either exempts
+  that finding from the `scope-decision` halt for the rest of the run. The
+  runner applies no fix of its own.
 
 **Tier routing:** unchanged in substance from the pipelined path — trivial
 tasks skip reviewer dispatch (acceptance commands are the whole

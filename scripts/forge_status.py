@@ -251,6 +251,11 @@ def read_run_state(run_dir, now=None):
         "deferrals": (run.get("deferrals") if run else None) or [],
         "autofix_mode": run.get("autofix_mode") if run else None,
         "doc_sync": run.get("doc_sync") if run else None,
+        # The scope-decision freeze record (Halt resolution spec), passed
+        # through verbatim — this module reads run state, it never interprets
+        # a freeze. Absent (None) on every run that did not halt on one, and
+        # on old run.json shapes.
+        "halt": run.get("halt") if run else None,
     }
 
 
@@ -268,6 +273,16 @@ def render_status(state):
         if t["finding"]:
             line += " — " + t["finding"]
         lines.append(line)
+    halt = state.get("halt")
+    if halt:
+        # A frozen scope-decision halt is resumable: the paused attempt is
+        # parked under a forge-owned ref and the tree is clean, so the next
+        # invocation continues that task rather than refusing on a dirty tree
+        # (Halt resolution spec). The outstanding finding ids are named
+        # because they are exactly what the human passes back as
+        # `--resolve <id>=repair|defer`; already-approved ids are shown as
+        # resolved so a second resume does not re-answer them.
+        lines.extend(render_halt(halt))
     if state.get("deferrals"):
         # The terse one-liner is for a run still in progress. Once the run
         # is terminal, the full close-out review surface (untruncated
@@ -288,6 +303,77 @@ def render_status(state):
             summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
             lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
     return "\n".join(lines)
+
+
+def render_halt(halt):
+    """The resumable-halt block for `--status`: which task is frozen, the
+    freeze commit (or the fact that there was nothing to freeze), the
+    outstanding finding ids, and the `--resolve` form that answers them.
+
+    A stage-keyed record (``final-review`` / ``doc-sync``, no ``task``) gets
+    its own shorter block: the stage that halted and where its edits are
+    frozen. Nothing else applies to it — the stage re-runs from scratch
+    rather than replaying its freeze, and it holds no findings to resolve.
+
+    Rendered from the run.json ``halt`` record alone — no git, no receipts —
+    so a status check never touches the freeze it reports on. Finding ids,
+    not summaries, lead the outstanding line: the id is the handle
+    ``--resolve`` takes, and a summary that reads well is still unusable at
+    the CLI."""
+    stage = halt.get("stage")
+    if stage:
+        # A whole-run stage halt (`final-review` / `doc-sync`) freezes its
+        # uncommitted edits so the tree is clean, but the stage is NOT
+        # replayed — it re-runs from scratch against the committed diff — and
+        # it carries no findings the human answers with `--resolve`. So it
+        # gets its own two lines rather than the per-task wording, which
+        # would print "halted task None" and offer a command that cannot work.
+        freeze = halt.get("freeze_commit")
+        return [
+            "",
+            "halted in the {} stage".format(stage),
+            "  frozen edits: {}".format(freeze) if freeze
+            else "  frozen edits: (nothing to freeze — the stage made no "
+                 "change to the tree)",
+        ]
+    lines = ["", "halted task {} is resumable".format(halt.get("task"))]
+    freeze = halt.get("freeze_commit")
+    lines.append(
+        "  frozen attempt: {}".format(freeze) if freeze
+        else "  frozen attempt: (nothing to freeze — the task starts from the "
+             "checkpoint)"
+    )
+    approved = halt.get("approved") or {}
+    # Canonical id (``carried_from`` else ``id``) — the identity `run_plan`
+    # and `convergence_decision` both key on. Splitting on the raw id instead
+    # would list a re-issued finding the human already answered as still
+    # outstanding, and print a `--resolve` command naming an id the runner
+    # then rejects as unknown: a command that cannot work is worse than none.
+    outstanding = []
+    for f in halt.get("findings") or []:
+        canon = f.get("carried_from") or f.get("id", "?")
+        if canon not in approved:
+            outstanding.append(canon)
+    if outstanding:
+        lines.append("  outstanding findings: {}".format(", ".join(outstanding)))
+        # --resolve (and the approved-finding exemption it feeds) answers a
+        # scope question only `scope-decision` poses (Halt resolution); every
+        # other halt class freezes the same way but offers no such command —
+        # its resolution is the human action the halt reason names, not a
+        # canonical finding id.
+        if halt.get("halt_reason") == "scope-decision":
+            lines.append(
+                "  resume with: --resolve {}=repair|defer".format(
+                    "=repair|defer --resolve ".join(outstanding)
+                )
+            )
+    if approved:
+        lines.append(
+            "  already resolved: {}".format(
+                ", ".join("{}={}".format(k, v) for k, v in sorted(approved.items()))
+            )
+        )
+    return lines
 
 
 def deferral_provenance(plan, entry, run_json_path):
