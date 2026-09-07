@@ -223,29 +223,43 @@ setup.
 ## Resume
 
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
-  escalated/incomplete task. Receipts plus plan checkboxes are the resume state; there
-  is no other state store.
-- The clean-tree precondition holds on resume too. Passed tasks are already committed,
-  so a clean tree is the normal state; the first non-passed task re-runs with
-  base = HEAD = last passed commit. An escalated task's uncommitted attempt must be
-  committed as a fix or discarded by the human before resume — the precondition
-  enforces this.
+  escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
+  fields (`deferrals`, `seeded_findings`, `halt`) are the resume state.
+- The clean-tree precondition holds on resume too, **without exception**. Passed tasks
+  are already committed and a halted task's attempt is frozen under a forge-owned ref
+  off the mainline (`execution` spec, Halt resolution), so a clean tree is the normal
+  state at every
+  boundary; the first non-passed task re-runs with base = HEAD = last committed
+  checkpoint. The human is never asked to commit a half-finished attempt or discard it
+  to get past the precondition.
+- **`--resolve <finding-id>=repair|defer`** (repeatable) carries a human decision into a
+  resumed run after a terminal halt: `repair` dispatches the finding's drafted
+  `repair_task`, `defer` stages it as a deferral and proceeds. Either way the id is
+  exempt from further `scope-decision` halts this run and consumes no divert budget.
+  An id absent from the halt record raises naming it — never silently ignored.
+- Resuming a run whose recorded `freeze_commit` no longer exists (a rebase or reset
+  between invocations) raises naming the missing sha. Frozen work is never silently
+  discarded.
 
 ## Halt / escalation
 
 Two halt classes, distinguished by exit code:
 
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
-  outstanding findings; the orchestrator relays the receipt's contents to the user.
-  Which conditions escalate is the `execution` spec's halt taxonomy.
+  outstanding findings, plus the `halt` record that makes the run resumable; the
+  orchestrator relays the receipt's contents to the user. Which conditions escalate is
+  the `execution` spec's halt taxonomy. A `scope-decision` finding reaches this only
+  when it is terminal — budget spent, raised inside a repair dispatch, or `gate` mode;
+  otherwise the runner diverts and the run continues to its normal exit.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
   marked `contract-error` when the run dir exists, stderr-only when it does not.
 
 Either way the runner stops before the next task and never absorbs work inline.
-Resolution — amend the brief, re-tier, bump to `max`, defer — is a human decision
-before re-invocation.
+Resolution — amend the brief, re-tier, bump to `max`, defer, or `--resolve` an
+outstanding finding — is a human decision before re-invocation. A resumed run continues
+the halted task against its frozen commit rather than restarting the plan.
 
 ## Session awareness — foreground execution
 
@@ -484,6 +498,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-09-06: halted runs resume — a halted attempt is frozen in its own commit rather than left dirty, `run.json` gains the `halt` record, and `--resolve` carries a human decision back in; the clean-tree precondition now holds with no exception (#59)
 2026-09-05: consolidated from three dated specs — phase3 codex-dual-harness, codex-exec-runner, forge-run-monitor (#47)
 2026-09-05: dropped the runner spec's rework cap (`MAX_ATTEMPTS = 2`), its findings→rework→cap→escalate steps, and its single-shot final-review gate — superseded by the disposition matrix, convergence-based rework, the final-review fix loop and the doc-sync stage, all owned by the `execution` spec; the task loop keeps the Codex-mechanical half (brief, `codex exec` dispatch, acceptance, packet assembly, verdict capture) (#47)
 2026-09-05: dropped the runner spec's `--notify`/`fire_notify` and `UserPromptSubmit` hook — the push machinery was deleted on 2026-07-14 after live Codex testing (`osascript` blocked by the sandbox, the hook `exit 127` on every prompt) and survived only in that spec's changelog; Session awareness here states foreground execution and that no notify flag or hook exists (#47)
