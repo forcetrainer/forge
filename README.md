@@ -178,18 +178,21 @@ claude plugin install forge@forge
 
 To update later: `claude plugin update forge@forge`.
 
-**Channels.** One marketplace offers three, each pinned to a commit rather
+**Channels.** One marketplace offers two, each pinned to a commit rather
 than to whatever `main` happens to be:
 
 | plugin | what you get |
 | --- | --- |
 | `forge` | the current release — install this one |
 | `forge-beta` | the next version, feature-complete and being proven |
-| `forge-dev` | unreleased, tracks `main`. Expect breakage. |
 
 Install a different channel by name — `claude plugin install forge-beta@forge`.
 A channel moves only when its pin is updated, so `main` advancing never
-changes what you have installed. The current pre-release is
+changes what you have installed. A prerelease says so in its version
+(`0.12.1-beta`); the suffix goes away when the line is ready. To run `main`
+itself, add your own checkout as a marketplace — `claude plugin marketplace
+add /path/to/forge` — which follows the branch as a pinned channel never
+will. The current pre-release is
 [0.12.1-beta](https://github.com/forcetrainer/forge/releases/tag/forge--v0.12.1-beta),
 which adds the review contract and halted-run resume on top of the beta
 line's rework of project memory and specs; see its release notes for the
