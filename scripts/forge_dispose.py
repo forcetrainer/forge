@@ -632,7 +632,7 @@ def _is_execution_failure(findings):
 
 
 def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
-                         backstop=MAX_ATTEMPTS_BACKSTOP):
+                         backstop=MAX_ATTEMPTS_BACKSTOP, approved_ids=frozenset()):
     """Decide one attempt deterministically from the classified findings, the
     running state, acceptance, the attempt count, and the autofix mode. Returns
     ``(action, halt_reason)`` with ``action`` in {"pass", "rework", "halt"} and a
@@ -642,9 +642,14 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     1. ``gate`` mode + any reviewer finding -> halt/``gate`` (a transient
        execution failure is exempt: it carries no impact).
     2. any halt-disposition finding (pre-existing x contract-breaking) ->
-       halt/``scope-decision``.
+       halt/``scope-decision``. A finding whose canonical id (``_canon``) is in
+       ``approved_ids`` — a human resolution carried in from a prior halt (Halt
+       resolution) — is exempt from this step only; every other rule still sees
+       it.
     3. regression -> halt/``regression``: a runner-recorded resolved id reappears,
-       or acceptance went green->red since the prior attempt.
+       or acceptance went green->red since the prior attempt. This still fires on
+       an approved finding — the exemption is scoped to step 2 alone, so a claimed
+       fix that silently didn't take is still caught.
     4. stuck -> halt/``stuck``: a fix finding persists across two consecutive
        attempts with nothing resolved this round (net progress is otherwise not
        required — a round may resolve one finding and surface another).
@@ -654,7 +659,8 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     """
     if autofix_mode == "gate" and any(f.impact is not None for f in findings):
         return ("halt", "gate")
-    if any(f.disposition == "halt" for f in findings):
+    if any(f.disposition == "halt" and _canon(f) not in approved_ids
+           for f in findings):
         return ("halt", "scope-decision")
     reappeared = any(_canon(f) in state.resolved_ids for f in findings)
     green_to_red = state.prev_acceptance_ok is True and not acceptance_ok
@@ -794,6 +800,13 @@ def main(argv=None):
              "contract_ref outside this set is a defect. Omitted: contract_ref "
              "membership is not enforced.",
     )
+    parser.add_argument(
+        "--approved", action="append", default=[],
+        help="canonical id (carried_from else id) of a finding the human has "
+             "resolved (Halt resolution); repeatable. Exempts that finding from "
+             "the scope-decision halt for this attempt — regression (rule 3) "
+             "still applies to it. Omitted: no exemptions, today's behavior.",
+    )
     args = parser.parse_args(argv)
 
     if args.execution_failure and args.verdict:
@@ -911,7 +924,8 @@ def main(argv=None):
         return 1
 
     action, halt_reason = convergence_decision(
-        findings, state, acceptance_ok, args.attempt, args.autofix
+        findings, state, acceptance_ok, args.attempt, args.autofix,
+        approved_ids=frozenset(args.approved)
     )
     advance_state(state, findings, acceptance_ok)
 

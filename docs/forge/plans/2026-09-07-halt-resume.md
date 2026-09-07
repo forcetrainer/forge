@@ -82,7 +82,7 @@ def _read_halt(run_dir) -> dict | None
 **Depends on:** nothing.
 
 ### Task 3: Approved-finding exemption in convergence
-- [ ] Done
+- [x] Done — passed, 1 attempt(s)
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`convergence_decision` gains `approved_ids`; CLI gains `--approved`)
