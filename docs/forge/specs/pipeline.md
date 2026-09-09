@@ -43,7 +43,10 @@ graduates to a build; free-form ideation stays unprocessed.
   single-question only when the answer forks the design.
 - Design presentation: sections scaled to their complexity, a check-in after each with
   a decision digest — what was chosen, what it forecloses, what is assumed.
-- Self-review of the spec is fixed inline, no re-review.
+- Self-review of the spec is fixed inline, no re-review. Self-review is **not** the
+  gate — an author checking their own document is the control Spec review replaces.
+- Spec review (below) runs after self-review and before close-out. Planning does not
+  begin until it passes.
 - Close-out is a message, not a gate: "spec written to `<path>` and committed — flag
   changes, otherwise proceeding to planning." The sectioned walkthrough was the
   approval gate.
@@ -69,6 +72,48 @@ superseding document (constraint: `specs-amend-in-place`). `skills/brainstorming
 instructs amendment in place and the `<system>.md` form for a genuinely new system;
 `skills/planning/SKILL.md` and `skills/project-memory/SKILL.md` follow where they name
 spec paths. This convention binds every repo running forge, not only this one.
+
+### Spec review
+
+A **cold** reviewer validates the spec against the codebase before planning begins.
+Every other control examines work produced *from* the spec; this one examines the spec.
+
+**Two halves.** The mechanical half enumerates and never decides; the judgment half
+decides and is never the only check.
+
+**Reference table** (mechanical). Every backticked span is classified path-shaped
+(contains `/`, or an extension carried by some file in `git ls-files` — a derived
+set, never a hardcoded list), symbol-shaped (identifier, dotted name, or
+`name()`), or neither — flags, enum values and constraint ids are neither and are
+dropped, so the table is signal rather than noise. Each path/symbol reference resolves
+against the repo or does not. An unresolved reference is **legal**: a spec for a system
+not yet built names files that do not exist. The table is therefore a **checklist, not a
+rule** — it is not a sixth lint rule, and Lint's five stand.
+
+**The reviewer owes a disposition on every unresolved reference** — `intended-new`,
+`wrong`, or `unverifiable`, each with evidence. A missing disposition invalidates the
+verdict (schema: `execution` spec). This is what makes the mechanical half enforced
+rather than advisory: no claim the spec makes about the codebase can go unexamined.
+
+**Hunting list.** The reviewer's guidance is `skills/brainstorming/design-anti-patterns.md`,
+loaded by the `@design-anti-patterns.md` on-demand reference form, never inlined.
+**To change what the reviewer looks for, change that file.** It is the single tuning
+surface; no other file restates a Gate. Entries use the Trigger / Gate / Instead format
+of `testing-anti-patterns.md`. An entry enters on **two independent observations** — one
+incident does not mint a permanent rule. An entry backed by a required verdict field is
+marked as such: deleting a marked entry does not remove the field, and the two are
+checked to agree.
+
+**The author's requirements are stated separately** (Spec style, below) and are not the
+reviewer's hunting list. A reviewer hunting the author's checklist re-performs a presence
+check against a document written to satisfy it — the failure this gate exists to replace.
+
+**Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
+re-review after an amendment is a verification lap and may resume.
+
+**Amendments re-enter**, scoped to the changed sections plus their references, with the
+full document as context. The whole-document contradiction question is asked even in
+scoped mode — an amendment can contradict a section it did not touch.
 
 ### Frontmatter
 
@@ -138,7 +183,9 @@ acceptance criterion for a merge; it is a list a reviewer walks, not a judgment 
 
 ### Lint
 
-Five rules in `scripts/forge_lint.py`, applied to a living spec. No sixth.
+Five rules in `scripts/forge_lint.py`, applied to a living spec. No sixth. Spec
+review's reference table is not a rule and does not become one — an unresolved
+reference is legal and is adjudicated by the reviewer, not by lint.
 
 1. The filename carries no `YYYY-MM-DD` prefix.
 2. Frontmatter parses, and `system` equals the filename stem.
@@ -331,6 +378,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-09: spec review — a cold reviewer validates a spec against the codebase before planning, with a mechanical reference table it owes a disposition on and `design-anti-patterns.md` as its single tuning surface; self-review stays but is no longer the gate; amendments re-enter scoped to changed sections (#96)
 
 2026-09-09: field clause grammar's clause-block termination widens from `#`–`###` to any heading level (`#` through `######` at column 0), agreeing with `forge_plan._field_text`'s existing boundary — closes the gap where an h4+ heading and the prose beneath it were absorbed into the last clause (#87)
 
