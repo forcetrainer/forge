@@ -164,7 +164,8 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
 
 - **Header** carries `**Goal:**` (a single non-empty line) and a
   `**Global Constraints:**` block — version floors, dependency limits, naming rules —
-  omitted entirely when the plan has none. No empty block.
+  omitted entirely when the plan has none. No empty block. Its clauses follow the field
+  clause grammar below; each becomes a `g<N>` checklist item.
 - **Task heading** is `### Task N:` — three `#`, colon. The extraction scripts require
   it.
 - **`**Spec:**`** is an optional line after `**Files:**` naming the spec sections this
@@ -174,10 +175,9 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   wrapping — and one spec file per task, since `--spec` takes one. Wrapped or
   parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
 - **`**Tests:**`** lists the task's test cases by behavior, descriptions not code
-  ("rejects empty email", "retries 3 times then throws"). Exactly one form is legal: the
-  marker alone on its line, followed by one `-` bullet per case, the block ending at the
-  first blank line or next `**Field:**`. `**Tests:** none — <reason>` on a single line is
-  the legal empty form. The inline joined form (`**Tests:** a; b; c`) is **rejected**, not
+  ("rejects empty email", "retries 3 times then throws"). It follows the field clause
+  grammar below; `**Tests:** none — <reason>` on a single line is the legal empty form.
+  The inline joined form (`**Tests:** a; b; c`) is **rejected**, not
   silently accepted: a test description is prose and may itself contain a `;`, so
   splitting on one guesses whether "rejects empty email; rejects a malformed domain" is
   one case or two — the guess `parsers-fail-loud` exists to forbid. It is **machine-read**:
@@ -196,6 +196,33 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   behavior and asserts on what changed, not on words describing it. Prose artifacts —
   skills, docs, migrations — are the stated exception: nothing is executable, so
   mechanical text checks are the correct form (`testing-anti-patterns.md`).
+- **Field clause grammar** governs every machine-read multi-clause field —
+  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal:
+  the **marker alone** on its line followed by one `-` bullet per clause, the block ending
+  at the first blank line or next `**Field:**`; or the **marker with a value** on the same
+  line, which is exactly **one** clause — except `**Tests:** none — <reason>`, that field's
+  documented **zero**-clause form. A line inside a bulleted block not beginning with
+  `-` continues the preceding bullet, joined with a space — leading `-` starts a clause,
+  anything else continues one, so no line is ambiguous. Below the bullet level `;` and `.`
+  are literal: no separator has meaning inside a clause. `**Spec:**`'s single-line
+  comma-separated list is the documented exception and is unaffected.
+
+  Three lint **errors**, each a contract error: a marker alone followed by neither a bullet
+  nor a value; a single-line `**Acceptance:**` containing `;` outside inline code; a
+  single-line `**Global Constraints:**` that a period-plus-whitespace split would break
+  into more than one. The last two are **detectors, never splitters** — a line that looks
+  multi-clause is refused, never silently folded into one. The alternative, accepting it
+  quietly, is the defect this grammar replaces: a bulleted `**Acceptance:**` block used to
+  collapse into a single checklist item, so a reviewer owed one `coverage` verdict for
+  every command in it (#87).
+
+  An acceptance clause that is **solely** an inline-code command is dropped from the
+  checklist — the acceptance runner executes it deterministically, so it is dead checklist
+  weight. The rule is per clause, and commands are read from inline-code spans regardless
+  of form, so it is independent of clause structure.
+
+  Historical plans are not migrated, per the same rule the `**Tests:**` drift set: a
+  completed plan is never re-executed, and lint runs on the plan about to run.
 - **Decomposition** minimizes dependency chains: wall-clock is the critical path, not
   task count — prefer decompositions that share interfaces over ones that impose
   sequence.
@@ -303,6 +330,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-09: one field clause grammar for `**Tests:**`, `**Acceptance:**` and `**Global Constraints:**` — marker-alone-plus-bullets or a single-line one-clause value, `;` and `.` literal below the bullet; three lint errors, the two ambiguity checks being detectors rather than splitters; no migration (#87)
 
 2026-09-09: `testing-anti-patterns.md` gets its own contract — ≤600 words, falsifiability principle, five trigger/gate/instead entries, no code or framework names; the TDD pointer fires on three named moments; `**Acceptance:**` gains a Plan documents bullet carrying the environment-gated-skip rule (previously unspec'd) and execute-don't-substring (#85)
 
