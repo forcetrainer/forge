@@ -6,15 +6,19 @@ reuses forge_common, but the test loads it the same way the other
 scripts/*.py suites do).
 """
 import importlib.util
+import json
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 REPO_ROOT = SCRIPTS_DIR.parent
+SCRIPT = str(SCRIPTS_DIR / "forge_docreview.py")
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import forge_docreview as d  # noqa: E402
@@ -514,6 +518,249 @@ class DisposeTests(unittest.TestCase):
         self.assertEqual(disp.amend, [])
         self.assertEqual(len(disp.surface), 1)
         self.assertEqual(disp.surface[0]["kind"], "contradiction")
+
+
+# --- packet build and CLI (Task 3) ------------------------------------------
+
+# Built with NO_SUCH_SYMBOL (never a contiguous literal — see that constant's
+# comment) so this fixture's unresolved symbol reference stays unresolved
+# even once this test file's own bytes are searched by `git grep -F`.
+SPEC_FIXTURE = (
+    "# Fixture spec\n"
+    "\n"
+    "### Alpha section\n"
+    "\n"
+    "Alpha references `scripts/forge_common.py` and calls "
+    "`" + NO_SUCH_SYMBOL + "`.\n"
+    "\n"
+    "### Beta section\n"
+    "\n"
+    "Beta references `scripts/does_not_exist_at_all.py`.\n"
+)
+
+
+class BuildPacketTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-docreview-packet-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_FIXTURE)
+
+    def test_unscoped_packet_contains_whole_spec(self):
+        packet = d.build_packet(self.spec_path)
+        self.assertIn("Alpha references", packet)
+        self.assertIn("Beta references", packet)
+
+    def test_scoped_packet_contains_named_section_and_full_document(self):
+        packet = d.build_packet(self.spec_path, sections=["Alpha section"])
+        self.assertIn("Alpha references", packet)
+        # the full document still rides along as context even though only
+        # Alpha was named.
+        self.assertIn("Beta references", packet)
+
+    def test_scoped_packet_states_contradiction_applies_to_whole_document(self):
+        packet = d.build_packet(self.spec_path, sections=["Alpha section"])
+        self.assertIn("regardless of scope", packet.lower())
+
+    def test_packet_references_anti_patterns_doc_by_path_without_inlining(self):
+        packet = d.build_packet(self.spec_path)
+        self.assertIn("skills/brainstorming/design-anti-patterns.md", packet)
+        self.assertNotIn("Gate:", packet)
+        self.assertNotIn("Trigger:", packet)
+        self.assertNotIn("Instead:", packet)
+
+    def test_packet_lists_every_unresolved_reference(self):
+        packet = d.build_packet(self.spec_path)
+        self.assertIn(NO_SUCH_SYMBOL, packet)
+        self.assertIn("scripts/does_not_exist_at_all.py", packet)
+
+    def test_packet_states_required_verdict_fields(self):
+        packet = d.build_packet(self.spec_path)
+        self.assertIn("disposition", packet)
+        self.assertIn("evidence", packet)
+        self.assertIn("intended-new", packet)
+        self.assertIn("unverifiable", packet)
+        self.assertIn("replaced_system", packet)
+        self.assertIn("dependencies_read", packet)
+
+
+class DocreviewCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-docreview-cli-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_FIXTURE)
+
+    def run_cli(self, args):
+        return subprocess.run(
+            [sys.executable, SCRIPT] + args,
+            capture_output=True, text=True,
+        )
+
+    def test_cli_without_verdict_emits_packet_and_exits_zero(self):
+        result = self.run_cli(["--spec", self.spec_path])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Alpha references", result.stdout)
+
+    def test_cli_with_valid_verdict_writes_decision_file_and_exits_zero(self):
+        verdict = {
+            "references": [
+                {
+                    "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
+                    "evidence": "checked, not found",
+                },
+                {
+                    "ref": "scripts/does_not_exist_at_all.py",
+                    "disposition": "intended-new", "evidence": "not yet built",
+                },
+            ],
+            "dependencies_read": [],
+            "dependencies_waiver": "nothing relevant read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": [],
+        }
+        verdict_path = os.path.join(self.tmp, "verdict.json")
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump(verdict, f)
+        out_path = os.path.join(self.tmp, "decision.json")
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT), "--out", out_path,
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out_path, "r", encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertTrue(decision["valid"])
+        self.assertEqual(decision["defects"], [])
+        self.assertIn("amend", decision)
+        self.assertIn("surface", decision)
+
+    def test_cli_with_invalid_verdict_exits_nonzero_and_names_defect(self):
+        verdict = {
+            "references": [],
+            "dependencies_read": [],
+            "dependencies_waiver": "nothing relevant read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": [],
+        }
+        verdict_path = os.path.join(self.tmp, "verdict_bad.json")
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump(verdict, f)
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(NO_SUCH_SYMBOL, result.stderr)
+
+    def test_cli_with_missing_spec_exits_nonzero_naming_path(self):
+        missing_path = os.path.join(self.tmp, "does-not-exist.md")
+        result = self.run_cli(["--spec", missing_path])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(missing_path, result.stderr)
+
+    # --- t3-1: a structurally non-object verdict must name the cause and
+    # exit non-zero, never crash with an uncaught traceback (parsers-fail-
+    # loud is enforced at this CLI boundary since validate_verdict itself
+    # deliberately never raises).
+
+    def _verdict_path(self, value):
+        path = os.path.join(self.tmp, "verdict_shape.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(value, f)
+        return path
+
+    def test_cli_with_list_verdict_exits_nonzero_naming_cause(self):
+        verdict_path = self._verdict_path([])
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(verdict_path, result.stderr)
+
+    def test_cli_with_string_verdict_exits_nonzero_naming_cause(self):
+        verdict_path = self._verdict_path("a string")
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(verdict_path, result.stderr)
+
+    def test_cli_with_null_verdict_exits_nonzero_naming_cause(self):
+        verdict_path = self._verdict_path(None)
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(verdict_path, result.stderr)
+
+    def test_cli_with_number_verdict_exits_nonzero_naming_cause(self):
+        verdict_path = self._verdict_path(42)
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(verdict_path, result.stderr)
+
+    def test_cli_with_boolean_verdict_exits_nonzero_naming_cause(self):
+        verdict_path = self._verdict_path(True)
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(verdict_path, result.stderr)
+
+    # --- t3-2: an unwritable --out must name the cause and exit non-zero on
+    # both the packet-emit path (no --verdict) and the decision-write path
+    # (with --verdict), never crash with an uncaught traceback.
+
+    def test_cli_packet_emit_with_unwritable_out_exits_nonzero_naming_cause(self):
+        bad_out = os.path.join(self.tmp, "no-such-dir", "o.txt")
+        result = self.run_cli(["--spec", self.spec_path, "--out", bad_out])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(bad_out, result.stderr)
+
+    def test_cli_decision_write_with_unwritable_out_exits_nonzero_naming_cause(self):
+        verdict = {
+            "references": [
+                {
+                    "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
+                    "evidence": "checked, not found",
+                },
+                {
+                    "ref": "scripts/does_not_exist_at_all.py",
+                    "disposition": "intended-new", "evidence": "not yet built",
+                },
+            ],
+            "dependencies_read": [],
+            "dependencies_waiver": "nothing relevant read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": [],
+        }
+        verdict_path = os.path.join(self.tmp, "verdict_valid.json")
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump(verdict, f)
+        bad_out = os.path.join(self.tmp, "no-such-dir", "decision.json")
+        result = self.run_cli([
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT), "--out", bad_out,
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(bad_out, result.stderr)
 
 
 if __name__ == "__main__":

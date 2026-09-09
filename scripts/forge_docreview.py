@@ -15,9 +15,12 @@ review contract (spec: `execution` "Document review contract"), separate from
 the diff-shaped reviewer verdict contract `forge_dispose.py` validates — a
 document review has no diff, so this schema is its own.
 """
+import argparse
+import json
 import os
 import re
 import subprocess
+import sys
 import unicodedata
 from dataclasses import dataclass
 
@@ -454,3 +457,252 @@ def dispose(findings, repo_root):
         else:
             surface.append(finding)
     return Disposition(amend=amend, surface=surface)
+
+
+# --- packet build (spec: Spec review, reviewer packet) -----------------------
+
+
+_ANTI_PATTERNS_DOC = "skills/brainstorming/design-anti-patterns.md"
+
+
+def _required_verdict_fields_text():
+    """The required-field list rendered from the same declared schema
+    ``validate_verdict`` checks against (``_REQUIRED_FIELDS_SCHEMA``) plus the
+    enums and structural rules that schema alone doesn't capture — one
+    source, so a schema change (e.g. a new required field) shows up here
+    with no separate prose to keep in sync."""
+    lines = []
+    for entry_type, schema in _REQUIRED_FIELDS_SCHEMA.items():
+        fields = ", ".join("`{}`".format(f) for f in schema["fields"])
+        lines.append("- `{}[]` — each entry needs: {}".format(entry_type, fields))
+    lines.append(
+        "- `references[].disposition` — one of: {}".format(
+            ", ".join(sorted(_REFERENCE_DISPOSITIONS))
+        )
+    )
+    lines.append(
+        "- `findings[].kind` — one of: {}".format(
+            ", ".join(sorted(_FINDING_KINDS))
+        )
+    )
+    lines.append(
+        "- `dependencies_read` may be empty only when `dependencies_waiver` "
+        "is non-null."
+    )
+    lines.append(
+        "- `replaced_system.applies` (boolean) is required; when true, "
+        "`replaced_system.guarantees` must be non-empty, and when false it "
+        "must be empty."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _render_reference_table(table):
+    if not table:
+        return "(no path/symbol references)\n"
+    lines = []
+    for r in table:
+        state = "resolved at {}".format(r.found_at) if r.resolved else "unresolved"
+        lines.append("- `{}` ({}, {})".format(r.ref, r.shape, state))
+    return "\n".join(lines) + "\n"
+
+
+def _render_unresolved_list(unresolved):
+    if not unresolved:
+        return "(none)\n"
+    return "\n".join("- `{}`".format(r.ref) for r in unresolved) + "\n"
+
+
+def _scoped_reference_table(lines, sections):
+    """(scoped_sections, table) for ``lines`` given ``sections`` (``None`` or
+    empty means unscoped): scoped means the table covers only the named
+    sections' own content (the disposition obligation an amendment actually
+    owes — spec: Spec review, "Amendments re-enter, scoped to the changed
+    sections plus their references"); unscoped means the whole document.
+    Shared by ``build_packet`` and the CLI's ``--verdict`` path so the
+    verdict is checked against exactly the reference set the packet
+    displayed, never a wider or narrower one."""
+    if sections:
+        scoped_sections = forge_common.eb.find_spec_sections(lines, sections)
+        table = reference_table(
+            "\n\n".join(content for _, content in scoped_sections)
+        )
+        return scoped_sections, table
+    return None, reference_table("".join(lines))
+
+
+def build_packet(spec_path, sections=None):
+    """Assemble the reviewer's packet as text (spec: Spec review).
+
+    Without ``sections``, the packet carries the whole spec. With
+    ``sections`` (an amendment re-entering, scoped to the changed sections
+    plus their references), the packet carries just the named sections' own
+    reference table — the disposition obligation an amendment actually
+    owes — while still carrying the *full* document as context, and states
+    that the whole-document contradiction question applies regardless of
+    scope: an amendment can contradict a section it never touched.
+
+    Raises (never returns a legal-negative) on a missing/unreadable spec or
+    an unresolvable/ambiguous section name — both `extract-brief.py`
+    failures this function propagates unchanged (constraint:
+    `parsers-fail-loud`).
+    """
+    lines = forge_common.eb.read_lines(spec_path)
+    full_text = "".join(lines)
+
+    scoped_sections, table = _scoped_reference_table(lines, sections)
+    unresolved = [r for r in table if not r.resolved]
+
+    parts = []
+    if scoped_sections is not None:
+        parts.append("# Scoped sections\n\n")
+        for _, content in scoped_sections:
+            parts.append(content.rstrip("\n") + "\n\n")
+        parts.append(
+            "The whole-document contradiction question applies regardless "
+            "of scope, to sections not named above as well — an amendment "
+            "can contradict a section it did not touch. The full document "
+            "follows as context.\n\n"
+        )
+        parts.append("# Full document (context)\n\n")
+        parts.append(full_text.rstrip("\n") + "\n\n")
+    else:
+        parts.append("# Spec\n\n")
+        parts.append(full_text.rstrip("\n") + "\n\n")
+
+    parts.append("# Hunting list\n\n")
+    parts.append(
+        "Reviewer guidance: @{doc} — load {doc} by reference. Its Trigger / "
+        "Gate / Instead entries are the single tuning surface for what "
+        "this review hunts; this packet never restates them.\n\n".format(
+            doc=_ANTI_PATTERNS_DOC
+        )
+    )
+
+    parts.append("# Reference table\n\n")
+    parts.append(_render_reference_table(table))
+    parts.append("\n")
+
+    parts.append("# Unresolved references requiring disposition\n\n")
+    parts.append(
+        "The reviewer owes a disposition — `intended-new`, `wrong`, or "
+        "`unverifiable`, each with evidence — on every reference below. A "
+        "missing disposition invalidates the verdict.\n\n"
+    )
+    parts.append(_render_unresolved_list(unresolved))
+    parts.append("\n")
+
+    parts.append("# Required verdict fields\n\n")
+    parts.append(_required_verdict_fields_text())
+
+    return "".join(parts)
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def _emit(text, out_path):
+    """Write ``text`` to ``out_path``, or print it, on both the packet-emit
+    and decision-write call sites — the single place either guards an
+    unwritable ``--out`` (missing directory, permissions, ...): a legal-
+    negative-shaped failure named on stderr, never an uncaught OSError
+    (constraint: `parsers-fail-loud`, enforced at this CLI boundary since
+    everything upstream returns rather than raises). Returns ``True`` on
+    success, ``False`` on a reported failure — the caller's cue to exit
+    non-zero instead of returning 0."""
+    if not out_path:
+        print(text)
+        return True
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        print("error: cannot write to {}: {}".format(out_path, e), file=sys.stderr)
+        return False
+    return True
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="forge_docreview.py")
+    parser.add_argument("--spec", required=True)
+    parser.add_argument(
+        "--section", action="append", default=[],
+        help="repeatable; a named section scopes the packet's reference "
+             "table to that section (plus its own references) while the "
+             "full document still rides along as context. Omitted: the "
+             "whole document.",
+    )
+    parser.add_argument(
+        "--verdict",
+        help="path to the reviewer's verdict JSON; when given, validates "
+             "and disposes instead of emitting a packet.",
+    )
+    parser.add_argument("--repo-root", default=REPO_ROOT)
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+
+    try:
+        packet = build_packet(args.spec, sections=args.section or None)
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+
+    if not args.verdict:
+        return 0 if _emit(packet, args.out) else 1
+
+    try:
+        with open(args.verdict, "r", encoding="utf-8") as f:
+            verdict = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            "error: cannot read verdict file {}: {}".format(args.verdict, e),
+            file=sys.stderr,
+        )
+        return 1
+
+    # A verdict file can be valid JSON and still be the wrong shape (a list,
+    # a string, null, a number, a boolean) — legal-negative-shaped input,
+    # not a tool crash. validate_verdict/_collect_entries assume a dict
+    # (verdict.get(...)); everything downstream of this module deliberately
+    # returns defects rather than raising, so this CLI boundary is the only
+    # place a malformed shape can be turned into a named, non-zero exit
+    # instead of an uncaught AttributeError (constraint: `parsers-fail-loud`).
+    if not isinstance(verdict, dict):
+        print(
+            "error: verdict file {} does not contain a JSON object "
+            "(found {}): {!r}".format(
+                args.verdict, type(verdict).__name__, verdict
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    # The same reference set the packet displayed — scoped to --section when
+    # given, whole-document otherwise (`_scoped_reference_table`) — so the
+    # verdict is checked against exactly what the reviewer was asked to
+    # dispose of, never a wider or narrower set.
+    spec_lines = forge_common.eb.read_lines(args.spec)
+    _, table = _scoped_reference_table(spec_lines, args.section or None)
+    unresolved_refs = [r.ref for r in table if not r.resolved]
+
+    result = validate_verdict(verdict, unresolved_refs, args.repo_root)
+    disposition = dispose(result.findings, args.repo_root)
+    decision = {
+        "valid": result.valid,
+        "defects": result.defects,
+        "amend": disposition.amend,
+        "surface": disposition.surface,
+    }
+    if not _emit(json.dumps(decision, indent=2), args.out):
+        return 1
+    if not result.valid:
+        print(
+            "error: invalid verdict: " + "; ".join(result.defects),
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
