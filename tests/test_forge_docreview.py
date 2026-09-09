@@ -27,6 +27,9 @@ def _tracked_files():
     return [line for line in result.stdout.splitlines() if line]
 
 
+NO_SUCH_SYMBOL = "totallyNonexistent" + "SymbolXyz123"
+
+
 class ExtractReferencesTests(unittest.TestCase):
     def test_slash_span_is_path(self):
         refs = d.extract_references("See `scripts/forge_common.py` for details.")
@@ -61,7 +64,7 @@ class ExtractReferencesTests(unittest.TestCase):
         self.assertIsNotNone(refs[0].found_at)
 
     def test_identifier_absent_from_every_tracked_file_does_not_resolve(self):
-        refs = d.extract_references("Call `totallyNonexistentSymbolXyz123` here.")
+        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.")
         self.assertEqual(refs[0].shape, "symbol")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
@@ -145,7 +148,7 @@ class ReworkFindingsTests(unittest.TestCase):
     def test_git_grep_exit_1_is_legal_no_match(self):
         # Exit 1 (no match) must still be treated as a legal negative result,
         # not swept into the fatal-error path.
-        refs = d.extract_references("Call `totallyNonexistentSymbolXyz123` here.")
+        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
 
