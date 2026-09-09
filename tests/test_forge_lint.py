@@ -320,6 +320,81 @@ class ForgeLintTests(unittest.TestCase):
         errors = self._errors(defects)
         self.assertTrue(any(d.where == "task 1" and "Acceptance" in d.message for d in errors))
 
+    # --- field clause grammar (rules 1-3) --------------------------------
+
+    def test_acceptance_semicolon_outside_inline_code_named(self):
+        defects = self._lint(_base_plan(
+            task1_acceptance="**Acceptance:** `cmd1`; `cmd2`"
+        ))
+        errors = self._errors(defects)
+        self.assertTrue(any(
+            d.where.startswith("line") and ";" in d.message and "Acceptance" in d.message
+            for d in errors
+        ))
+
+    def test_acceptance_semicolon_inside_inline_code_legal(self):
+        defects = self._lint(_base_plan(
+            task1_acceptance='**Acceptance:** `python3 -c "import sys; sys.exit(0)"`'
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_global_constraints_two_sentences_named(self):
+        defects = self._lint(_base_plan(
+            gc="**Global Constraints:** Keep it simple. And short."
+        ))
+        errors = self._errors(defects)
+        self.assertTrue(any(
+            d.where.startswith("line") and "Global Constraints" in d.message
+            for d in errors
+        ))
+
+    def test_global_constraints_one_sentence_legal(self):
+        defects = self._lint(_base_plan(
+            gc="**Global Constraints:** Keep it simple."
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_global_constraints_period_in_inline_code_not_flagged(self):
+        defects = self._lint(_base_plan(
+            gc="**Global Constraints:** Never rename `forge_lint.py` in this task."
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_marker_alone_neither_bullet_nor_value_named(self):
+        defects = self._lint(_base_plan(
+            task1_acceptance="**Acceptance:**\nsome prose that is not a bullet"
+        ))
+        errors = self._errors(defects)
+        self.assertTrue(any(d.where.startswith("line") for d in errors))
+
+    def test_bulleted_forms_of_all_three_fields_legal(self):
+        defects = self._lint(_base_plan(
+            gc="**Global Constraints:**\n- Keep it simple.\n- Stay short.",
+            task1_acceptance=(
+                "**Acceptance:**\n"
+                "- `python3 -m pytest -q tests/test_a.py`\n"
+                "- second clause"
+            ),
+            task1_tests="**Tests:**\n- case one\n- case two",
+        ), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_all_field_grammar_defects_in_one_plan_reported_together(self):
+        defects = self._lint(_base_plan(
+            gc="**Global Constraints:** Keep it simple. And short.",
+            task1_acceptance="**Acceptance:** `cmd1`; `cmd2`",
+        ))
+        errors = self._errors(defects)
+        self.assertTrue(any("Global Constraints" in d.message for d in errors))
+        self.assertTrue(any(
+            "Acceptance" in d.message and ";" in d.message for d in errors
+        ))
+        self.assertGreaterEqual(len(errors), 2)
+
+    def test_no_global_constraints_block_remains_legal(self):
+        defects = self._lint(_base_plan(gc=""), spec_path=self.spec_path)
+        self.assertEqual(self._errors(defects), [])
+
     # --- multiple simultaneous defects -----------------------------------
 
     def test_multiple_simultaneous_defects_all_reported(self):

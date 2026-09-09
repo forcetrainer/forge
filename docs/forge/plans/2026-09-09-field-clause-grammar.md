@@ -46,7 +46,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Ambiguity detection in lint
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_lint.py` (three field-grammar errors; the period-plus-whitespace regex moves here as a detector)

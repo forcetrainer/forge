@@ -62,6 +62,106 @@ def _warning(where, message):
     return LintDefect(severity="warning", where=where, message=message)
 
 
+# --- Field clause grammar (spec: Plan documents / Lint, #87) --------------
+#
+# Three lint errors, each a contract error: a marker alone followed by
+# neither a bullet nor a value (reuses ``eb.parse_field_clauses``'s own
+# raise rather than re-deriving that grammar); a single-line
+# ``**Acceptance:**`` containing ``;`` outside an inline-code span; a
+# single-line ``**Global Constraints:**`` that a period-plus-whitespace
+# split would break into more than one clause. The last two are
+# **detectors, never splitters** — Task 1 deleted all separator logic from
+# the parsing path on purpose, and the regex/scan below exist only to decide
+# whether to raise, never to produce clauses.
+#
+# ``**Global Constraints:**`` lives in the plan header only (a line with
+# that literal prefix inside a task block is task content, per
+# ``eb.extract_header``), so its scan is bounded to the header region;
+# ``**Tests:**``/``**Acceptance:**`` are task content and need no such
+# boundary — ``eb.parse_field_clauses`` finds its own marker and stops at
+# the first blank line or next ``**Field:**``, wherever the scan starts it.
+
+_FIELD_CLAUSE_PREFIXES = {
+    "Tests": "**Tests:**",
+    "Acceptance": "**Acceptance:**",
+    "Global Constraints": "**Global Constraints:**",
+}
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+")
+
+
+def _semicolon_outside_inline_code(text):
+    """True if ``text`` contains a ``;`` outside a single backtick-quoted
+    inline-code span — a command may legally contain one (a single-line
+    ``**Acceptance:**`` command such as ``python3 -c "import sys; ..."``)."""
+    in_span = False
+    for ch in text:
+        if ch == "`":
+            in_span = not in_span
+        elif ch == ";" and not in_span:
+            return True
+    return False
+
+
+def _looks_multi_sentence(text):
+    """True if a period-plus-whitespace split of ``text`` would yield more
+    than one piece. Deliberately conservative: it will sometimes fire on a
+    legitimate one-clause line containing '. ' — a loud false positive costs
+    one edit, a silent false negative hollows a checklist, so this is never
+    softened to reduce false positives. A period with no trailing
+    whitespace (e.g. a filename like `foo.py`) never splits, so an
+    inline-code span naturally never trips it."""
+    return len([p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]) > 1
+
+
+def _header_end(lines, mask):
+    """Index of the first task heading (any level, unfenced) — the same
+    boundary ``eb.extract_header`` uses to keep a task's own prose from
+    being misread as a header field."""
+    for i, line in enumerate(lines):
+        if not mask[i] and eb.ANY_LEVEL_TASK_HEADING_RE.match(line):
+            return i
+    return len(lines)
+
+
+def _field_clause_defects(lines, mask):
+    """Every Field clause grammar defect in the document, each naming the
+    offending line, all reported in one run — never just the first."""
+    defects = []
+    header_end = _header_end(lines, mask)
+    for i, line in enumerate(lines):
+        if mask[i]:
+            continue
+        for field_name, prefix in _FIELD_CLAUSE_PREFIXES.items():
+            if field_name == "Global Constraints" and i >= header_end:
+                continue
+            if not line.startswith(prefix):
+                continue
+            where = "line {}".format(i + 1)
+            content = line[len(prefix):].strip()
+            if content:
+                if field_name == "Acceptance" and _semicolon_outside_inline_code(content):
+                    defects.append(_error(
+                        where,
+                        "single-line {} contains ';' outside inline code — "
+                        "ambiguous clause boundary; use a bulleted block, "
+                        "one clause per '-'".format(prefix),
+                    ))
+                if field_name == "Global Constraints" and _looks_multi_sentence(content):
+                    defects.append(_error(
+                        where,
+                        "single-line {} looks like more than one clause (a "
+                        "period-plus-whitespace boundary splits it); use a "
+                        "bulleted block, one clause per '-'".format(prefix),
+                    ))
+            else:
+                try:
+                    eb.parse_field_clauses("".join(lines[i:]), field_name)
+                except RuntimeError as e:
+                    defects.append(_error(where, str(e)))
+    return defects
+
+
 # --- Living-spec grammar (Phase 14/5) --------------------------------------
 #
 # A living spec's frontmatter is a fixed, two-key grammar (``system:`` a
@@ -785,6 +885,8 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
     lines = eb.read_lines(plan_path)
     mask = eb.fence_mask(lines)
     defects = list(memory_defects)
+
+    defects.extend(_field_clause_defects(lines, mask))
 
     heading_defects, task_numbers, blocks = _lint_heading_structure(lines, mask)
     defects.extend(heading_defects)
