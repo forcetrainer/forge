@@ -366,28 +366,39 @@ def validate_verdict(verdict, unresolved_refs, repo_root):
             "dependencies_read is empty and dependencies_waiver is null"
         )
 
-    replaced_system = verdict.get("replaced_system") or {}
-    applies = replaced_system.get("applies")
-    guarantees = replaced_system.get("guarantees") or []
-    if not isinstance(applies, bool):
-        # Covers a missing replaced_system, one present but lacking `applies`,
-        # and a non-boolean `applies` — all three leave `applies` failing the
-        # isinstance check, so a required field cannot go unasked simply by
-        # omitting it (execution.md: "guidance alone is ignorable, a required
-        # field is not").
+    replaced_system = verdict.get("replaced_system")
+    if replaced_system is not None and not isinstance(replaced_system, dict):
+        # A present-but-wrong-shaped replaced_system (a string, int, bool,
+        # or a falsy non-dict like []) must report a defect and let the
+        # rest of the pass continue, never raise — the same treatment
+        # `_collect_entries` already gives the three entry arrays, extended
+        # to this one structured (non-array) field.
         defects.append(
-            "replaced_system.applies is missing or not a boolean: {!r}".format(
-                applies
+            "replaced_system is not an object: {!r}".format(replaced_system)
+        )
+    else:
+        replaced_system = replaced_system or {}
+        applies = replaced_system.get("applies")
+        guarantees = replaced_system.get("guarantees") or []
+        if not isinstance(applies, bool):
+            # Covers an absent replaced_system, one present but lacking
+            # `applies`, and a non-boolean `applies` — all three leave
+            # `applies` failing the isinstance check, so a required field
+            # cannot go unasked simply by omitting it (execution.md:
+            # "guidance alone is ignorable, a required field is not").
+            defects.append(
+                "replaced_system.applies is missing or not a boolean: {!r}".format(
+                    applies
+                )
             )
-        )
-    elif applies is False and guarantees:
-        defects.append(
-            "replaced_system.applies is false but guarantees is non-empty"
-        )
-    elif applies is True and not guarantees:
-        defects.append(
-            "replaced_system.applies is true but guarantees is empty"
-        )
+        elif applies is False and guarantees:
+            defects.append(
+                "replaced_system.applies is false but guarantees is non-empty"
+            )
+        elif applies is True and not guarantees:
+            defects.append(
+                "replaced_system.applies is true but guarantees is empty"
+            )
 
     for i, finding in entries_by_type["findings"]:
         label = _entry_label(finding, "findings", "id", i)
@@ -396,6 +407,22 @@ def validate_verdict(verdict, unresolved_refs, repo_root):
             defects.append(
                 "finding {!r} has unknown kind {!r}".format(label, kind)
             )
+        if "citation" in finding:
+            citation = finding["citation"]
+            if citation is not None and not isinstance(citation, str):
+                # citation is optional (null/absent are legal — the
+                # groundedness guard downgrades those to sufficiency at
+                # disposition) so it is never in the required-field schema
+                # and is never type-checked there; a wrong-typed value
+                # (e.g. an int) must still be caught here, before it can
+                # reach `dispose`/`validate_citation`, which assume a
+                # string or None (constraint: parsers-fail-loud — the CLI
+                # must name the cause, not crash downstream).
+                defects.append(
+                    "finding {!r} has non-string citation {!r}".format(
+                        label, citation
+                    )
+                )
 
     findings = [entry for _, entry in entries_by_type["findings"]]
     return VerdictResult(valid=not defects, defects=defects, findings=findings)
