@@ -61,7 +61,7 @@ declarations only, no bodies. Later tasks must use these exact names.
 - rejects empty email
 - retries 3 times then throws
 
-**Acceptance:** the commands to run and what must pass. An environment-gated skip is not a pass — an acceptance command must assert required infrastructure is present, or make the skip exit non-zero.
+**Acceptance:** the commands to run and what must pass. An environment-gated skip is not a pass — an acceptance command must assert required infrastructure is present, or make the skip exit non-zero. A grep for text is not a command: acceptance executes the behavior and asserts on what changed, not on words describing it — except for prose artifacts (skills, docs, migrations), where nothing is executable and mechanical text checks are the correct form.
 
 **Tier:** standard (no justification) | complex — <named decision> | trivial — <mechanical rationale>
 

@@ -190,6 +190,12 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   drifted; a field authored like a contract and validated like prose is the whole
   explanation. Historical plans are not migrated: a completed plan is never re-executed,
   and lint runs on the plan about to run.
+- **`**Acceptance:**`** is the commands to run and what must pass. An environment-gated
+  skip is not a pass — the command asserts required infrastructure is present, or makes
+  the skip exit non-zero. A grep for text is not a command: acceptance executes the
+  behavior and asserts on what changed, not on words describing it. Prose artifacts —
+  skills, docs, migrations — are the stated exception: nothing is executable, so
+  mechanical text checks are the correct form (`testing-anti-patterns.md`).
 - **Decomposition** minimizes dependency chains: wall-clock is the critical path, not
   task count — prefer decompositions that share interfaces over ones that impose
   sequence.
@@ -211,9 +217,25 @@ correctly; other tests failing on GREEN are fixed now; fix code, not test); good
 qualities (minimal, one behavior, clear name, shows intent, real code over mocks); bug
 fix begins with a failing repro test; the final verification checklist, the final rule,
 and exceptions requiring human-partner permission; the on-demand pointer to
-`testing-anti-patterns.md` when adding mocks or test utilities. Excluded: diagrams,
-code-example blocks, rationale sections, worked examples, and any "when to use" list
-the trigger line already covers.
+`testing-anti-patterns.md`, fired on three named moments — reaching for a mock or
+fixture, testing something that cannot be executed, asserting on text. Excluded:
+diagrams, code-example blocks, rationale sections, worked examples, and any "when to
+use" list the trigger line already covers.
+
+`skills/tdd/testing-anti-patterns.md` is budgeted at ≤600 words (`wc -w`) and loads only
+on that pointer. Organizing principle: a test that cannot fail for the reason stated is
+not a test. Five entries, each `trigger → gate → instead`:
+
+- asserting on what the test itself set up
+- substituting away the behavior the assertion depends on
+- doubles shaped by assumption rather than an observed instance
+- testing text instead of running it — prose artifacts take mechanical acceptance
+  (grep, file-absent, exit code)
+- asserting on descriptions instead of effects
+
+No code blocks, no language or framework names. The prose-artifact entry governs the
+document case: mechanical text checks on prose are not an instance of the
+description-asserting entry, and both entries are worded to make that explicit.
 
 ## Pipeline scripts
 
@@ -281,6 +303,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-09: `testing-anti-patterns.md` gets its own contract — ≤600 words, falsifiability principle, five trigger/gate/instead entries, no code or framework names; the TDD pointer fires on three named moments; `**Acceptance:**` gains a Plan documents bullet carrying the environment-gated-skip rule (previously unspec'd) and execute-don't-substring (#85)
 
 2026-09-06: `**Tests:**` is bulleted-form only; the inline `;`-joined form is rejected and lint-checked (#60)
 2026-09-06: amended by [execution] — `**Tests:**` is machine-read plan grammar, one `t<N>.t<M>` checklist item per case (#60)
