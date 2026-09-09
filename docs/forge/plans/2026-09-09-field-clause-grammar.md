@@ -77,7 +77,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: Document the grammar
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (state the shared grammar once; `**Acceptance:**` and `**Global Constraints:**` adopt it; the `**Tests:**` paragraph defers to it rather than restating the form)

@@ -37,7 +37,7 @@ Before defining tasks, map which files will be created or modified and what each
 **Global Constraints:** [version floors, dependency limits, naming rules]
 ```
 
-Omit `**Global Constraints:**` entirely when the plan has none — never an empty block.
+Omit `**Global Constraints:**` entirely when the plan has none — never an empty block. It follows the field clause grammar (below); each clause becomes a `g<N>` checklist item.
 
 ## Task structure
 
@@ -61,7 +61,7 @@ declarations only, no bodies. Later tasks must use these exact names.
 - rejects empty email
 - retries 3 times then throws
 
-**Acceptance:** the commands to run and what must pass. An environment-gated skip is not a pass — an acceptance command must assert required infrastructure is present, or make the skip exit non-zero. A grep for text is not a command: acceptance executes the behavior and asserts on what changed, not on words describing it — except for prose artifacts (skills, docs, migrations), where nothing is executable and mechanical text checks are the correct form.
+**Acceptance:** the commands to run and what must pass; follows the field clause grammar above. An environment-gated skip is not a pass — an acceptance command must assert required infrastructure is present, or make the skip exit non-zero. A grep for text is not a command: acceptance executes the behavior and asserts on what changed, not on words describing it — except for prose artifacts (skills, docs, migrations), where nothing is executable and mechanical text checks are the correct form.
 
 **Tier:** standard (no justification) | complex — <named decision> | trivial — <mechanical rationale>
 
@@ -70,7 +70,11 @@ declarations only, no bodies. Later tasks must use these exact names.
 
 No placeholders at this level: never "TBD", "handle edge cases", or "add validation" — *name* the edge cases and the validation rules. The line is: name **what** to handle; don't write **how**.
 
-**Tests:** is the list of test cases, **by behavior** — descriptions, not code. The only legal form is the **marker alone on its line**, followed by one `-` bullet per case; the block ends at the first blank line or the next `**Field:**`. The inline joined form (`**Tests:** a; b; c`) is a lint **error**, as is a marker followed by neither bullets nor `none` — each bullet becomes a `t<N>.t<M>` checklist item the reviewer owes a `coverage` verdict on, so a joined line would silently collapse many promises into one. A task with no test cases writes `**Tests:** none — <reason>` on one line, or omits the field.
+**Field clause grammar** governs every machine-read multi-clause field — `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal: the **marker alone** on its line followed by one `-` bullet per clause, the block ending at the first blank line, the next `**Field:**`, or a heading line (`#` through `###` at column 0), whichever comes first; or the **marker with a value** on the same line, which is exactly **one** clause — except `**Tests:** none — <reason>`, that field's documented **zero**-clause form. A line inside a bulleted block not starting with `-` continues the preceding bullet, joined with a space — leading `-` starts a clause, anything else continues one, so no line is ambiguous. Below the bullet level `;` and `.` are literal: no separator has meaning inside a clause. `**Spec:**`'s single-line comma-separated list is the documented exception and is unaffected.
+
+Three lint **errors**: a marker alone followed by neither a bullet nor a value; a single-line `**Acceptance:**` containing `;` outside inline code; a single-line `**Global Constraints:**` that a period-plus-whitespace split would break into more than one clause.
+
+**Tests:** is the list of test cases, **by behavior** — descriptions, not code. It follows the field clause grammar above, including its `none — <reason>` zero-clause form. The inline joined form (e.g. `**Tests:** case one; case two`) is **rejected**, not silently accepted: a test description is prose and may itself contain a `;`, so splitting on one guesses whether "rejects empty email; rejects a malformed domain" is one case or two. Each bullet becomes a `t<N>.t<M>` checklist item the reviewer owes a `coverage` verdict on, so a joined line would silently collapse many promises into one.
 
 **Spec:** is optional — the spec sections this task's worker needs, named by heading text (unique prefix acceptable; matched case-insensitively at extraction time). Omit when the task needs no spec context. It drives mechanical brief extraction at execution (`scripts/extract-brief.py`). Keep it to a **single line of bare, comma-separated heading names** — no parentheticals, no `;`, no wrapping onto a second line, and one spec file per task (`--spec` takes one). The plan's `**Goal:**` is likewise a single non-empty line and is required. Wrapped or parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
 
