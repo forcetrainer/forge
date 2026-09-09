@@ -66,6 +66,47 @@ class ParsePlanTasksTests(unittest.TestCase):
         self.assertIn("1", str(ctx.exception))
         self.assertIn("duplicate", str(ctx.exception).lower())
 
+    def test_acceptance_commands_extracted_from_bulleted_form(self):
+        # Field clause grammar (Task 1, #87): acceptance_commands reads
+        # inline-code spans regardless of clause structure, so a bulleted
+        # **Acceptance:** block must yield the same commands a single-line
+        # form would.
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:**\n"
+            "- `python3 -m pytest -q tests/test_a.py` all pass\n"
+            "- `python3 -m pytest -q tests/test_b.py`\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        tasks = forge_run.parse_plan_tasks(self._write(plan))
+        self.assertEqual(
+            tasks[0].acceptance_commands,
+            [
+                "python3 -m pytest -q tests/test_a.py",
+                "python3 -m pytest -q tests/test_b.py",
+            ],
+        )
+
+    def test_acceptance_commands_extracted_from_single_line_form(self):
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:** `python3 -m pytest -q tests/test_a.py` all pass\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        tasks = forge_run.parse_plan_tasks(self._write(plan))
+        self.assertEqual(
+            tasks[0].acceptance_commands,
+            ["python3 -m pytest -q tests/test_a.py"],
+        )
+
 
 class TierJustificationTests(unittest.TestCase):
     """Tier: field parses as <level>[ -- <justification>], split on the em

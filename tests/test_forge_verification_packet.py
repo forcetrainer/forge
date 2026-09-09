@@ -52,6 +52,9 @@ PLAN_STD_CHECKLIST = """# Fixture Plan
 # rework/verification fixtures below reference only t1.a2 in the outstanding
 # finding, so the reduced checklist is a strict subset of the full one —
 # exercising the case a single-item checklist can't (reduced == full there).
+# Bulleted per the field clause grammar (spec: Plan documents) — below the
+# bullet level ';' is literal, so a single joined line would collapse to one
+# clause instead of the two this fixture needs.
 PLAN_STD_CHECKLIST_MULTI = """# Fixture Plan
 
 **Goal:** Do the thing.
@@ -59,7 +62,10 @@ PLAN_STD_CHECKLIST_MULTI = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** the output must contain marker one; the output must contain marker two; `echo NEEDFIX >> f1.txt`
+**Acceptance:**
+- the output must contain marker one
+- the output must contain marker two
+- `echo NEEDFIX >> f1.txt`
 
 **Tier:** standard
 

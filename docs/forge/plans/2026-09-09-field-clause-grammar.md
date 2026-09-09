@@ -12,7 +12,7 @@
 - This plan's own fields are authored in bulleted form so they parse under both the pre-task and post-task grammar.
 
 ### Task 1: Shared clause parser
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/extract-brief.py` (generalize `parse_test_cases` into a field-agnostic clause parser)

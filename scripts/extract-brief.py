@@ -256,19 +256,69 @@ NONE_TESTS_RE = re.compile(r'^none\b')
 BULLET_RE = re.compile(r'^-\s+(.*)$')
 
 
+def parse_field_clauses(block, field_name):
+    """Parse a machine-read multi-clause field (``**Tests:**``,
+    ``**Acceptance:**``, ``**Global Constraints:**``) into its list of
+    clauses, per the field clause grammar (spec: Plan documents).
+
+    Exactly two forms are legal: the marker alone on its line followed by
+    ``-`` bullets — one clause per bullet, in document order, the block
+    ending at the first blank line or the next ``**Field:**`` marker; or the
+    marker with a value on the same line, which is exactly one clause. Below
+    the bullet level ``;`` and ``.`` are literal — no separator splits a
+    clause. Inside a bulleted block, a line whose first non-space character
+    is ``-`` starts a new clause; any other non-blank, non-fenced line
+    continues the preceding clause, joined with a single space. Returns
+    ``[]`` when the field is absent. Raises on a marker alone followed by
+    neither a bullet nor a value — a silently empty list would be
+    indistinguishable from "no field at all". Fence-masked like
+    ``parse_spec_names``: a fenced marker line doesn't match, and a fenced
+    line inside a bulleted block ends it.
+
+    ``block`` may be a task block or the plan header block, since
+    ``**Global Constraints:**`` lives in the header, not a task.
+    """
+    lines = block.splitlines()
+    mask = fence_mask(lines)
+    prefix = f"**{field_name}:**"
+    idx = next(
+        (i for i, ln in enumerate(lines) if not mask[i] and ln.startswith(prefix)),
+        None,
+    )
+    if idx is None:
+        return []
+    content = lines[idx][len(prefix):].strip()
+    if content:
+        return [content]
+    clauses = []
+    for j in range(idx + 1, len(lines)):
+        line = lines[j]
+        if mask[j] or line.strip() == "" or FIELD_LINE_RE.match(line):
+            break
+        m = BULLET_RE.match(line)
+        if m:
+            clauses.append(m.group(1).strip())
+        elif clauses:
+            clauses[-1] = (clauses[-1] + " " + line.strip()).strip()
+        else:
+            break
+    if not clauses:
+        raise RuntimeError(
+            f"{prefix} is declared but lists no '-' bullets: {lines[idx]!r}"
+        )
+    return clauses
+
+
 def parse_test_cases(task_block):
     """Parse a task's ``**Tests:**`` field into a list of test case names.
 
-    The only legal forms are the marker alone on its line followed by ``-``
-    bullets (one entry per bullet, in document order — the block ends at the
-    first blank line or the next ``**Field:**`` marker), or
-    ``**Tests:** none — <reason>`` on a single line. Returns ``[]`` when the
-    field is absent or is the ``none`` form. Raise on the inline joined form
-    (a test description is prose that may itself contain ``;``, so splitting
-    on one would guess intent) and on a marker followed by neither bullets
-    nor ``none`` — both are malformed, and a silently empty list would be
-    indistinguishable from "no field at all". Fence-masked like
-    ``parse_spec_names``.
+    Thin caller over ``parse_field_clauses``, preserving its own signature
+    and the ``**Tests:** none — <reason>`` zero-clause form: unlike
+    ``**Acceptance:**``/``**Global Constraints:**``, a single-line
+    ``**Tests:**`` value is never a legal one-clause form (a test
+    description is prose that may itself contain ``;``, so splitting on one
+    would guess intent) — ``none — <reason>`` is the sole single-line
+    exception, and any other single-line value raises.
     """
     lines = task_block.splitlines()
     mask = fence_mask(lines)
@@ -291,20 +341,7 @@ def parse_test_cases(task_block):
             "'-' bullets, or 'none — <reason>' on one line — inline joined "
             f"cases are not legal; found: {lines[idx]!r}"
         )
-    cases = []
-    for j in range(idx + 1, len(lines)):
-        line = lines[j]
-        if line.strip() == "" or FIELD_LINE_RE.match(line):
-            break
-        m = BULLET_RE.match(line)
-        if not m:
-            break
-        cases.append(m.group(1).strip())
-    if not cases:
-        raise RuntimeError(
-            f"**Tests:** is declared but lists no '-' bullets: {lines[idx]!r}"
-        )
-    return cases
+    return parse_field_clauses(task_block, "Tests")
 
 
 def strip_heading_text(text):
