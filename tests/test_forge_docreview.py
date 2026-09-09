@@ -5,7 +5,9 @@ Constraints: no shared module between scripts — forge_docreview itself
 reuses forge_common, but the test loads it the same way the other
 scripts/*.py suites do).
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -829,6 +831,134 @@ class DocreviewCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn(bad_out, result.stderr)
+
+
+class CliValidityOrderingTests(unittest.TestCase):
+    """main()'s --verdict path must check validity BEFORE disposing:
+    dispose is only meaningful for a verdict that already passed
+    validate_verdict, and a defect found there must be reported without
+    ever reaching dispose (which assumes a validated shape and can itself
+    raise on a field validate_verdict already flagged, e.g. a non-string
+    citation)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-docreview-order-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_FIXTURE)
+
+    def _write_verdict(self, verdict):
+        path = os.path.join(self.tmp, "verdict.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(verdict, f)
+        return path
+
+    def _invalid_verdict_path(self):
+        # A non-string citation: validate_verdict flags it as a defect
+        # (fixed upstream in cdb910e), but dispose()/validate_citation
+        # crashes on it (`"in"` on an int) if ever reached — the exact
+        # shape the ordering bug let through.
+        return self._write_verdict({
+            "references": [
+                {
+                    "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
+                    "evidence": "checked, not found",
+                },
+                {
+                    "ref": "scripts/does_not_exist_at_all.py",
+                    "disposition": "intended-new", "evidence": "not yet built",
+                },
+            ],
+            "dependencies_read": [],
+            "dependencies_waiver": "nothing relevant read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": [{
+                "id": "f1", "summary": "s", "kind": "groundedness",
+                "section": "sec", "evidence": "e", "citation": 42,
+                "proposed_amendment": "pa",
+            }],
+        })
+
+    def _valid_verdict_path(self):
+        return self._write_verdict({
+            "references": [
+                {
+                    "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
+                    "evidence": "checked, not found",
+                },
+                {
+                    "ref": "scripts/does_not_exist_at_all.py",
+                    "disposition": "intended-new", "evidence": "not yet built",
+                },
+            ],
+            "dependencies_read": [],
+            "dependencies_waiver": "nothing relevant read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": [{
+                "id": "f1", "summary": "s", "kind": "groundedness",
+                "section": "sec", "evidence": "e",
+                "citation": "scripts/forge_common.py:1",
+                "proposed_amendment": "pa",
+            }],
+        })
+
+    def _run_main(self, verdict_path, out_path=None):
+        argv = [
+            "--spec", self.spec_path, "--verdict", verdict_path,
+            "--repo-root", str(REPO_ROOT),
+        ]
+        if out_path:
+            argv += ["--out", out_path]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = d.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_invalid_verdict_does_not_reach_dispose(self):
+        verdict_path = self._invalid_verdict_path()
+        with mock.patch.object(d, "dispose") as mock_dispose:
+            code, _stdout, stderr = self._run_main(verdict_path)
+        mock_dispose.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", stderr)
+        self.assertIn("citation", stderr)
+
+    def test_invalid_verdict_exits_nonzero_names_defects_no_traceback(self):
+        verdict_path = self._invalid_verdict_path()
+        code, _stdout, stderr = self._run_main(verdict_path)
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", stderr)
+        self.assertIn("citation", stderr)
+
+    def test_invalid_verdict_decision_has_no_amend_or_surface(self):
+        # Nothing was disposed, so inventing empty amend/surface lists would
+        # state something false — they're absent, not empty.
+        verdict_path = self._invalid_verdict_path()
+        out_path = os.path.join(self.tmp, "decision.json")
+        self._run_main(verdict_path, out_path=out_path)
+        with open(out_path, "r", encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertFalse(decision["valid"])
+        self.assertTrue(decision["defects"])
+        self.assertNotIn("amend", decision)
+        self.assertNotIn("surface", decision)
+
+    def test_valid_verdict_still_disposes_and_writes_full_decision(self):
+        verdict_path = self._valid_verdict_path()
+        with mock.patch.object(
+            d, "dispose", wraps=d.dispose
+        ) as wrapped_dispose:
+            out_path = os.path.join(self.tmp, "decision.json")
+            code, _stdout, stderr = self._run_main(verdict_path, out_path=out_path)
+        wrapped_dispose.assert_called_once()
+        self.assertEqual(code, 0, stderr)
+        with open(out_path, "r", encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertTrue(decision["valid"])
+        self.assertEqual(decision["defects"], [])
+        self.assertEqual(len(decision["amend"]), 1)
+        self.assertEqual(decision["surface"], [])
 
 
 if __name__ == "__main__":
