@@ -1,9 +1,10 @@
 """forge_checklist: id forms per source, numbering-token stripping and
-whitespace collapse in spec: ids, acceptance clause split on ';' (dropping
-solely-inline-code clauses), --final union/dedup + t<N> integration items,
---task N scoping, fail-loud on unresolvable/ambiguous **Spec:** names and on
-an empty checklist, reduce_checklist, render_section, and the CLI's
---format json/md."""
+whitespace collapse in spec: ids, acceptance/global-constraint clauses per
+the shared field clause grammar (dropping solely-inline-code acceptance
+clauses), --final union/dedup + t<N> integration items, --task N scoping,
+fail-loud on unresolvable/ambiguous **Spec:** names and on an empty
+checklist, reduce_checklist, render_section, and the CLI's --format
+json/md."""
 import json
 import os
 import shutil
@@ -23,7 +24,10 @@ import forge_checklist as fc  # noqa: E402
 PLAN_MD = """# Plan header
 
 **Goal:** Build something.
-**Global Constraints:** First constraint sentence. Second constraint sentence with `inline.code` in it. Third one.
+**Global Constraints:**
+- First constraint sentence.
+- Second constraint sentence with `inline.code` in it.
+- Third one.
 
 # Task 1
 
@@ -39,7 +43,9 @@ PLAN_MD = """# Plan header
 - the foo does the thing
 - the foo handles the edge case
 
-**Acceptance:** `python3 -m pytest -q tests/test_foo.py` all pass; `python3 foo.py`
+**Acceptance:**
+- `python3 -m pytest -q tests/test_foo.py` all pass
+- `python3 foo.py`
 
 **Tier:** `standard`
 
@@ -147,9 +153,11 @@ class ForgeChecklistTests(unittest.TestCase):
         ids = [it.id for it in items]
         self.assertIn("spec:Gamma Section", ids)
 
-    # --- acceptance clause splitting ----------------------------------------
+    # --- acceptance clause parsing (field clause grammar) -------------------
 
-    def test_acceptance_clause_split_on_semicolon(self):
+    def test_acceptance_bulleted_block_yields_one_item_per_bullet(self):
+        # Task 1's **Acceptance:** is a two-bullet block; the second bullet
+        # is solely inline-code and is dropped, leaving one item.
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
         acceptance_items = [it for it in items if it.source == "acceptance"]
         self.assertEqual(len(acceptance_items), 1)
@@ -161,49 +169,36 @@ class ForgeChecklistTests(unittest.TestCase):
         acceptance_items = [it for it in items if it.source == "acceptance"]
         self.assertEqual(acceptance_items, [])
 
-    def test_semicolon_inside_inline_code_span_does_not_split(self):
-        text = "Run `python3 -c \"import sys; print(1)\"` and confirm output"
-        clauses = fc._split_acceptance_clauses(text)
-        self.assertEqual(len(clauses), 1)
-        self.assertEqual(clauses[0], text)
+    def test_semicolon_inside_bulleted_acceptance_clause_is_literal(self):
+        task_block = (
+            "### Task 9: Semicolon check\n"
+            "**Acceptance:**\n"
+            "- Run `python3 -c \"import sys; print(1)\"` and confirm output\n"
+        )
+        clauses = fc.eb.parse_field_clauses(task_block, "Acceptance")
+        self.assertEqual(
+            clauses,
+            ['Run `python3 -c "import sys; print(1)"` and confirm output'],
+        )
 
-    def test_semicolons_outside_inline_code_spans_still_split(self):
-        text = "`cmd one` runs clean; `cmd two` also runs clean"
-        clauses = fc._split_acceptance_clauses(text)
+    def test_bulleted_acceptance_yields_one_clause_per_bullet_not_per_semicolon(self):
+        task_block = (
+            "### Task 9: Two bullets\n"
+            "**Acceptance:**\n"
+            "- `cmd one` runs clean\n"
+            "- `cmd two` also runs clean\n"
+        )
+        clauses = fc.eb.parse_field_clauses(task_block, "Acceptance")
         self.assertEqual(clauses, ["`cmd one` runs clean", "`cmd two` also runs clean"])
 
-    def test_clause_solely_inline_code_with_internal_semicolon_still_dropped(self):
-        text = "`python3 -c \"a=1; b=2\"`"
-        clauses = fc._split_acceptance_clauses(text)
-        self.assertEqual(clauses, [])
-
-    def test_clause_mixing_prose_and_code_with_internal_semicolon_kept(self):
-        text = "`python3 -c \"a=1; b=2\"` succeeds"
-        clauses = fc._split_acceptance_clauses(text)
-        self.assertEqual(clauses, ['`python3 -c "a=1; b=2"` succeeds'])
-
-    def test_multiple_inline_code_spans_on_one_line(self):
-        text = "`cmd; with; semis` passes; and `other; cmd` also passes"
-        clauses = fc._split_acceptance_clauses(text)
-        self.assertEqual(
-            clauses,
-            ["`cmd; with; semis` passes", "and `other; cmd` also passes"],
+    def test_single_line_acceptance_with_semicolon_is_one_literal_clause(self):
+        task_block = (
+            "### Task 9: Single line\n"
+            "**Acceptance:** `python3 -c \"a=1; b=2\"` succeeds; second part\n"
         )
-
-    def test_task0_style_multiline_acceptance_no_fragments(self):
-        # Regression for the f1 bug report: sys.path.insert(0,'scripts')
-        # inside a backtick command must not become clause fragments.
-        text = (
-            "`python3 -c \"import sys; sys.path.insert(0,'scripts')\"` succeeds; "
-            "second real clause of prose"
-        )
-        clauses = fc._split_acceptance_clauses(text)
+        clauses = fc.eb.parse_field_clauses(task_block, "Acceptance")
         self.assertEqual(
-            clauses,
-            [
-                '`python3 -c "import sys; sys.path.insert(0,\'scripts\')"` succeeds',
-                "second real clause of prose",
-            ],
+            clauses, ['`python3 -c "a=1; b=2"` succeeds; second part']
         )
 
     def test_clause_mixing_prose_and_code_included(self):
@@ -211,6 +206,62 @@ class ForgeChecklistTests(unittest.TestCase):
         by_id = {it.id: it for it in items}
         self.assertIn("`python3 -m pytest -q tests/test_foo.py`", by_id["t1.a1"].text)
         self.assertIn("all pass", by_id["t1.a1"].text)
+
+    # --- global constraints clause parsing (field clause grammar, header) ---
+
+    def test_global_constraints_bulleted_block_yields_one_item_per_bullet(self):
+        # PLAN_MD's header **Global Constraints:** is a three-bullet block.
+        items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
+        g_items = [it for it in items if it.source == "global"]
+        self.assertEqual([it.id for it in g_items], ["g1", "g2", "g3"])
+        self.assertEqual(g_items[0].text, "First constraint sentence.")
+        self.assertEqual(
+            g_items[1].text, "Second constraint sentence with `inline.code` in it."
+        )
+        self.assertEqual(g_items[2].text, "Third one.")
+
+    def test_period_inside_bulleted_global_constraint_clause_is_literal(self):
+        header_block = (
+            "**Global Constraints:**\n"
+            "- First sentence. Second sentence, same clause.\n"
+            "- Another clause.\n"
+        )
+        clauses = fc.eb.parse_field_clauses(header_block, "Global Constraints")
+        self.assertEqual(
+            clauses,
+            ["First sentence. Second sentence, same clause.", "Another clause."],
+        )
+
+    # --- continuation lines (field clause grammar, shared by all 3 fields) --
+
+    def test_continuation_line_not_starting_with_dash_joins_preceding_bullet(self):
+        header_block = (
+            "**Global Constraints:**\n"
+            "- Python 3 standard library only; no new dependency enters the\n"
+            "  plugin.\n"
+            "- Second constraint.\n"
+        )
+        clauses = fc.eb.parse_field_clauses(header_block, "Global Constraints")
+        self.assertEqual(
+            clauses,
+            [
+                "Python 3 standard library only; no new dependency enters the "
+                "plugin.",
+                "Second constraint.",
+            ],
+        )
+
+    # --- fail-loud: marker alone, neither bullet nor value ------------------
+
+    def test_marker_alone_followed_by_neither_bullet_nor_value_raises(self):
+        task_block = (
+            "### Task 9: Malformed\n"
+            "**Acceptance:**\n"
+            "this is prose, not a bullet\n"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.eb.parse_field_clauses(task_block, "Acceptance")
+        self.assertIn("Acceptance", str(ctx.exception))
 
     # --- --final union / dedup / integration items --------------------------
 

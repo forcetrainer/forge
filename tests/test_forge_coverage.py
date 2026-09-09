@@ -897,7 +897,9 @@ PLAN_NONEMPTY_CHECKLIST = """# Fixture Plan
 
 **Spec:** Some Section
 
-**Acceptance:** must handle X correctly; `true`
+**Acceptance:**
+- must handle X correctly
+- `true`
 
 **Tier:** standard
 

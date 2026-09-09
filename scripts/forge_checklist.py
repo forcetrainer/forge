@@ -13,8 +13,8 @@ invokes the CLI.
 |                | or union across all tasks for ``--final``)                    |
 | ``g<N>``       | each clause of the plan header's ``**Global Constraints:**``  |
 | ``t<N>.t<M>``  | each test case listed on task N's ``**Tests:**`` line         |
-| ``t<N>.a<M>``  | each ``;``-separated clause of task N's ``**Acceptance:**``   |
-|                | line that isn't solely an inline-code command                 |
+| ``t<N>.a<M>``  | each field-clause-grammar clause of task N's ``**Acceptance:**`` |
+|                | field that isn't solely an inline-code command                |
 | ``t<N>``       | final review only: task N's title, as an integration item     |
 
 The *citable* set a review's findings may name as ``contract_ref`` is
@@ -56,65 +56,10 @@ class ChecklistItem:
 
 
 _INLINE_CODE_ONLY_RE = re.compile(r"^`[^`]*`$")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+")
 
 
 def _collapse_whitespace(text):
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _split_global_constraints(gc_block):
-    """Split the plan header's **Global Constraints:** block into clauses —
-    one per sentence (period + whitespace boundary), never inside an inline
-    code span such as a filename (`foo.py` has no space after its period)."""
-    if not gc_block:
-        return []
-    body = gc_block
-    prefix = "**Global Constraints:**"
-    if body.startswith(prefix):
-        body = body[len(prefix):]
-    body = _collapse_whitespace(body)
-    if not body:
-        return []
-    return [p.strip() for p in _SENTENCE_SPLIT_RE.split(body) if p.strip()]
-
-
-def _split_on_semicolons_outside_inline_code(text):
-    """Split ``text`` on ';', but never at a semicolon inside a single
-    backtick-quoted inline-code span (e.g. `python3 -c "import sys; ..."`) —
-    a semicolon there is part of the command, not a clause boundary."""
-    clauses = []
-    current = []
-    in_span = False
-    for ch in text:
-        if ch == "`":
-            in_span = not in_span
-            current.append(ch)
-        elif ch == ";" and not in_span:
-            clauses.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    clauses.append("".join(current))
-    return clauses
-
-
-def _split_acceptance_clauses(text):
-    """Split a task's **Acceptance:** text on ';' outside inline-code spans,
-    dropping any clause whose content is solely an inline-code command —
-    already executed deterministically by the acceptance runner, dead
-    checklist weight."""
-    if not text:
-        return []
-    kept = []
-    for clause in _split_on_semicolons_outside_inline_code(text):
-        clause = clause.strip()
-        if not clause:
-            continue
-        if _INLINE_CODE_ONLY_RE.match(clause):
-            continue
-        kept.append(clause)
-    return kept
 
 
 def _spec_items(spec_lines, spec_names):
@@ -133,7 +78,7 @@ def _spec_items(spec_lines, spec_names):
 
 
 def _global_constraint_items(gc_block):
-    clauses = _split_global_constraints(gc_block)
+    clauses = eb.parse_field_clauses(gc_block, "Global Constraints") if gc_block else []
     return [
         ChecklistItem(id="g{}".format(i), source="global", text=clause)
         for i, clause in enumerate(clauses, start=1)
@@ -153,17 +98,15 @@ def _test_items(task_block, task_number):
 
 
 def _acceptance_items(task_block, task_number):
-    block_lines = task_block.splitlines()
-    block_mask = eb.fence_mask(block_lines)
-    text = forge_plan._field_text(block_lines, block_mask, "Acceptance")
-    clauses = _split_acceptance_clauses(text)
+    clauses = eb.parse_field_clauses(task_block, "Acceptance")
+    kept = [c for c in clauses if not _INLINE_CODE_ONLY_RE.match(c)]
     return [
         ChecklistItem(
             id="t{}.a{}".format(task_number, i),
             source="acceptance",
             text=clause,
         )
-        for i, clause in enumerate(clauses, start=1)
+        for i, clause in enumerate(kept, start=1)
     ]
 
 
