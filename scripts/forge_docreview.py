@@ -713,20 +713,31 @@ def main(argv=None):
     unresolved_refs = [r.ref for r in table if not r.resolved]
 
     result = validate_verdict(verdict, unresolved_refs, args.repo_root)
-    disposition = dispose(result.findings, args.repo_root)
-    decision = {
-        "valid": result.valid,
-        "defects": result.defects,
-        "amend": disposition.amend,
-        "surface": disposition.surface,
-    }
-    if not _emit(json.dumps(decision, indent=2), args.out):
-        return 1
     if not result.valid:
+        # Disposition is only meaningful for a verdict that already passed
+        # validation (dispose()/validate_citation assume a validated shape
+        # and can themselves crash on exactly the field validate_verdict
+        # just flagged, e.g. a non-string citation) — so an invalid verdict
+        # is reported without ever calling dispose. No disposition ran, so
+        # the decision omits amend/surface entirely rather than inventing
+        # empty lists that would claim a disposition took place.
+        decision = {"valid": False, "defects": result.defects}
+        if not _emit(json.dumps(decision, indent=2), args.out):
+            return 1
         print(
             "error: invalid verdict: " + "; ".join(result.defects),
             file=sys.stderr,
         )
+        return 1
+
+    disposition = dispose(result.findings, args.repo_root)
+    decision = {
+        "valid": True,
+        "defects": [],
+        "amend": disposition.amend,
+        "surface": disposition.surface,
+    }
+    if not _emit(json.dumps(decision, indent=2), args.out):
         return 1
     return 0
 
