@@ -127,3 +127,36 @@
 **Tier:** standard
 
 **Depends on:** Task 2.
+
+### Task 5: Any heading terminates a clause block
+- [ ] Done
+
+**Files:**
+- Modify: `docs/forge/specs/pipeline.md` (Field clause grammar: termination at any heading level; changelog entry, and move the misplaced 2026-09-09 entry into newest-first order)
+- Modify: `scripts/extract-brief.py` (`CLAUSE_BLOCK_HEADING_RE` widens to h1-h6)
+- Modify: `skills/planning/SKILL.md` (grammar wording follows the spec)
+- Test: `tests/test_extract_brief.py`
+- Test: `tests/test_forge_plan.py`
+
+**Spec:** Plan documents
+
+**Interface:** a clause block ends at the first blank line, the next `**Field:**`, or **any heading line** (`#` through `######` at column 0), whichever comes first. `forge_plan._field_text` already terminates at h1-h6 and is unchanged; this brings the clause parser into agreement with it. The **task-block** boundary is a different rule and stays h1-h3, since h4+ is intra-task structure — `_field_text`'s and `parse_field_clauses`'s clause boundary is the only thing widening.
+
+**Tests:**
+- a clause block ends at an h4 heading
+- a clause block ends at an h5 and an h6 heading
+- heading text at any level is never merged into a clause
+- a task block still does not terminate at an h4 heading
+- a `#` inside an inline-code span still does not terminate a clause block
+- `parse_field_clauses` and `forge_plan._field_text` agree on an Acceptance block containing an h4: every command the checklist lists is also extracted for execution
+- blocks ending at a blank line or the next `**Field:**` are unchanged
+
+**Acceptance:**
+- `python3 -m pytest tests/ -q` passes with no skips introduced by this task
+- `python3 scripts/forge_lint.py docs/forge/plans/2026-09-09-field-clause-grammar.md --spec docs/forge/specs/pipeline.md` exits 0
+- `python3 scripts/forge_lint.py --specs` exits 0
+- `grep -q '######' docs/forge/specs/pipeline.md` — the spec states the widened boundary
+
+**Tier:** standard
+
+**Depends on:** Task 3.
