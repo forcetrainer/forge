@@ -241,6 +241,74 @@ class ValidateVerdictTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
+    def test_replaced_system_string_is_invalid_not_raised(self):
+        verdict = _valid_verdict(replaced_system="nope")
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_int_is_invalid_not_raised(self):
+        verdict = _valid_verdict(replaced_system=7)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_bool_is_invalid_not_raised(self):
+        verdict = _valid_verdict(replaced_system=True)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_empty_list_is_invalid_not_raised(self):
+        verdict = _valid_verdict(replaced_system=[])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_none_is_still_invalid(self):
+        verdict = _valid_verdict(replaced_system=None)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_finding_citation_int_is_invalid(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa", "citation": 42,
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any(
+            "citation" in defect and "f1" in defect for defect in result.defects
+        ))
+
+    def test_finding_citation_bool_is_invalid(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa", "citation": True,
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any(
+            "citation" in defect and "f1" in defect for defect in result.defects
+        ))
+
+    def test_finding_citation_null_is_still_legal(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa", "citation": None,
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertTrue(result.valid)
+
+    def test_finding_citation_absent_is_still_legal(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa",
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertTrue(result.valid)
+
     def test_references_entry_missing_evidence_key_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new"},
