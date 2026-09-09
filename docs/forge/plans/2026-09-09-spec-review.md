@@ -184,3 +184,38 @@
 **Tier:** standard
 
 **Depends on:** Task 3, Task 4.
+
+### Task 6: Verify the claims a verdict makes about the repository
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_docreview.py` (structural verification of `dependencies_read` and `findings[].section`)
+- Test: `tests/test_forge_docreview.py`
+
+**Spec:** Spec review
+
+**Interface:** required fields whose value is a claim about the repository are verified, not merely non-blank. `dependencies_read[].file` must name a tracked file; `dependencies_read[].symbol` must actually appear in that file, reusing Task 1's symbol resolution rather than a second grep; `findings[].section` must name a real section of the spec under review, matched case-insensitively on a unique prefix, consistent with `extract-brief.find_spec_sections`. Each failure is a defect naming the entry and what could not be verified, reported in the same single pass as every other defect. `validate_verdict` gains the spec's section names as a **required** argument, never optional and never defaulted — an enforcement input that may be omitted is enforcement that silently vanishes (issue #68), so a caller that does not supply it is an error rather than a skipped check. The five irreducibly free-prose fields — both `evidence` fields, `behavior`, `summary`, `proposed_amendment` — keep blankness as their only check; nothing verifiable is claimed by them.
+
+**Tests:**
+- a dependencies_read entry naming a file that does not exist is a defect
+- a dependencies_read entry naming an untracked file is a defect
+- a dependencies_read entry whose symbol does not appear in its named file is a defect
+- a dependencies_read entry whose symbol does appear in its named file is valid
+- a wholly fabricated file and symbol pair is rejected
+- a finding naming a spec section that does not exist is a defect
+- a finding naming a real spec section is valid
+- section matching is case-insensitive and accepts a unique prefix
+- an ambiguous section prefix matching two headings is a defect, never a silent pick
+- omitting the spec section names is an error, never a silently skipped check
+- structural defects and required-field defects are reported together in one pass
+- the free-prose fields are still checked for blankness only
+
+**Acceptance:**
+- `python3 -m pytest tests/test_forge_docreview.py -q` passes with no skips introduced by this task
+- `python3 -m pytest tests/ -q` passes with no skips introduced by this task
+- `python3 -c "import sys; sys.path.insert(0,'scripts'); import forge_docreview as d; v={'verdict':'findings','references':[],'dependencies_read':[{'symbol':'reticulate_splines','file':'scripts/does_not_exist.py','behavior':'x'}],'replaced_system':{'applies':False},'findings':[]}; r=d.validate_verdict(v, [], '.', ['Spec review']); assert not r.valid, 'fabricated claim accepted'"` — a fabricated dependency claim is rejected
+- `! grep -n 'spec_sections=None\|spec_sections = None' scripts/forge_docreview.py` — the enforcement input has no default
+
+**Tier:** standard
+
+**Depends on:** Task 1, Task 2.
