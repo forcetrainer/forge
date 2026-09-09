@@ -19,15 +19,18 @@ REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 import forge_docreview as d  # noqa: E402
 
+# Built at runtime, never as one contiguous literal: `git grep -F` (which
+# _resolve_symbol uses) searches this file's own tracked bytes, so a sentinel
+# meant to resolve nowhere must not appear in them as a contiguous string —
+# otherwise committing this test file makes it find itself.
+NO_SUCH_SYMBOL = "totallyNonexistent" + "SymbolXyz123"
+
 
 def _tracked_files():
     result = subprocess.run(
         ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
     )
     return [line for line in result.stdout.splitlines() if line]
-
-
-NO_SUCH_SYMBOL = "totallyNonexistent" + "SymbolXyz123"
 
 
 class ExtractReferencesTests(unittest.TestCase):
@@ -151,6 +154,366 @@ class ReworkFindingsTests(unittest.TestCase):
         refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
+
+
+def _valid_verdict(**overrides):
+    """A minimal schema-valid verdict for one unresolved ref ``a/b.py``.
+    Overrides replace top-level keys wholesale."""
+    base = {
+        "verdict": "findings",
+        "references": [
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "not yet built"}
+        ],
+        "dependencies_read": [
+            {"symbol": "foo", "file": "scripts/foo.py", "behavior": "does a thing"}
+        ],
+        "dependencies_waiver": None,
+        "replaced_system": {"applies": False, "guarantees": []},
+        "findings": [],
+    }
+    base.update(overrides)
+    return base
+
+
+class ValidateVerdictTests(unittest.TestCase):
+    def test_missing_references_entry_for_unresolved_ref_is_invalid(self):
+        verdict = _valid_verdict(references=[])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("a/b.py" in defect for defect in result.defects))
+
+    def test_references_entry_naming_ref_outside_unresolved_set_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "e"},
+            {"ref": "c/d.py", "disposition": "intended-new", "evidence": "e"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("c/d.py" in defect for defect in result.defects))
+
+    def test_unknown_disposition_value_on_references_entry_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "bogus", "evidence": "e"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_empty_dependencies_read_with_no_waiver_is_invalid(self):
+        verdict = _valid_verdict(dependencies_read=[], dependencies_waiver=None)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_empty_dependencies_read_with_waiver_is_valid(self):
+        verdict = _valid_verdict(dependencies_read=[], dependencies_waiver="nothing to read")
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertTrue(result.valid)
+
+    def test_replaced_system_applies_false_with_guarantees_is_invalid(self):
+        verdict = _valid_verdict(replaced_system={"applies": False, "guarantees": ["x"]})
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_replaced_system_applies_true_with_empty_guarantees_is_invalid(self):
+        verdict = _valid_verdict(replaced_system={"applies": True, "guarantees": []})
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_missing_replaced_system_is_invalid(self):
+        verdict = _valid_verdict()
+        del verdict["replaced_system"]
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_present_without_applies_key_is_invalid(self):
+        verdict = _valid_verdict(replaced_system={"guarantees": []})
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_replaced_system_applies_non_boolean_is_invalid(self):
+        verdict = _valid_verdict(replaced_system={"applies": "yes", "guarantees": []})
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("replaced_system" in defect for defect in result.defects))
+
+    def test_references_entry_missing_evidence_key_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("a/b.py" in defect for defect in result.defects))
+
+    def test_references_entry_empty_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": ""},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("a/b.py" in defect for defect in result.defects))
+
+    def test_references_entry_whitespace_only_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "   "},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("a/b.py" in defect for defect in result.defects))
+
+    def test_references_entry_with_real_evidence_is_valid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "not yet built"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertTrue(result.valid)
+
+    def test_whitespace_only_finding_field_is_invalid(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "   ", "kind": "sufficiency", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa",
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_dependencies_read_entry_with_blank_fields_is_invalid(self):
+        verdict = _valid_verdict(dependencies_read=[
+            {"symbol": "", "file": "  ", "behavior": ""},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_dependencies_read_entry_entirely_empty_is_invalid(self):
+        verdict = _valid_verdict(dependencies_read=[{}])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_defect_names_both_field_and_entry(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        matches = [
+            defect for defect in result.defects
+            if "evidence" in defect and "a/b.py" in defect
+        ]
+        self.assertTrue(matches)
+
+    def test_new_required_field_in_declared_schema_needs_no_new_code(self):
+        # Declaring a new required field in the schema alone must be enough
+        # to enforce it — no validation code changes. Demonstrated by
+        # patching the declared schema to add a field the fixture verdict
+        # doesn't supply, and observing it gets caught with zero code
+        # changes to validate_verdict.
+        verdict = _valid_verdict()
+        patched_schema = dict(d._REQUIRED_FIELDS_SCHEMA)
+        patched_schema["references"] = dict(patched_schema["references"])
+        patched_schema["references"]["fields"] = (
+            patched_schema["references"]["fields"] + ("reviewed_by",)
+        )
+        with mock.patch.object(d, "_REQUIRED_FIELDS_SCHEMA", patched_schema):
+            result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("reviewed_by" in defect for defect in result.defects))
+
+    def test_zero_width_space_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "​"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_byte_order_mark_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "﻿"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_word_joiner_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "⁠"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_nul_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "\x00"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_other_control_character_evidence_is_invalid(self):
+        verdict = _valid_verdict(references=[
+            {"ref": "a/b.py", "disposition": "intended-new", "evidence": "\x01"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_evidence_with_embedded_newline_and_tab_is_still_valid(self):
+        verdict = _valid_verdict(references=[
+            {
+                "ref": "a/b.py", "disposition": "intended-new",
+                "evidence": "line one\n\tline two",
+            },
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertTrue(result.valid)
+
+    def test_non_list_references_is_invalid_not_raised(self):
+        verdict = _valid_verdict(references="nope")
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("references" in defect for defect in result.defects))
+
+    def test_dict_where_references_list_belongs_is_invalid_not_raised(self):
+        verdict = _valid_verdict(references={"ref": "x"})
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("references" in defect for defect in result.defects))
+
+    def test_non_dict_element_in_references_is_invalid_not_raised(self):
+        verdict = _valid_verdict(references=["not-a-dict"])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("references[0]" in defect for defect in result.defects))
+
+    def test_null_element_in_references_is_invalid_not_raised(self):
+        verdict = _valid_verdict(references=[None])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("references[0]" in defect for defect in result.defects))
+
+    def test_malformed_entry_reports_alongside_other_defects(self):
+        verdict = _valid_verdict(
+            references=[None],
+            dependencies_read=[],
+            dependencies_waiver=None,
+            replaced_system={"applies": True, "guarantees": []},
+        )
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        # the malformed references[0] entry, the still-unresolved a/b.py
+        # (references[0] wasn't a usable entry so it can't cover it),
+        # empty dependencies_read with no waiver, and replaced_system: at
+        # least 4 independent defects reported, not just a crash on the first.
+        self.assertGreaterEqual(len(result.defects), 4)
+
+    def test_finding_missing_proposed_amendment_is_invalid(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
+            "evidence": "e",
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_unknown_finding_kind_is_invalid(self):
+        verdict = _valid_verdict(findings=[{
+            "id": "f1", "summary": "s", "kind": "bogus", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa",
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+
+    def test_every_defect_in_one_verdict_reported_in_single_pass(self):
+        verdict = _valid_verdict(
+            references=[],
+            dependencies_read=[],
+            dependencies_waiver=None,
+            replaced_system={"applies": True, "guarantees": []},
+            findings=[{
+                "id": "f1", "summary": "s", "kind": "bogus", "section": "sec",
+                "evidence": "e",
+            }],
+        )
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT))
+        self.assertFalse(result.valid)
+        # missing references + empty deps/no waiver + replaced_system + kind +
+        # missing proposed_amendment: at least 5 independent defects, not just one.
+        self.assertGreaterEqual(len(result.defects), 5)
+
+
+class ValidateCitationTests(unittest.TestCase):
+    def test_citation_resolving_to_real_file_and_line_is_true(self):
+        self.assertTrue(d.validate_citation("scripts/forge_common.py:1", str(REPO_ROOT)))
+
+    def test_citation_naming_missing_file_is_false(self):
+        self.assertFalse(
+            d.validate_citation("scripts/does_not_exist_at_all.py:1", str(REPO_ROOT))
+        )
+
+    def test_citation_naming_line_past_end_of_file_is_false(self):
+        self.assertFalse(
+            d.validate_citation("scripts/forge_common.py:99999999", str(REPO_ROOT))
+        )
+
+
+class DisposeTests(unittest.TestCase):
+    def test_groundedness_with_valid_citation_disposes_to_amend(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "citation": "scripts/forge_common.py:1",
+            "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(len(disp.amend), 1)
+        self.assertEqual(disp.amend[0]["id"], "f1")
+        self.assertEqual(disp.surface, [])
+
+    def test_groundedness_with_missing_file_citation_downgrades_and_surfaces(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "citation": "scripts/does_not_exist_at_all.py:1",
+            "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(disp.amend, [])
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "sufficiency")
+
+    def test_groundedness_with_line_past_end_of_file_downgrades_and_surfaces(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "citation": "scripts/forge_common.py:99999999",
+            "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(disp.amend, [])
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "sufficiency")
+
+    def test_groundedness_with_null_citation_downgrades_and_surfaces(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
+            "evidence": "e", "citation": None,
+            "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(disp.amend, [])
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "sufficiency")
+
+    def test_sufficiency_finding_surfaces_and_is_never_auto_amended(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
+            "evidence": "e", "citation": None, "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(disp.amend, [])
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "sufficiency")
+
+    def test_contradiction_finding_surfaces_and_is_never_auto_amended(self):
+        findings = [{
+            "id": "f1", "summary": "s", "kind": "contradiction", "section": "sec",
+            "evidence": "e", "citation": None, "proposed_amendment": "pa",
+        }]
+        disp = d.dispose(findings, str(REPO_ROOT))
+        self.assertEqual(disp.amend, [])
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "contradiction")
 
 
 if __name__ == "__main__":
