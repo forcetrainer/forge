@@ -199,7 +199,7 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
 - **Field clause grammar** governs every machine-read multi-clause field —
   `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
-  at the first blank line, next `**Field:**`, or a heading line (`#` through `###` at
+  at the first blank line, next `**Field:**`, or any heading line (`#` through `######` at
   column 0), whichever comes first; or the **marker with a value** on the same
   line, which is exactly **one** clause — except `**Tests:** none — <reason>`, that field's
   documented **zero**-clause form. A line inside a bulleted block not beginning with
@@ -332,6 +332,10 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-09-09: field clause grammar's clause-block termination widens from `#`–`###` to any heading level (`#` through `######` at column 0), agreeing with `forge_plan._field_text`'s existing boundary — closes the gap where an h4+ heading and the prose beneath it were absorbed into the last clause (#87)
+
+2026-09-09: field clause grammar's block termination set gains a heading line (`#` through `###` at column 0), alongside the blank line and next `**Field:**` — closes the gap where a heading was absorbed into the last clause (#87)
+
 2026-09-09: one field clause grammar for `**Tests:**`, `**Acceptance:**` and `**Global Constraints:**` — marker-alone-plus-bullets or a single-line one-clause value, `;` and `.` literal below the bullet; three lint errors, the two ambiguity checks being detectors rather than splitters; no migration (#87)
 
 2026-09-09: `testing-anti-patterns.md` gets its own contract — ≤600 words, falsifiability principle, five trigger/gate/instead entries, no code or framework names; the TDD pointer fires on three named moments; `**Acceptance:**` gains a Plan documents bullet carrying the environment-gated-skip rule (previously unspec'd) and execute-don't-substring (#85)
@@ -348,6 +352,5 @@ and a session restart to apply.
 2026-09-05: dropped phase2 §1's tier-down preference (fully enumerated interfaces and test cases → prefer the lower tier) — reversed by tier-policy-recalibration, which makes standard the floor and requires demonstrated mechanicalness to move down; tier policy is the execution spec's (#47)
 2026-09-05: dropped living-specs "Motivating defect", "Testing", "Acceptance", "Out of scope" — narrative of how the convention arrived plus one-time phase gates; the lint rules they tested are stated under Lint (#47)
 2026-09-05: dropped living-specs' enumerated citation-migration list — a one-time worklist; the standing rule is kept under Citations (#47)
-2026-09-09: field clause grammar's block termination set gains a heading line (`#` through `###` at column 0), alongside the blank line and next `**Field:**` — closes the gap where a heading was absorbed into the last clause (#87)
 
 2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text

@@ -621,6 +621,42 @@ class ExtractBriefTests(unittest.TestCase):
             ["mentions the `#42` ticket reference in its message", "rejects other input"],
         )
 
+    def test_clause_block_ends_at_h4_heading(self):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+            "- rejects empty email\n"
+            "#### Sub-detail\n"
+            "sub-detail line\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_field_clauses(block, "Tests"),
+            ["rejects empty email"],
+        )
+
+    def test_clause_block_ends_at_h5_and_h6_headings(self):
+        for marks in ("#####", "######"):
+            block = (
+                "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+                "- rejects empty email\n"
+                "{} Sub-detail\n"
+                "sub-detail line\n"
+            ).format(marks)
+            self.assertEqual(
+                extract_brief.parse_field_clauses(block, "Tests"),
+                ["rejects empty email"],
+                "failed to terminate at {} heading".format(marks),
+            )
+
+    def test_heading_text_at_any_level_never_merged_into_clause(self):
+        for marks in ("####", "#####", "######"):
+            block = (
+                "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+                "- retries 3 times\n"
+                "{} Next thing\n"
+            ).format(marks)
+            clauses = extract_brief.parse_field_clauses(block, "Tests")
+            self.assertNotIn("Next thing", " ".join(clauses))
+
     def test_parse_test_cases_matches_pre_regression_parser_for_heading_adjacent_block(
         self,
     ):

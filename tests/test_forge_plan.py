@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -89,6 +90,39 @@ class ParsePlanTasksTests(unittest.TestCase):
                 "python3 -m pytest -q tests/test_a.py",
                 "python3 -m pytest -q tests/test_b.py",
             ],
+        )
+
+    def test_acceptance_commands_agree_with_clauses_across_h4_heading(self):
+        # #87 Task 5: an h4 inside an **Acceptance:** block must terminate
+        # both the clause parser and the command extractor identically —
+        # every command the checklist lists is also executed.
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:**\n"
+            "- `pytest -q` passes\n"
+            "#### note\n"
+            "- `ruff check` clean\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        plan_path = self._write(plan)
+        tasks = forge_run.parse_plan_tasks(plan_path)
+        self.assertEqual(tasks[0].acceptance_commands, ["pytest -q"])
+
+        eb = forge_run.forge_plan.eb
+        lines = eb.read_lines(plan_path)
+        block = eb.extract_task_block(lines, 1)
+        clauses = eb.parse_field_clauses(block, "Acceptance")
+        # Every command the checklist's clauses contain must also be
+        # extracted for execution — the "ruff check" clause must not exist
+        # without a matching command, and vice versa.
+        self.assertEqual(len(clauses), 1)
+        self.assertEqual(
+            [m for c in clauses for m in re.findall(r"`([^`]+)`", c)],
+            tasks[0].acceptance_commands,
         )
 
     def test_acceptance_commands_extracted_from_single_line_form(self):

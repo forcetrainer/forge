@@ -129,7 +129,7 @@
 **Depends on:** Task 2.
 
 ### Task 5: Any heading terminates a clause block
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `docs/forge/specs/pipeline.md` (Field clause grammar: termination at any heading level; changelog entry, and move the misplaced 2026-09-09 entry into newest-first order)

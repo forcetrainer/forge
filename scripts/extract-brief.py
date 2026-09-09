@@ -45,11 +45,12 @@ ANY_LEVEL_TASK_HEADING_RE = re.compile(r'^(#{1,6})\s+Task\s+(\d+):')
 # is ':**' anywhere after the opening '**', not a clean [^*]+ name.
 FIELD_LINE_RE = re.compile(r'^\*\*.*:\*\*')
 FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
-# A heading line terminating a field clause block: '#' through '###' at
-# column 0 (spec: Plan documents, Field clause grammar). Anchored to the
+# A heading line terminating a field clause block: '#' through '######' at
+# column 0 (spec: Plan documents, Field clause grammar) — any heading level,
+# matching `forge_plan._field_text`'s task-field boundary. Anchored to the
 # start of the line, so a '#' inside inline code or mid-line prose never
 # matches.
-CLAUSE_BLOCK_HEADING_RE = re.compile(r'^#{1,3}\s')
+CLAUSE_BLOCK_HEADING_RE = re.compile(r'^#{1,6}\s')
 
 
 def fence_mask(lines):
@@ -268,8 +269,8 @@ def parse_field_clauses(block, field_name):
 
     Exactly two forms are legal: the marker alone on its line followed by
     ``-`` bullets — one clause per bullet, in document order, the block
-    ending at the first blank line, the next ``**Field:**`` marker, or a
-    heading line (``#`` through ``###`` at column 0); or the
+    ending at the first blank line, the next ``**Field:**`` marker, or any
+    heading line (``#`` through ``######`` at column 0); or the
     marker with a value on the same line, which is exactly one clause. Below
     the bullet level ``;`` and ``.`` are literal — no separator splits a
     clause. Inside a bulleted block, a line whose first non-space character
