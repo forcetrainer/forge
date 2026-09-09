@@ -57,7 +57,7 @@
 
 **Spec:** Spec review
 
-**Interface:** the schema this task validates is defined in `docs/forge/specs/execution.md` under "Document review contract"; read it before writing anything. `validate_verdict(verdict, unresolved_refs, repo_root)` returns `VerdictResult(valid, defects, findings)`, raising nothing — defects are returned, not thrown, so all are reported in one pass. It enforces: one `references` entry per unresolved ref, no entry naming a ref outside that set, and non-empty `evidence` on every entry — an entry may not be dispositioned without a reason; `dependencies_read` non-empty or a non-null `dependencies_waiver`; `replaced_system` present with a boolean `applies` — a missing block, a missing `applies`, or a non-boolean one is a defect naming the field — then False forbidding `guarantees` and True requiring a non-empty list; every finding carrying `id`, `summary`, `kind`, `section`, `evidence`, `proposed_amendment`. `validate_citation(citation, repo_root)` is True when the `<file>:<line>` form names an existing file and a line within it. `dispose(findings, repo_root)` returns `Disposition(amend, surface)` — `kind == "groundedness"` with a valid citation goes to `amend`; a groundedness finding whose citation is absent or unresolvable is rewritten to `kind == "sufficiency"` and goes to `surface`; `sufficiency` and `contradiction` go to `surface`.
+**Interface:** the schema this task validates is defined in `docs/forge/specs/execution.md` under "Document review contract"; read it before writing anything. `validate_verdict(verdict, unresolved_refs, repo_root)` returns `VerdictResult(valid, defects, findings)`, raising nothing — defects are returned, not thrown, so all are reported in one pass. Required-field checking is **one uniform rule driven by a declared schema**, never per-field code: a required field is a defect unless it is present and meaningfully non-empty, where a whitespace-only string counts as absent, and the defect names the field and the entry it belongs to. The rule applies to every entry type — `references`, `dependencies_read`, and `findings` — so a field nobody enumerated is not a hole. Adding a required field to the schema must require no new checking code. On top of that rule: one `references` entry per unresolved ref and none naming a ref outside that set; `dependencies_read` non-empty or a non-null `dependencies_waiver`; `replaced_system` present with a boolean `applies`, False forbidding `guarantees` and True requiring a non-empty list; `disposition` and `kind` within their enumerations. `validate_citation(citation, repo_root)` is True when the `<file>:<line>` form names an existing file and a line within it. `dispose(findings, repo_root)` returns `Disposition(amend, surface)` — `kind == "groundedness"` with a valid citation goes to `amend`; a groundedness finding whose citation is absent or unresolvable is rewritten to `kind == "sufficiency"` and goes to `surface`; `sufficiency` and `contradiction` go to `surface`.
 
 **Tests:**
 - a verdict missing a references entry for an unresolved ref is invalid and names the ref
@@ -68,6 +68,11 @@
 - replaced_system applies false with a non-empty guarantees list is invalid
 - replaced_system applies true with an empty guarantees list is invalid
 - a finding missing proposed_amendment is invalid
+- a whitespace-only value in any required field is invalid, in every entry type
+- a dependencies_read entry with blank symbol, file or behavior is invalid
+- an entirely empty dependencies_read entry is invalid
+- a defect names both the field and the entry it belongs to
+- adding a required field to the declared schema needs no new checking code
 - an unknown finding kind is invalid
 - every defect in one verdict is reported in a single pass, not just the first
 - a groundedness finding with a citation resolving to a real file and line disposes to amend
