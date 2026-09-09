@@ -8,7 +8,7 @@
 **Tech stack:** Markdown only. No scripts, no dependencies.
 
 ### Task 1: Reference document
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/tdd/testing-anti-patterns.md` (full rewrite — replace all 299 lines)
