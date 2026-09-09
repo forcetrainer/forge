@@ -33,7 +33,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Trigger sites
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/tdd/SKILL.md` (replace the `## Testing Anti-Patterns` pointer line with the three-moment trigger)

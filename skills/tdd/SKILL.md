@@ -56,7 +56,7 @@ Can't check every box? TDD was skipped. Start over.
 
 ## Testing Anti-Patterns
 
-Adding mocks or test utilities? Read @testing-anti-patterns.md first.
+Reaching for a mock or fixture, testing something that cannot be executed, or asserting on text? Read @testing-anti-patterns.md first.
 
 ## Final Rule
 
