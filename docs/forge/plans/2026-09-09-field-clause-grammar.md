@@ -97,3 +97,33 @@
 **Tier:** standard
 
 **Depends on:** Task 2.
+
+### Task 4: Heading terminates a clause block
+- [ ] Done
+
+**Files:**
+- Modify: `docs/forge/specs/pipeline.md` (Field clause grammar: add a heading to the block termination set; changelog line)
+- Modify: `scripts/extract-brief.py` (`parse_field_clauses` stops at a heading line)
+- Test: `tests/test_extract_brief.py`
+
+**Spec:** Plan documents
+
+**Interface:** a clause block ends at the first blank line, the next `**Field:**`, **or a heading line** (`#` at column 0 through `###`), whichever comes first. The continuation rule is unchanged and applies only to lines inside the block. `parse_field_clauses` keeps its signature; `parse_test_cases` inherits the fix through it.
+
+**Tests:**
+- a bulleted block whose next line is a task heading with no blank line yields only its own bullets
+- the task heading text is not merged into the final clause
+- the `- [ ] Done` checkbox line following a heading does not become a clause
+- a bulleted block followed by a blank line then a heading is unchanged
+- a bulleted block followed by the next `**Field:**` marker is unchanged
+- a `#` inside an inline-code span does not terminate a block
+- `parse_test_cases` returns the same cases as the pre-regression parser for a heading-adjacent block
+
+**Acceptance:**
+- `python3 -m pytest tests/ -q` passes with no skips introduced by this task
+- `python3 scripts/forge_lint.py docs/forge/plans/2026-09-09-field-clause-grammar.md --spec docs/forge/specs/pipeline.md` exits 0
+- `python3 scripts/forge_lint.py --specs` exits 0
+
+**Tier:** standard
+
+**Depends on:** Task 2.
