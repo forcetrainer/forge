@@ -199,7 +199,8 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
 - **Field clause grammar** governs every machine-read multi-clause field —
   `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
-  at the first blank line or next `**Field:**`; or the **marker with a value** on the same
+  at the first blank line, next `**Field:**`, or a heading line (`#` through `###` at
+  column 0), whichever comes first; or the **marker with a value** on the same
   line, which is exactly **one** clause — except `**Tests:** none — <reason>`, that field's
   documented **zero**-clause form. A line inside a bulleted block not beginning with
   `-` continues the preceding bullet, joined with a space — leading `-` starts a clause,
@@ -347,4 +348,6 @@ and a session restart to apply.
 2026-09-05: dropped phase2 §1's tier-down preference (fully enumerated interfaces and test cases → prefer the lower tier) — reversed by tier-policy-recalibration, which makes standard the floor and requires demonstrated mechanicalness to move down; tier policy is the execution spec's (#47)
 2026-09-05: dropped living-specs "Motivating defect", "Testing", "Acceptance", "Out of scope" — narrative of how the convention arrived plus one-time phase gates; the lint rules they tested are stated under Lint (#47)
 2026-09-05: dropped living-specs' enumerated citation-migration list — a one-time worklist; the standing rule is kept under Citations (#47)
+2026-09-09: field clause grammar's block termination set gains a heading line (`#` through `###` at column 0), alongside the blank line and next `**Field:**` — closes the gap where a heading was absorbed into the last clause (#87)
+
 2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text

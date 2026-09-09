@@ -99,7 +99,7 @@
 **Depends on:** Task 2.
 
 ### Task 4: Heading terminates a clause block
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `docs/forge/specs/pipeline.md` (Field clause grammar: add a heading to the block termination set; changelog line)

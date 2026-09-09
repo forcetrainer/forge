@@ -555,6 +555,86 @@ class ExtractBriefTests(unittest.TestCase):
         block = self._TASK + "\n**Tests:**\n- rejects a; keeps b\n"
         self.assertEqual(extract_brief.parse_test_cases(block), ["rejects a; keeps b"])
 
+    # --- heading terminates a clause block (#87) ---
+
+    def test_parse_test_cases_heading_with_no_blank_line_yields_only_its_bullets(self):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+            "- rejects empty email\n"
+            "- retries 3 times\n"
+            "### Task 2: Next thing\n- [ ] Done\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_field_clauses(block, "Tests"),
+            ["rejects empty email", "retries 3 times"],
+        )
+
+    def test_heading_text_not_merged_into_final_clause(self):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+            "- retries 3 times\n"
+            "### Task 2: Next thing\n- [ ] Done\n"
+        )
+        clauses = extract_brief.parse_field_clauses(block, "Tests")
+        self.assertNotIn("Task 2", " ".join(clauses))
+
+    def test_checkbox_line_after_heading_is_not_a_phantom_clause(self):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+            "- retries 3 times\n"
+            "### Task 2: Next thing\n- [ ] Done\n"
+        )
+        clauses = extract_brief.parse_field_clauses(block, "Tests")
+        self.assertNotIn("[ ] Done", clauses)
+
+    def test_bulleted_block_then_blank_line_then_heading_is_unchanged(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- case one\n"
+            "- case two\n"
+            "\n"
+            "### Task 2: Next thing\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block), ["case one", "case two"]
+        )
+
+    def test_bulleted_block_then_next_field_marker_is_unchanged(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- case one\n"
+            "- case two\n"
+            "**Acceptance:** `pytest` passes.\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block), ["case one", "case two"]
+        )
+
+    def test_hash_inside_inline_code_span_does_not_terminate_block(self):
+        block = (
+            self._TASK + "\n**Tests:**\n"
+            "- mentions the `#42` ticket reference in its message\n"
+            "- rejects other input\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block),
+            ["mentions the `#42` ticket reference in its message", "rejects other input"],
+        )
+
+    def test_parse_test_cases_matches_pre_regression_parser_for_heading_adjacent_block(
+        self,
+    ):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Tests:**\n"
+            "- rejects empty email\n"
+            "- retries 3 times\n"
+            "### Task 2: Next thing\n- [ ] Done\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_test_cases(block),
+            ["rejects empty email", "retries 3 times"],
+        )
+
     def test_last_task_in_file_eof_terminated_extracts_fully(self):
         code, out, err = self._run([self.plan_no_spec, "2", "--out", self.tmpdir.name])
         self.assertEqual(code, 0, err)
