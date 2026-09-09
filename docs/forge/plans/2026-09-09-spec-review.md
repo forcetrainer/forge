@@ -10,6 +10,7 @@
 - Python 3 standard library only; no new dependency enters the plugin (constraint: `stdlib-only`).
 - No file outside `skills/brainstorming/design-anti-patterns.md` restates an anti-pattern Gate; the doc is loaded by reference, never inlined.
 - Spec review's reference table is never a lint rule; `lint_living_spec` keeps exactly five rules.
+- Resolution and validation failures raise or exit non-zero naming the cause; a tool's fatal error is never collapsed into a legal negative result (constraint: `parsers-fail-loud`).
 
 ### Task 1: Reference table
 - [ ] Done
