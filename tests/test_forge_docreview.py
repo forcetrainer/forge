@@ -181,9 +181,12 @@ DEFAULT_SPEC_SECTIONS = ["sec"]
 
 def _valid_verdict(**overrides):
     """A minimal schema-valid verdict for one unresolved ref ``a/b.py``.
-    Overrides replace top-level keys wholesale."""
+    Overrides replace top-level keys wholesale. ``verdict`` defaults to
+    whatever is self-consistent with the (possibly overridden) ``findings``
+    list — ``pass`` when empty, ``findings`` when not — unless the caller
+    overrides ``verdict`` explicitly (e.g. to test the envelope/findings
+    consistency rule itself)."""
     base = {
-        "verdict": "findings",
         "references": [
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "not yet built"}
         ],
@@ -193,10 +196,45 @@ def _valid_verdict(**overrides):
         "findings": [],
     }
     base.update(overrides)
+    if "verdict" not in overrides:
+        findings = base.get("findings")
+        base["verdict"] = "findings" if isinstance(findings, list) and findings else "pass"
     return base
 
 
 class ValidateVerdictTests(unittest.TestCase):
+    # --- verdict envelope (Task 7 rework: the envelope was a top-level
+    # scalar, outside _REQUIRED_FIELDS_SCHEMA's reach into the three entry
+    # arrays) ------------------------------------------------------------
+
+    def test_missing_top_level_verdict_key_is_invalid(self):
+        verdict = _valid_verdict()
+        del verdict["verdict"]
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("verdict" in defect for defect in result.defects))
+
+    def test_verdict_value_outside_enum_is_invalid(self):
+        verdict = _valid_verdict(verdict="banana")
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("banana" in defect for defect in result.defects))
+
+    def test_verdict_pass_with_findings_is_invalid(self):
+        verdict = _valid_verdict(verdict="pass", findings=[{
+            "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
+            "evidence": "e", "proposed_amendment": "pa",
+        }])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("pass" in defect and "findings" in defect for defect in result.defects))
+
+    def test_verdict_findings_with_no_findings_is_invalid(self):
+        verdict = _valid_verdict(verdict="findings", findings=[])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("findings" in defect for defect in result.defects))
+
     def test_missing_references_entry_for_unresolved_ref_is_invalid(self):
         verdict = _valid_verdict(references=[])
         result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
@@ -632,21 +670,17 @@ class BuildPacketTests(unittest.TestCase):
         with open(self.spec_path, "w", encoding="utf-8") as f:
             f.write(SPEC_FIXTURE)
 
-    def test_unscoped_packet_contains_whole_spec(self):
+    def test_packet_always_contains_every_section_of_the_spec(self):
+        # Scoped review is deleted (spec: Spec review, "Amendments re-enter,
+        # and the review is always whole-document") — a packet for a spec
+        # always carries every section, with no way to ask for less.
         packet = d.build_packet(self.spec_path)
         self.assertIn("Alpha references", packet)
         self.assertIn("Beta references", packet)
 
-    def test_scoped_packet_contains_named_section_and_full_document(self):
-        packet = d.build_packet(self.spec_path, sections=["Alpha section"])
-        self.assertIn("Alpha references", packet)
-        # the full document still rides along as context even though only
-        # Alpha was named.
-        self.assertIn("Beta references", packet)
-
-    def test_scoped_packet_states_contradiction_applies_to_whole_document(self):
-        packet = d.build_packet(self.spec_path, sections=["Alpha section"])
-        self.assertIn("regardless of scope", packet.lower())
+    def test_build_packet_takes_no_sections_parameter(self):
+        with self.assertRaises(TypeError):
+            d.build_packet(self.spec_path, sections=["Alpha section"])
 
     def test_packet_references_anti_patterns_doc_by_path_without_inlining(self):
         packet = d.build_packet(self.spec_path)
@@ -668,6 +702,38 @@ class BuildPacketTests(unittest.TestCase):
         self.assertIn("unverifiable", packet)
         self.assertIn("replaced_system", packet)
         self.assertIn("dependencies_read", packet)
+
+    def test_packet_states_the_top_level_verdict_envelope(self):
+        # A fresh reviewer's entire prompt is this packet — a field the
+        # packet doesn't name is a field the reviewer has no way to know to
+        # emit (Task 7 rework: the envelope itself, `verdict`, was such a
+        # field). Distinctive substrings unique to the envelope statement,
+        # not phrases (like the bare word "verdict") that already appear
+        # elsewhere in the packet for other reasons — see
+        # test_packet_envelope_statement_check_catches_its_own_removal for
+        # proof this actually discriminates.
+        packet = d.build_packet(self.spec_path)
+        self.assertIn("written to a file", packet)
+        self.assertIn('"verdict"', packet)
+        self.assertIn("pass", packet)
+        self.assertIn("carries at least one", packet)
+
+    def test_packet_envelope_statement_check_catches_its_own_removal(self):
+        # Proves the check above actually discriminates: with the envelope
+        # line stripped out of the rendered required-fields text (the rest
+        # of the packet, including its "Required verdict fields" heading,
+        # left intact), the same assertions must fail.
+        lines = d._required_verdict_fields_text().splitlines()
+        stripped = "\n".join(l for l in lines if "written to a file" not in l) + "\n"
+        with mock.patch.object(d, "_required_verdict_fields_text", return_value=stripped):
+            packet = d.build_packet(self.spec_path)
+        with self.assertRaises(AssertionError):
+            self.assertIn("written to a file", packet)
+
+    def test_no_scoped_packet_helper_remains_in_the_module(self):
+        # Scoped review is deleted rather than merely unreachable — the
+        # helper itself must not exist (Task 7 acceptance).
+        self.assertFalse(hasattr(d, "_scoped_reference_table"))
 
 
 class DocreviewCliTests(unittest.TestCase):
@@ -691,6 +757,7 @@ class DocreviewCliTests(unittest.TestCase):
 
     def test_cli_with_valid_verdict_writes_decision_file_and_exits_zero(self):
         verdict = {
+            "verdict": "pass",
             "references": [
                 {
                     "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
@@ -745,6 +812,13 @@ class DocreviewCliTests(unittest.TestCase):
         result = self.run_cli(["--spec", missing_path])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(missing_path, result.stderr)
+
+    def test_cli_rejects_section_as_an_unknown_argument(self):
+        # Scoped review is deleted, not merely undocumented — argparse must
+        # reject --section outright (Task 7 acceptance).
+        result = self.run_cli(["--spec", self.spec_path, "--section", "Alpha section"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--section", result.stderr)
 
     # --- t3-1: a structurally non-object verdict must name the cause and
     # exit non-zero, never crash with an uncaught traceback (parsers-fail-
@@ -820,6 +894,7 @@ class DocreviewCliTests(unittest.TestCase):
 
     def test_cli_decision_write_with_unwritable_out_exits_nonzero_naming_cause(self):
         verdict = {
+            "verdict": "pass",
             "references": [
                 {
                     "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
@@ -875,6 +950,7 @@ class CliValidityOrderingTests(unittest.TestCase):
         # crashes on it (`"in"` on an int) if ever reached — the exact
         # shape the ordering bug let through.
         return self._write_verdict({
+            "verdict": "findings",
             "references": [
                 {
                     "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",
@@ -897,6 +973,7 @@ class CliValidityOrderingTests(unittest.TestCase):
 
     def _valid_verdict_path(self):
         return self._write_verdict({
+            "verdict": "findings",
             "references": [
                 {
                     "ref": NO_SUCH_SYMBOL, "disposition": "unverifiable",

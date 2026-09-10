@@ -254,6 +254,56 @@ def test_skill_states_the_invalid_verdict_retry_rule():
     assert "contract error" in text
 
 
+# --- Task 7: the gate is invokable -------------------------------------
+
+
+def _step_8_text():
+    """Step 8's own text, isolated from the rest of the skill so a check
+    here cannot pass on wording that actually lives in a neighboring
+    step."""
+    text = _skill_text()
+    start = text.index("**Spec review**")
+    end = text.index("**Close out**")
+    return text[start:end]
+
+
+def test_step_8_names_the_packet_generation_command():
+    step = _step_8_text()
+    assert "forge_docreview.py --spec" in step
+    assert "--out" in step
+
+
+def test_step_8_states_the_reviewer_is_a_fresh_agent_prompted_with_the_packet_path():
+    step = _step_8_text()
+    assert "fresh" in step
+    assert "packet file" in step or "packet's file" in step
+
+
+def test_step_8_states_verdict_validation_and_nonzero_exit_meaning():
+    step = _step_8_text()
+    assert "--verdict" in step
+    assert "non-zero exit" in step
+    assert "invalid verdict" in step
+
+
+def test_step_8_states_the_caller_owns_the_single_retry():
+    step = _step_8_text()
+    assert "caller" in step
+    assert "one retry naming the specific defect" in step
+
+
+def test_step_8_does_not_describe_tier_routing_rework_or_convergence():
+    step = _step_8_text().lower()
+    for phrase in ("tier", "rework", "convergence", "backstop"):
+        assert phrase not in step, f"step 8 describes {phrase!r} — heavier than a single-shot gate"
+
+
+def test_step_8_states_amendments_are_whole_document_not_scoped():
+    step = _step_8_text()
+    assert "whole document" in step
+    assert "scoped" not in step.lower()
+
+
 # --- agreement: doc's schema-backed markings vs the module's required fields
 
 BACKED_FIELDS_RE = re.compile(r"required verdict fields?(.*?)Deleting", re.DOTALL)
