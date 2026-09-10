@@ -32,6 +32,10 @@ REPO_ROOT = forge_common.REPO_ROOT
 BACKTICK_RE = re.compile(r'`([^`\n]+)`')
 # identifier, dotted name (a.b.c), or name()/a.b.c() form.
 SYMBOL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\(\))?$')
+# angle-bracketed placeholder text such as `<system>` or `<N>` — a template
+# metavariable, never a reference (spec: Spec review, Classification
+# precision).
+METAVAR_RE = re.compile(r'<[^<>]+>')
 
 
 @dataclass
@@ -40,6 +44,11 @@ class Reference:
     shape: str  # "path" | "symbol" | "other"
     resolved: bool
     found_at: "str | None"
+    # Populated only when a path-shaped ref matched more than one tracked
+    # path by unique-suffix resolution — `resolved` stays False (never a
+    # silent pick among candidates) but this names what it's ambiguous
+    # against, for reporting (spec: Spec review, Classification precision).
+    ambiguous_matches: "list[str] | None" = None
 
 
 def _tracked_files():
@@ -62,6 +71,11 @@ def _extension_set(tracked_files):
 
 
 def _classify(ref, extensions):
+    if METAVAR_RE.search(ref):
+        # A template metavariable is dropped like a flag or an enum value —
+        # never a path/symbol claim, regardless of what else the span looks
+        # like (e.g. `docs/forge/specs/<system>.md` still contains "/").
+        return "other"
     if "/" in ref:
         return "path"
     if any(ref.endswith(ext) for ext in extensions):
@@ -71,30 +85,76 @@ def _classify(ref, extensions):
     return "other"
 
 
-def _resolve_path(ref, tracked_set):
+def _tracked_dirs(tracked_files):
+    """Every directory path implied by some tracked file, e.g. `a/b/c.py`
+    contributes `a` and `a/b`."""
+    dirs = set()
+    for f in tracked_files:
+        parts = f.split("/")[:-1]
+        cur = ""
+        for part in parts:
+            cur = f"{cur}/{part}" if cur else part
+            dirs.add(cur)
+    return dirs
+
+
+def _suffix_candidates(tracked_files):
+    """Every tracked file path plus every directory path implied by one —
+    the set a bare basename or relative directory fragment resolves against
+    by unique trailing match (spec: Spec review, Classification precision)."""
+    return set(tracked_files) | _tracked_dirs(tracked_files)
+
+
+def _suffix_matches(norm, candidates):
+    return sorted(p for p in candidates if p == norm or p.endswith("/" + norm))
+
+
+def _resolve_path(ref, tracked_set, suffix_candidates):
     """A path resolves against git-tracked state only — never raw filesystem
     existence, which would make output depend on untracked local litter
-    (build artifacts, `__pycache__`, ...) and vary across checkouts."""
+    (build artifacts, `__pycache__`, ...) and vary across checkouts.
+
+    Three tiers, in order: exact tracked-file match; a tracked-directory
+    prefix match (``ref`` names a directory, not a file); and, failing both,
+    a bare basename or relative directory fragment resolves when exactly one
+    tracked path (file or implied directory) ends with it — reported
+    ambiguous, never a silent pick, when more than one does (spec: Spec
+    review, Classification precision). Returns ``(resolved, found_at,
+    ambiguous_matches)``; the last is non-None only on an ambiguous suffix
+    match."""
     norm = ref.strip("/")
     if not norm:
-        return False, None
+        return False, None, None
     if norm in tracked_set:
-        return True, norm
+        return True, norm, None
     prefix = norm + "/"
     if any(f.startswith(prefix) for f in tracked_set):
-        return True, norm
-    return False, None
+        return True, norm, None
+    matches = _suffix_matches(norm, suffix_candidates)
+    if len(matches) == 1:
+        return True, matches[0], None
+    if len(matches) > 1:
+        return False, None, matches
+    return False, None, None
 
 
-def _resolve_symbol(ref):
+def _resolve_symbol(ref, pathspec=None):
     """Exit 0 is a match; exit 1 is a legitimate no-match (legal, unresolved).
     Anything else is a tool failure — `git grep` couldn't even run — and must
     raise naming the cause, never collapse into a legal negative result
-    (constraint: `parsers-fail-loud`)."""
+    (constraint: `parsers-fail-loud`).
+
+    ``pathspec``, when given, scopes the search to that one tracked file —
+    the same grep, reused (never duplicated) by the structural check on
+    ``dependencies_read[].symbol`` (spec: Spec review, Structural
+    verification), which must confirm the symbol appears in the specific
+    file claimed, not merely somewhere in the repo."""
     search_text = ref[:-2] if ref.endswith("()") else ref
+    argv = ["git", "grep", "-n", "-F", "-e", search_text]
+    if pathspec is not None:
+        argv += ["--", pathspec]
     result = subprocess.run(
-        ["git", "grep", "-n", "-F", "--", search_text],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        argv, cwd=REPO_ROOT, capture_output=True, text=True,
     )
     if result.returncode == 0:
         path, line, _ = result.stdout.splitlines()[0].split(":", 2)
@@ -129,26 +189,40 @@ def extract_references(spec_text):
     tracked_files = _tracked_files()
     tracked_set = set(tracked_files)
     extensions = _extension_set(tracked_files)
+    suffix_candidates = _suffix_candidates(tracked_files)
 
     references = []
     for ref in seen:
         shape = _classify(ref, extensions)
+        ambiguous_matches = None
         if shape == "path":
-            resolved, found_at = _resolve_path(ref, tracked_set)
+            resolved, found_at, ambiguous_matches = _resolve_path(
+                ref, tracked_set, suffix_candidates
+            )
         elif shape == "symbol":
             resolved, found_at = _resolve_symbol(ref)
         else:
             resolved, found_at = False, None
         references.append(
-            Reference(ref=ref, shape=shape, resolved=resolved, found_at=found_at)
+            Reference(
+                ref=ref, shape=shape, resolved=resolved, found_at=found_at,
+                ambiguous_matches=ambiguous_matches,
+            )
         )
     return references
 
 
 def reference_table(spec_text):
     """The checklist: only ``path`` and ``symbol`` entries — ``other`` (flags,
-    enum values, constraint ids) is noise and is dropped."""
-    return [r for r in extract_references(spec_text) if r.shape in ("path", "symbol")]
+    enum values, constraint ids) is noise and is dropped. A span with no
+    alphanumeric character (a bare `/` from a sentence about path syntax, a
+    stray punctuation token) is dropped too — it is not a reference, even
+    though slash-detection alone would classify it path-shaped (spec: Spec
+    review, Classification precision)."""
+    return [
+        r for r in extract_references(spec_text)
+        if r.shape in ("path", "symbol") and any(ch.isalnum() for ch in r.ref)
+    ]
 
 
 # --- verdict validation and disposition (Document review contract) ----------
@@ -288,6 +362,96 @@ def _validate_required_fields(entries_by_type, defects):
                     )
 
 
+def _validate_dependencies_read(entries, defects):
+    """Structural verification of ``dependencies_read`` — a field carrying a
+    claim about the repository is verified, not merely non-blank (spec: Spec
+    review, Structural verification). ``file`` must name a tracked file;
+    ``symbol`` must actually appear in that file, checked by reusing
+    ``_resolve_symbol`` (Task 1's symbol resolution) scoped to the one file,
+    never a second grep implementation. Skips a field already reported blank
+    by ``_validate_required_fields`` — this is a second, independent check on
+    top of that one, not a replacement for it."""
+    tracked_set = set(_tracked_files())
+    for i, entry in entries:
+        label = _entry_label(entry, "dependencies_read", "symbol", i)
+        file_val = entry.get("file")
+        if _is_blank(file_val):
+            continue
+        if not isinstance(file_val, str) or file_val not in tracked_set:
+            defects.append(
+                "dependencies_read entry {!r} names file {!r} which is not "
+                "a tracked file".format(label, file_val)
+            )
+            continue
+        symbol_val = entry.get("symbol")
+        if _is_blank(symbol_val) or not isinstance(symbol_val, str):
+            continue
+        found, _found_at = _resolve_symbol(symbol_val, pathspec=file_val)
+        if not found:
+            defects.append(
+                "dependencies_read entry {!r} names symbol {!r} which does "
+                "not appear in {!r}".format(label, symbol_val, file_val)
+            )
+
+
+def _resolve_section(name, spec_sections):
+    """Case-insensitive unique-prefix match of ``name`` against
+    ``spec_sections`` (the real heading texts of the spec under review).
+    Returns the list of matching section names — empty means unresolved,
+    more than one means ambiguous; the caller decides which, never a silent
+    pick.
+
+    Calls ``extract-brief.match_heading_names`` — the exact predicate
+    ``find_spec_sections`` itself uses — rather than reimplementing it, so
+    the two cannot silently drift apart on what counts as a match (this is
+    the fix for rework finding f1: an earlier version of this function
+    stripped numbering from the query too, which `find_spec_sections` never
+    does). Not a call to ``find_spec_sections`` itself: that function takes
+    raw ``spec_lines`` (`validate_verdict`'s required ``spec_sections``
+    argument is contractually a flat list of heading-name strings, not
+    lines — see its acceptance command) and also walks headings to compute
+    each section's content boundary, which this check has no use for; it
+    also raises fail-fast on the first non-match/ambiguity, whereas every
+    finding here must be checked and every defect collected in one
+    non-raising pass — telling "not found" apart from "ambiguous" by
+    catching ``RuntimeError`` and parsing its message text would be the
+    meaning-vs-spelling anti-pattern this plan's Acceptance bar forbids
+    elsewhere. Pseudo-heading tuples are built here only to match
+    ``match_heading_names``'s ``(level, raw_text, stripped_text,
+    start_index)`` shape; level and index are unused by the predicate and
+    are placeholders. `tests/test_forge_docreview.py`'s
+    ``SectionMatcherParityTests`` is the tripwire that would still catch a
+    future drift (e.g. if `match_heading_names` itself grew a second
+    caller-specific branch)."""
+    strip = forge_common.eb.strip_heading_text
+    headings = [(0, s, strip(s), i) for i, s in enumerate(spec_sections)]
+    return [h[1] for h in forge_common.eb.match_heading_names(name, headings)]
+
+
+def _validate_findings_sections(entries, spec_sections, defects):
+    """``findings[].section`` must name a real section of the spec under
+    review — a claim about the document, verified the same way
+    ``dependencies_read`` is, not left as a blankness-only check (spec: Spec
+    review, Structural verification). Skips a blank ``section`` — already
+    reported by ``_validate_required_fields``."""
+    for i, entry in entries:
+        label = _entry_label(entry, "findings", "id", i)
+        section_val = entry.get("section")
+        if _is_blank(section_val) or not isinstance(section_val, str):
+            continue
+        matches = _resolve_section(section_val, spec_sections)
+        if not matches:
+            defects.append(
+                "finding {!r} names section {!r} which does not match any "
+                "section of the spec under review".format(label, section_val)
+            )
+        elif len(matches) > 1:
+            defects.append(
+                "finding {!r} names section {!r} which is ambiguous: "
+                "matches {}".format(label, section_val, ", ".join(matches))
+            )
+
+
 @dataclass
 class VerdictResult:
     valid: bool
@@ -301,7 +465,7 @@ class Disposition:
     surface: "list[dict]"
 
 
-def validate_verdict(verdict, unresolved_refs, repo_root):
+def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     """Validate a document review verdict against the Document review
     contract (spec: `execution` "Document review contract"). Returns a
     ``VerdictResult`` — never raises on a malformed verdict, because every
@@ -313,9 +477,20 @@ def validate_verdict(verdict, unresolved_refs, repo_root):
     ``unresolved_refs`` is the set of ref strings the reviewer owes a
     disposition on (the packet's reference table, filtered to unresolved).
     ``repo_root`` is accepted for interface symmetry with ``dispose`` and
-    ``validate_citation``; this function's checks are schema-only and never
-    touch the filesystem — citation resolution is `dispose`'s job."""
-    del repo_root  # schema-only checks; citation resolution happens in dispose()
+    ``validate_citation``; citation resolution itself is still `dispose`'s
+    job. ``spec_sections`` is the **required** list of the spec under
+    review's real section heading texts, checked against
+    ``findings[].section`` (spec: Spec review, Structural verification) — a
+    caller that does not supply it is a ``TypeError``, not a silently
+    skipped check (issue #68: an enforcement input a caller may omit is
+    enforcement that silently vanishes).
+
+    Beyond schema shape, this function now also verifies two fields whose
+    value is a claim about the repository rather than free prose:
+    ``dependencies_read[].file``/``.symbol`` (against git-tracked state) and
+    ``findings[].section`` (against ``spec_sections``) — both touch the
+    filesystem/git, unlike the purely structural checks below."""
+    del repo_root  # accepted for interface symmetry; citation resolution happens in dispose()
     defects = []
 
     # Parse each declared entry array once, skipping (and reporting, never
@@ -335,6 +510,13 @@ def validate_verdict(verdict, unresolved_refs, repo_root):
     # of the unresolved-ref set, and the replaced_system boolean/guarantees
     # relationship.
     _validate_required_fields(entries_by_type, defects)
+
+    # Structural verification: a required field carrying a claim about the
+    # repository is verified, not merely non-blank (spec: Spec review,
+    # Structural verification) — the mechanical backstop against designing
+    # against a function or section never actually read.
+    _validate_dependencies_read(entries_by_type["dependencies_read"], defects)
+    _validate_findings_sections(entries_by_type["findings"], spec_sections, defects)
 
     unresolved_set = set(unresolved_refs)
     covered = set()
@@ -524,20 +706,40 @@ def _required_verdict_fields_text():
     return "\n".join(lines) + "\n"
 
 
+def _reference_state_text(r):
+    """The one place a ``Reference``'s state becomes reviewer-facing text —
+    shared by both renderers so an ambiguous entry (more than one tracked
+    path matched a bare basename/directory fragment by unique-suffix
+    resolution — never a silent pick, see `_resolve_path`) is always
+    visibly distinguishable from a plain unresolved one and always names
+    its candidates, not just reported as "unresolved" and left
+    indistinguishable (spec: Spec review, Classification precision — f2)."""
+    if r.resolved:
+        return "resolved at {}".format(r.found_at)
+    if r.ambiguous_matches:
+        return "ambiguous: matches {}".format(", ".join(r.ambiguous_matches))
+    return "unresolved"
+
+
 def _render_reference_table(table):
     if not table:
         return "(no path/symbol references)\n"
     lines = []
     for r in table:
-        state = "resolved at {}".format(r.found_at) if r.resolved else "unresolved"
-        lines.append("- `{}` ({}, {})".format(r.ref, r.shape, state))
+        lines.append("- `{}` ({}, {})".format(r.ref, r.shape, _reference_state_text(r)))
     return "\n".join(lines) + "\n"
 
 
 def _render_unresolved_list(unresolved):
     if not unresolved:
         return "(none)\n"
-    return "\n".join("- `{}`".format(r.ref) for r in unresolved) + "\n"
+    lines = []
+    for r in unresolved:
+        if r.ambiguous_matches:
+            lines.append("- `{}` — {}".format(r.ref, _reference_state_text(r)))
+        else:
+            lines.append("- `{}`".format(r.ref))
+    return "\n".join(lines) + "\n"
 
 
 def _scoped_reference_table(lines, sections):
@@ -556,6 +758,25 @@ def _scoped_reference_table(lines, sections):
         )
         return scoped_sections, table
     return None, reference_table("".join(lines))
+
+
+def _all_spec_section_names(spec_lines):
+    """Every heading's raw text in ``spec_lines`` — the section names
+    ``findings[].section`` is checked against (`validate_verdict`'s required
+    ``spec_sections`` argument). Always the *whole* document's headings, not
+    just a ``--section``-scoped subset: a finding may legitimately cite any
+    section of the spec under review, and the whole-document contradiction
+    question already applies regardless of scope (spec: Spec review)."""
+    eb = forge_common.eb
+    mask = eb.fence_mask(spec_lines)
+    names = []
+    for i, line in enumerate(spec_lines):
+        if mask[i]:
+            continue
+        m = eb.HEADING_RE.match(line)
+        if m:
+            names.append(m.group(2).strip())
+    return names
 
 
 def build_packet(spec_path, sections=None):
@@ -711,8 +932,11 @@ def main(argv=None):
     spec_lines = forge_common.eb.read_lines(args.spec)
     _, table = _scoped_reference_table(spec_lines, args.section or None)
     unresolved_refs = [r.ref for r in table if not r.resolved]
+    # Always the whole spec's section names, never scoped to --section — see
+    # `_all_spec_section_names`.
+    spec_sections = _all_spec_section_names(spec_lines)
 
-    result = validate_verdict(verdict, unresolved_refs, args.repo_root)
+    result = validate_verdict(verdict, unresolved_refs, args.repo_root, spec_sections)
     if not result.valid:
         # Disposition is only meaningful for a verdict that already passed
         # validation (dispose()/validate_citation assume a validated shape
