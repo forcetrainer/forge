@@ -425,8 +425,10 @@ auto-amend path by labelling it a fact.
 
 **Disposition:**
 
-- `groundedness` → the author amends the spec; the review re-runs **scoped to the
-  amendment**. Converges on the rework loop's rules, same backstop.
+- `groundedness` → the author amends the spec; the review re-runs over the **whole
+  document**, never a slice of it (`pipeline` spec: Spec review — scoping was specified
+  and dropped, since "the changed sections" never fixed a baseline). Converges on the
+  rework loop's rules, same backstop.
 - `sufficiency`, `contradiction` → **surfaced to the user** with `proposed_amendment`.
   Nothing in these kinds is auto-applied: a spec defect is often a decision, not a repair.
 
@@ -996,6 +998,8 @@ Any cost claim requires measurement against a comparable run.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
 
 ## Changelog
+
+2026-09-09: a groundedness re-review runs over the whole document, matching pipeline's amended Spec review rule — the two specs contradicted each other for one commit, which plan lint structurally cannot catch since --spec takes a single file (#62, #96)
 
 2026-09-09: document review contract — a spec review emits its own verdict schema rather than the diff-shaped one; `dependencies_read` and `replaced_system` are required fields backing two hunting-list gates; `groundedness` findings need a validated code citation or downgrade to `sufficiency`; facts auto-amend, design surfaces (#96)
 
