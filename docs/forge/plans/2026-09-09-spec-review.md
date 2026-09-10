@@ -185,7 +185,7 @@
 
 **Depends on:** Task 3, Task 4.
 
-### Task 6: Verify the claims a verdict makes about the repository
+### Task 6: Verify a verdict's claims, and make the table signal
 - [ ] Done
 
 **Files:**
@@ -194,7 +194,7 @@
 
 **Spec:** Spec review
 
-**Interface:** required fields whose value is a claim about the repository are verified, not merely non-blank. `dependencies_read[].file` must name a tracked file; `dependencies_read[].symbol` must actually appear in that file, reusing Task 1's symbol resolution rather than a second grep; `findings[].section` must name a real section of the spec under review, matched case-insensitively on a unique prefix, consistent with `extract-brief.find_spec_sections`. Each failure is a defect naming the entry and what could not be verified, reported in the same single pass as every other defect. `validate_verdict` gains the spec's section names as a **required** argument, never optional and never defaulted — an enforcement input that may be omitted is enforcement that silently vanishes (issue #68), so a caller that does not supply it is an error rather than a skipped check. The five irreducibly free-prose fields — both `evidence` fields, `behavior`, `summary`, `proposed_amendment` — keep blankness as their only check; nothing verifiable is claimed by them.
+**Interface:** required fields whose value is a claim about the repository are verified, not merely non-blank. `dependencies_read[].file` must name a tracked file; `dependencies_read[].symbol` must actually appear in that file, reusing Task 1's symbol resolution rather than a second grep; `findings[].section` must name a real section of the spec under review, matched case-insensitively on a unique prefix, consistent with `extract-brief.find_spec_sections`. Each failure is a defect naming the entry and what could not be verified, reported in the same single pass as every other defect. `validate_verdict` gains the spec's section names as a **required** argument, never optional and never defaulted — an enforcement input that may be omitted is enforcement that silently vanishes (issue #68), so a caller that does not supply it is an error rather than a skipped check. **Classification precision.** The table must be signal rather than noise (`pipeline` spec): a reviewer owing a written disposition on entries that are not claims about the codebase is a reviewer being trained to rubber-stamp. Measured on `pipeline.md`, 13 of 16 unresolved entries are not claims. Three classes are mechanically separable and must be. A span containing a metavariable — angle-bracketed placeholder text such as a `<system>` or `<N>` segment — is a template, not a reference, and is dropped like a flag or an enum value. A span with no alphanumeric character is not a reference. A span naming a bare basename or a relative directory fragment resolves when exactly one tracked path ends with it, and is reported ambiguous rather than unresolved when more than one does — never a silent pick. The five irreducibly free-prose fields — both `evidence` fields, `behavior`, `summary`, `proposed_amendment` — keep blankness as their only check; nothing verifiable is claimed by them.
 
 **Tests:**
 - a dependencies_read entry naming a file that does not exist is a defect
@@ -209,12 +209,20 @@
 - omitting the spec section names is an error, never a silently skipped check
 - structural defects and required-field defects are reported together in one pass
 - the free-prose fields are still checked for blankness only
+- a span containing an angle-bracketed metavariable is dropped, not reported unresolved
+- a span with no alphanumeric character is dropped
+- a bare basename matching exactly one tracked path resolves, naming that path
+- a relative directory fragment matching exactly one tracked directory resolves
+- a bare basename matching two tracked paths is reported ambiguous, never silently picked
+- a basename matching no tracked path is still reported unresolved
+- pipeline.md yields no unresolved entry that is a placeholder, a bare punctuation span, or the basename of an existing file
 
 **Acceptance:**
 - `python3 -m pytest tests/test_forge_docreview.py -q` passes with no skips introduced by this task
 - `python3 -m pytest tests/ -q` passes with no skips introduced by this task
 - `python3 -c "import sys; sys.path.insert(0,'scripts'); import forge_docreview as d; v={'verdict':'findings','references':[],'dependencies_read':[{'symbol':'reticulate_splines','file':'scripts/does_not_exist.py','behavior':'x'}],'replaced_system':{'applies':False},'findings':[]}; r=d.validate_verdict(v, [], '.', ['Spec review']); assert not r.valid, 'fabricated claim accepted'"` — a fabricated dependency claim is rejected
 - `! grep -n 'spec_sections=None\|spec_sections = None' scripts/forge_docreview.py` — the enforcement input has no default
+- `python3 -c "import sys; sys.path.insert(0,'scripts'); import forge_docreview as d; u=[r.ref for r in d.reference_table(open('docs/forge/specs/pipeline.md').read()) if not r.resolved]; bad=[x for x in u if '<' in x or not any(c.isalnum() for c in x)]; assert not bad, bad; print(len(u))"` — no placeholder or punctuation span survives as unresolved
 
 **Tier:** standard
 
