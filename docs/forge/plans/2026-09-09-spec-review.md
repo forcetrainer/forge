@@ -178,7 +178,7 @@
 - `python3 -m pytest tests/test_forge_docs.py -q` passes with no skips introduced by this task
 - `python3 -m pytest tests/ -q` passes with no skips introduced by this task
 - `grep -q '@design-anti-patterns.md' skills/brainstorming/SKILL.md` — the reference form is present
-- `! grep -rn 'Trigger:' skills/brainstorming/SKILL.md` — no Gate or entry text is inlined into the skill
+- `python3 -m pytest tests/test_forge_docs.py -q -k restated` passes — no Gate text is inlined into the skill, checked against the document's actual Gate sentences rather than against the literal word `Trigger:`, which is the skill's own gear-routing vocabulary and unrelated to an anti-pattern entry
 - `python3 scripts/forge_lint.py --specs` exits 0
 
 **Tier:** standard
