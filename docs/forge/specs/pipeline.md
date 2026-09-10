@@ -242,7 +242,16 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   the skip exit non-zero. A grep for text is not a command: acceptance executes the
   behavior and asserts on what changed, not on words describing it. Prose artifacts —
   skills, docs, migrations — are the stated exception: nothing is executable, so
-  mechanical text checks are the correct form (`testing-anti-patterns.md`).
+  mechanical text checks are the correct form (`testing-anti-patterns.md`). That
+  exception carries its own bar: **a mechanical text check must be demonstrated to fail
+  when the thing it guards is violated** — plant the violation, confirm red, restore.
+  A check nobody has seen fail is not known to check anything, and a passing suite says
+  nothing about it. Write the check against the requirement's **meaning, not its
+  spelling**: a grep for a chosen string is defeated by any violation spelled
+  differently, and fires on any innocent line spelled the same. Observed repeatedly —
+  a needle that missed a line-wrapped copy, a count that an empty marker satisfied, a
+  denylist of two literal names, and an acceptance command that could never pass because
+  its word was the file's own vocabulary.
 - **Field clause grammar** governs every machine-read multi-clause field —
   `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
@@ -378,6 +387,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-09: the prose exception to execute-don't-substring gains a bar — a mechanical text check must be demonstrated to fail when the thing it guards is violated, and is written against the requirement's meaning rather than its spelling; five checks in the #96 run were green while guarding nothing, including one whose requirement, acceptance command and eponymous test all passed with the violation in place (#98)
 
 2026-09-09: spec review — a cold reviewer validates a spec against the codebase before planning, with a mechanical reference table it owes a disposition on and `design-anti-patterns.md` as its single tuning surface; self-review stays but is no longer the gate; amendments re-enter scoped to changed sections (#96)
 
