@@ -21,7 +21,7 @@
         "url": "https://github.com/forcetrainer/forge.git",
         "sha": "02adfe4cdf4dc70ffa426892678f2fb2f8b79397"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.2-beta): the machine-read plan fields share one clause grammar — marker-alone-plus-bullets or a single-line one clause, with ';' and '.' literal below the bullet — and an ambiguous field is refused by lint rather than silently collapsed; the TDD anti-patterns reference is a stack-neutral falsifiability guide."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.3-beta): a spec is now validated against the codebase by a cold reviewer before planning begins — a mechanical reference table the reviewer owes a disposition on, a document-shaped verdict whose dependency and section claims are verified rather than trusted, and design-anti-patterns.md as the single tuning surface for what the review hunts."
     }
   ]
 }
