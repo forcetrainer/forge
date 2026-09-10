@@ -230,6 +230,7 @@ def reference_table(spec_text):
 
 _REFERENCE_DISPOSITIONS = {"intended-new", "wrong", "unverifiable"}
 _FINDING_KINDS = {"groundedness", "sufficiency", "contradiction"}
+_VERDICT_VALUES = {"pass", "findings"}
 
 # The declared schema for required-field checking (Document review contract).
 # One uniform rule reads this table; a field nobody enumerated is not a hole
@@ -252,6 +253,42 @@ _REQUIRED_FIELDS_SCHEMA = {
         "label_field": "id",
     },
 }
+
+# The declared schema for the verdict's own top-level scalar fields — the
+# same "a field nobody enumerated is not a hole" guarantee
+# ``_REQUIRED_FIELDS_SCHEMA`` gives the three entry arrays, extended one
+# level up to the enclosing object's own keys (issue: the verdict envelope
+# itself, `verdict`, was a hole because that table only ever reached
+# entries *inside* an array). Adding a required top-level scalar is the
+# entire change needed to enforce it, same as the entry-array table.
+_TOP_LEVEL_SCALAR_SCHEMA = {
+    "verdict": {"enum": _VERDICT_VALUES},
+}
+
+
+def _validate_top_level_scalars(verdict, defects):
+    """The one uniform required-scalar rule, table-driven from
+    ``_TOP_LEVEL_SCALAR_SCHEMA``: for every declared top-level field, present
+    and meaningfully non-empty (``_is_blank``) — a missing or blank field is
+    a defect naming it — and, when the schema declares an ``enum``, its
+    value is one of the declared set — else a defect naming the value and
+    the legal set. A wrong-typed value (e.g. a bool or number where a string
+    is expected) is caught by ``_is_blank`` (non-string is blank) or by
+    failing the enum membership test, never by crashing downstream."""
+    for field_name, schema in _TOP_LEVEL_SCALAR_SCHEMA.items():
+        value = verdict.get(field_name)
+        if _is_blank(value):
+            defects.append(
+                "missing required field {!r}".format(field_name)
+            )
+            continue
+        enum = schema.get("enum")
+        if enum is not None and value not in enum:
+            defects.append(
+                "{!r} has unknown value {!r}; must be one of {}".format(
+                    field_name, value, sorted(enum)
+                )
+            )
 
 
 _BLANK_CATEGORIES = frozenset({
@@ -489,7 +526,15 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     value is a claim about the repository rather than free prose:
     ``dependencies_read[].file``/``.symbol`` (against git-tracked state) and
     ``findings[].section`` (against ``spec_sections``) — both touch the
-    filesystem/git, unlike the purely structural checks below."""
+    filesystem/git, unlike the purely structural checks below.
+
+    The top-level ``verdict`` scalar is validated the same declared-schema
+    way as the entry arrays (``_TOP_LEVEL_SCALAR_SCHEMA``/
+    ``_validate_top_level_scalars``): required, and — when present — one of
+    ``pass``/``findings``. Self-consistency between ``verdict`` and
+    ``findings[]`` (a `pass` carrying findings, or a `findings` carrying
+    none) is checked separately, since it is a relationship between two
+    fields rather than either field's own shape."""
     del repo_root  # accepted for interface symmetry; citation resolution happens in dispose()
     defects = []
 
@@ -510,6 +555,28 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     # of the unresolved-ref set, and the replaced_system boolean/guarantees
     # relationship.
     _validate_required_fields(entries_by_type, defects)
+
+    # The same rule, one level up: the verdict envelope's own top-level
+    # scalars (currently just `verdict`) — required and enum-checked.
+    _validate_top_level_scalars(verdict, defects)
+
+    # Self-consistency between the envelope and the findings it encloses —
+    # only meaningful once `verdict` itself is a legal value, so this runs
+    # regardless of the scalar check above but only asserts anything when
+    # `verdict` is actually `pass` or `findings`.
+    verdict_value = verdict.get("verdict")
+    if verdict_value in _VERDICT_VALUES:
+        finding_count = len(entries_by_type["findings"])
+        if verdict_value == "pass" and finding_count:
+            defects.append(
+                "verdict is 'pass' but findings is non-empty ({} entries)".format(
+                    finding_count
+                )
+            )
+        elif verdict_value == "findings" and not finding_count:
+            defects.append(
+                "verdict is 'findings' but findings is empty"
+            )
 
     # Structural verification: a required field carrying a claim about the
     # repository is verified, not merely non-blank (spec: Spec review,
@@ -645,8 +712,9 @@ def dispose(findings, repo_root):
     "Document review contract"). Returns ``Disposition(amend, surface)``.
 
     A ``groundedness`` finding with a citation that resolves (`validate_
-    citation`) goes to ``amend`` — the author amends the spec, scoped
-    re-review. A ``groundedness`` finding whose citation is absent or
+    citation`) goes to ``amend`` — the author amends the spec and it
+    re-enters review (whole-document, per `pipeline` spec: Spec review). A
+    ``groundedness`` finding whose citation is absent or
     unresolvable is **rewritten** to ``kind: "sufficiency"`` and routed to
     ``surface`` — a real downgrade, not advisory, so a reviewer cannot route
     a design opinion into the auto-amend path by labelling it a fact.
@@ -676,11 +744,21 @@ _ANTI_PATTERNS_DOC = "skills/brainstorming/design-anti-patterns.md"
 
 def _required_verdict_fields_text():
     """The required-field list rendered from the same declared schema
-    ``validate_verdict`` checks against (``_REQUIRED_FIELDS_SCHEMA``) plus the
-    enums and structural rules that schema alone doesn't capture — one
-    source, so a schema change (e.g. a new required field) shows up here
-    with no separate prose to keep in sync."""
+    ``validate_verdict`` checks against (``_REQUIRED_FIELDS_SCHEMA``,
+    ``_TOP_LEVEL_SCALAR_SCHEMA``) plus the enums and structural rules that
+    schema alone doesn't capture — one source, so a schema change (e.g. a
+    new required field) shows up here with no separate prose to keep in
+    sync. States the top-level envelope first: a fresh reviewer's entire
+    prompt is this packet, so a field the packet doesn't name is a field
+    the reviewer has no way to know to emit."""
     lines = []
+    lines.append(
+        "- The verdict is a single JSON object, written to a file: "
+        "`{{\"verdict\": \"{}\", ...}}` — required, one of: {}. `pass` "
+        "carries no `findings`; `findings` carries at least one.".format(
+            "|".join(sorted(_VERDICT_VALUES)), ", ".join(sorted(_VERDICT_VALUES))
+        )
+    )
     for entry_type, schema in _REQUIRED_FIELDS_SCHEMA.items():
         fields = ", ".join("`{}`".format(f) for f in schema["fields"])
         lines.append("- `{}[]` — each entry needs: {}".format(entry_type, fields))
@@ -742,31 +820,11 @@ def _render_unresolved_list(unresolved):
     return "\n".join(lines) + "\n"
 
 
-def _scoped_reference_table(lines, sections):
-    """(scoped_sections, table) for ``lines`` given ``sections`` (``None`` or
-    empty means unscoped): scoped means the table covers only the named
-    sections' own content (the disposition obligation an amendment actually
-    owes — spec: Spec review, "Amendments re-enter, scoped to the changed
-    sections plus their references"); unscoped means the whole document.
-    Shared by ``build_packet`` and the CLI's ``--verdict`` path so the
-    verdict is checked against exactly the reference set the packet
-    displayed, never a wider or narrower one."""
-    if sections:
-        scoped_sections = forge_common.eb.find_spec_sections(lines, sections)
-        table = reference_table(
-            "\n\n".join(content for _, content in scoped_sections)
-        )
-        return scoped_sections, table
-    return None, reference_table("".join(lines))
-
-
 def _all_spec_section_names(spec_lines):
     """Every heading's raw text in ``spec_lines`` — the section names
     ``findings[].section`` is checked against (`validate_verdict`'s required
-    ``spec_sections`` argument). Always the *whole* document's headings, not
-    just a ``--section``-scoped subset: a finding may legitimately cite any
-    section of the spec under review, and the whole-document contradiction
-    question already applies regardless of scope (spec: Spec review)."""
+    ``spec_sections`` argument): a finding may legitimately cite any section
+    of the spec under review (spec: Spec review)."""
     eb = forge_common.eb
     mask = eb.fence_mask(spec_lines)
     names = []
@@ -779,44 +837,25 @@ def _all_spec_section_names(spec_lines):
     return names
 
 
-def build_packet(spec_path, sections=None):
-    """Assemble the reviewer's packet as text (spec: Spec review).
+def build_packet(spec_path):
+    """Assemble the reviewer's packet as text (spec: Spec review). Always the
+    whole document — an amendment re-reviews the whole spec, never a
+    changed-sections scope (`pipeline` spec, "Amendments re-enter, and the
+    review is always whole-document").
 
-    Without ``sections``, the packet carries the whole spec. With
-    ``sections`` (an amendment re-entering, scoped to the changed sections
-    plus their references), the packet carries just the named sections' own
-    reference table — the disposition obligation an amendment actually
-    owes — while still carrying the *full* document as context, and states
-    that the whole-document contradiction question applies regardless of
-    scope: an amendment can contradict a section it never touched.
-
-    Raises (never returns a legal-negative) on a missing/unreadable spec or
-    an unresolvable/ambiguous section name — both `extract-brief.py`
-    failures this function propagates unchanged (constraint:
-    `parsers-fail-loud`).
+    Raises (never returns a legal-negative) on a missing/unreadable spec —
+    an `extract-brief.py` failure this function propagates unchanged
+    (constraint: `parsers-fail-loud`).
     """
     lines = forge_common.eb.read_lines(spec_path)
     full_text = "".join(lines)
 
-    scoped_sections, table = _scoped_reference_table(lines, sections)
+    table = reference_table(full_text)
     unresolved = [r for r in table if not r.resolved]
 
     parts = []
-    if scoped_sections is not None:
-        parts.append("# Scoped sections\n\n")
-        for _, content in scoped_sections:
-            parts.append(content.rstrip("\n") + "\n\n")
-        parts.append(
-            "The whole-document contradiction question applies regardless "
-            "of scope, to sections not named above as well — an amendment "
-            "can contradict a section it did not touch. The full document "
-            "follows as context.\n\n"
-        )
-        parts.append("# Full document (context)\n\n")
-        parts.append(full_text.rstrip("\n") + "\n\n")
-    else:
-        parts.append("# Spec\n\n")
-        parts.append(full_text.rstrip("\n") + "\n\n")
+    parts.append("# Spec\n\n")
+    parts.append(full_text.rstrip("\n") + "\n\n")
 
     parts.append("# Hunting list\n\n")
     parts.append(
@@ -874,13 +913,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="forge_docreview.py")
     parser.add_argument("--spec", required=True)
     parser.add_argument(
-        "--section", action="append", default=[],
-        help="repeatable; a named section scopes the packet's reference "
-             "table to that section (plus its own references) while the "
-             "full document still rides along as context. Omitted: the "
-             "whole document.",
-    )
-    parser.add_argument(
         "--verdict",
         help="path to the reviewer's verdict JSON; when given, validates "
              "and disposes instead of emitting a packet.",
@@ -890,7 +922,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        packet = build_packet(args.spec, sections=args.section or None)
+        packet = build_packet(args.spec)
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
@@ -925,15 +957,12 @@ def main(argv=None):
         )
         return 1
 
-    # The same reference set the packet displayed — scoped to --section when
-    # given, whole-document otherwise (`_scoped_reference_table`) — so the
-    # verdict is checked against exactly what the reviewer was asked to
+    # The same reference set the packet displayed — the whole document — so
+    # the verdict is checked against exactly what the reviewer was asked to
     # dispose of, never a wider or narrower set.
     spec_lines = forge_common.eb.read_lines(args.spec)
-    _, table = _scoped_reference_table(spec_lines, args.section or None)
+    table = reference_table("".join(spec_lines))
     unresolved_refs = [r.ref for r in table if not r.resolved]
-    # Always the whole spec's section names, never scoped to --section — see
-    # `_all_spec_section_names`.
     spec_sections = _all_spec_section_names(spec_lines)
 
     result = validate_verdict(verdict, unresolved_refs, args.repo_root, spec_sections)
