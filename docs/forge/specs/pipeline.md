@@ -111,9 +111,17 @@ check against a document written to satisfy it — the failure this gate exists 
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
 re-review after an amendment is a verification lap and may resume.
 
-**Amendments re-enter**, scoped to the changed sections plus their references, with the
-full document as context. The whole-document contradiction question is asked even in
-scoped mode — an amendment can contradict a section it did not touch.
+**Amendments re-enter, and the review is always whole-document** — never scoped to the
+changed sections. Scoping was specified first and dropped: "changed sections" never said
+changed *relative to what*, and three incompatible baselines each satisfied the words
+while covering different things. Every one of them fails the same way, by running a gate
+that covers less than it claims — a last-commit baseline reviews only the final slice of
+a multi-commit amendment, and an author-declared scope lets the party under review set
+the reviewer's scope. Scoping also bought little: the whole-document contradiction
+question has to be asked regardless, since an amendment can contradict a section it did
+not touch, so the reviewer reads the whole document either way. A stateful
+last-passing-review baseline remains addable later if full review proves costly; its
+fallback when no state exists is this rule.
 
 ### Frontmatter
 
@@ -387,6 +395,8 @@ flow description changed, both plugin manifests (`.claude-plugin/plugin.json`,
 and a session restart to apply.
 
 ## Changelog
+
+2026-09-09: amendment re-review is whole-document, never scoped — "scoped to the changed sections" never defined the baseline, and three incompatible readings each satisfied it while covering different things; scoping saved little because the whole-document contradiction question forces a full read regardless (#96 final review)
 
 2026-09-09: the prose exception to execute-don't-substring gains a bar — a mechanical text check must be demonstrated to fail when the thing it guards is violated, and is written against the requirement's meaning rather than its spelling; five checks in the #96 run were green while guarding nothing, including one whose requirement, acceptance command and eponymous test all passed with the violation in place (#98)
 
