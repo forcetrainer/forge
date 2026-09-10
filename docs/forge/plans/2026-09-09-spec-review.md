@@ -190,6 +190,7 @@
 
 **Files:**
 - Modify: `scripts/forge_docreview.py` (structural verification of `dependencies_read` and `findings[].section`)
+- Modify: `scripts/extract-brief.py` (extract `match_heading_names` from `find_spec_sections` so one implementation of the heading-match rule serves both callers)
 - Test: `tests/test_forge_docreview.py`
 
 **Spec:** Spec review, Plan documents
