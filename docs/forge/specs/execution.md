@@ -386,6 +386,55 @@ second invalid verdict is a contract error, consistent with the unparseable-verd
 behavior. Location validation (below) runs on both review kinds and feeds the same
 retry mechanism.
 
+## Document review contract
+
+The verdict a spec reviewer emits (`pipeline` spec: Spec review). **Separate from the
+reviewer verdict contract above, deliberately:** a document review has no diff, so
+`location.lines` and `provenance` carry no meaning. Bending the diff-shaped schema to fit
+is how a malformed claim passes validation while reporting success (#63).
+
+One JSON object:
+
+```
+{"verdict": "pass" | "findings",
+ "references": [{"ref", "disposition": "intended-new"|"wrong"|"unverifiable", "evidence"}],
+ "dependencies_read": [{"symbol", "file", "behavior"}],
+ "dependencies_waiver": "<reason>" | null,
+ "replaced_system": {"applies": true|false, "guarantees": [...]},
+ "findings": [{"id", "summary", "kind": "groundedness"|"sufficiency"|"contradiction",
+               "section", "evidence", "citation": "<file>:<line>"|null,
+               "proposed_amendment"}]}
+```
+
+- `references` — one entry per **unresolved** reference in the packet's table. A missing
+  entry, or one naming a ref not in the table, invalidates the verdict.
+- `dependencies_read` — the functions the design depends on and what they actually do.
+  Empty is legal only with a non-null `dependencies_waiver`.
+- `replaced_system` — `applies: false` requires no `guarantees`; `applies: true` requires
+  a non-empty list. This is the field behind "what does the old path re-derive that the
+  new one computes once".
+- `dependencies_read` and `replaced_system` are **required**. They are the mechanical
+  enforcement of two hunting-list gates: guidance alone is ignorable, a required field is
+  not. Each is marked in `design-anti-patterns.md`, and the two are checked to agree.
+
+**`kind` drives disposition, and `groundedness` is guarded.** A `groundedness` finding
+**requires** a `citation`, and the citation is validated — the file exists and the line is
+within it. Absent or unresolvable, the finding **downgrades to `sufficiency`** and
+surfaces rather than auto-applying. A reviewer cannot route a design opinion into the
+auto-amend path by labelling it a fact.
+
+**Disposition:**
+
+- `groundedness` → the author amends the spec; the review re-runs over the **whole
+  document**, never a slice of it (`pipeline` spec: Spec review — scoping was specified
+  and dropped, since "the changed sections" never fixed a baseline). Converges on the
+  rework loop's rules, same backstop.
+- `sufficiency`, `contradiction` → **surfaced to the user** with `proposed_amendment`.
+  Nothing in these kinds is auto-applied: a spec defect is often a decision, not a repair.
+
+**Invalid verdict:** one retry naming the specific defect, then a contract error —
+identical to the reviewer verdict contract's behavior, and for the same reason.
+
 ## The disposition matrix
 
 Every finding, per-task and final, is classified on two independent axes and dispatched
@@ -949,6 +998,10 @@ Any cost claim requires measurement against a comparable run.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
 
 ## Changelog
+
+2026-09-09: a groundedness re-review runs over the whole document, matching pipeline's amended Spec review rule — the two specs contradicted each other for one commit, which plan lint structurally cannot catch since --spec takes a single file (#62, #96)
+
+2026-09-09: document review contract — a spec review emits its own verdict schema rather than the diff-shaped one; `dependencies_read` and `replaced_system` are required fields backing two hunting-list gates; `groundedness` findings need a validated code citation or downgrade to `sufficiency`; facts auto-amend, design surfaces (#96)
 
 2026-09-07: the final review and terminal doc-sync stages freeze their uncommitted edits when they halt — both left the tree dirty, so the very next invocation was refused by the clean-tree precondition the freeze design exists to satisfy. The record is stage-keyed and the stage re-runs from scratch rather than replaying it (#59)
 2026-09-07: the `escalated: …` ledger annotation is kept out of a resumed task's review packet — it rode the freeze into the review diff and the extracted task block, telling the cold discovery reviewer the work had been frozen and what the last reviewer said (`discovery-review-is-cold`) (#59)
