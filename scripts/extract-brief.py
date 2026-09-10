@@ -361,6 +361,24 @@ def strip_heading_text(text):
     return re.sub(r'^\d+(\.\d+)*\.?\s+', '', text).strip()
 
 
+def match_heading_names(name, headings):
+    """Case-insensitive unique-prefix match of ``name`` against ``headings``
+    — ``(level, raw_text, stripped_text, start_index)`` tuples as extracted
+    by ``find_spec_sections``. Numbering is stripped only from the candidate
+    side (already baked into ``stripped_text`` by the time it reaches here),
+    never from ``name`` itself — a query that legitimately starts with a
+    digit must not have it silently eaten.
+
+    The single predicate ``find_spec_sections`` and
+    ``forge_docreview._resolve_section`` (spec: Spec review, Structural
+    verification) both use, so the two cannot silently drift apart on what
+    counts as a match — `tests/test_forge_docreview.py`'s
+    ``SectionMatcherParityTests`` is the tripwire that would catch it if
+    they ever did."""
+    needle = name.lower()
+    return [h for h in headings if h[2].lower().startswith(needle)]
+
+
 def find_spec_sections(spec_lines, names):
     mask = fence_mask(spec_lines)
     headings = []  # (level, raw_text, stripped_text, start_index)
@@ -375,7 +393,7 @@ def find_spec_sections(spec_lines, names):
 
     sections = []
     for name in names:
-        matches = [h for h in headings if h[2].lower().startswith(name.lower())]
+        matches = match_heading_names(name, headings)
         if not matches:
             raise RuntimeError(f'spec section not found for "{name}"')
         if len(matches) > 1:
