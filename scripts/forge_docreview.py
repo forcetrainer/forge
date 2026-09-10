@@ -36,6 +36,12 @@ SYMBOL_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\(\)
 # metavariable, never a reference (spec: Spec review, Classification
 # precision).
 METAVAR_RE = re.compile(r'<[^<>]+>')
+# Whitespace or a quote character anywhere in a backticked span — a path
+# reference never contains either. Catches shell commands and JSON/YAML
+# fragments the slash rule alone would otherwise admit as path-shaped, e.g.
+# `source: {source: "local", path: "./"}`, `sh .forge/watch`, `gh issue
+# create/close` (spec: Spec review, Classification precision — f2).
+WHITESPACE_OR_QUOTE_RE = re.compile(r'[\s\'"]')
 
 
 @dataclass
@@ -75,6 +81,11 @@ def _classify(ref, extensions):
         # A template metavariable is dropped like a flag or an enum value —
         # never a path/symbol claim, regardless of what else the span looks
         # like (e.g. `docs/forge/specs/<system>.md` still contains "/").
+        return "other"
+    if WHITESPACE_OR_QUOTE_RE.search(ref):
+        # A path never contains whitespace or a quote character — dropped
+        # like a metavariable, regardless of what else the span looks like
+        # (e.g. `sh .forge/watch` still contains "/").
         return "other"
     if "/" in ref:
         return "path"
@@ -148,9 +159,27 @@ def _resolve_symbol(ref, pathspec=None):
     the same grep, reused (never duplicated) by the structural check on
     ``dependencies_read[].symbol`` (spec: Spec review, Structural
     verification), which must confirm the symbol appears in the specific
-    file claimed, not merely somewhere in the repo."""
+    file claimed, not merely somewhere in the repo.
+
+    Matches on a **word boundary** (``git grep -w``): a substring of a
+    longer identifier never satisfies a claim, e.g. `REPO` must not resolve
+    against a file containing only `REPO_ROOT` (spec: Spec review,
+    Classification precision — f3a). `-w` treats `_` as a word character
+    like Python does, so it draws the line exactly where an identifier
+    boundary actually is.
+
+    KNOWN LIMIT, deliberate, recorded rather than implied away (f3b). This
+    is a fixed-string text search, not a parser: it guarantees only that the
+    named file is tracked and that the symbol text appears in it on a word
+    boundary. It cannot tell a symbol *used* in code from the same word
+    appearing in a comment or a docstring — `churn` mentioned only in a
+    comment, or `seatbelt` only in a docstring, both still resolve. Closing
+    that needs per-language parsing, out of reach under `stdlib-only`. Not
+    fixed by guessing comment syntax per file type: a wrong guess would make
+    the check silently weaker while looking stronger, the same proxy
+    failure this run kept finding elsewhere."""
     search_text = ref[:-2] if ref.endswith("()") else ref
-    argv = ["git", "grep", "-n", "-F", "-e", search_text]
+    argv = ["git", "grep", "-n", "-F", "-w", "-e", search_text]
     if pathspec is not None:
         argv += ["--", pathspec]
     result = subprocess.run(

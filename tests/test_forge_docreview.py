@@ -50,6 +50,31 @@ class ExtractReferencesTests(unittest.TestCase):
         refs = d.extract_references("Look at `forge_common.py` closely.")
         self.assertEqual(refs[0].shape, "path")
 
+    # --- f2: a span with whitespace or a quote is never a path (final
+    # review) -----------------------------------------------------------
+
+    def test_span_with_whitespace_containing_slash_is_not_path(self):
+        refs = d.extract_references('Prints `sh .forge/watch` at start.')
+        self.assertEqual(refs[0].shape, "other")
+        table = d.reference_table('Prints `sh .forge/watch` at start.')
+        self.assertEqual(table, [])
+
+    def test_span_with_quote_containing_slash_is_not_path(self):
+        refs = d.extract_references(
+            'Exposes `source: {source: "local", path: "./"}` config.'
+        )
+        self.assertEqual(refs[0].shape, "other")
+        table = d.reference_table(
+            'Exposes `source: {source: "local", path: "./"}` config.'
+        )
+        self.assertEqual(table, [])
+
+    def test_span_with_whitespace_slash_no_quote_is_not_path(self):
+        refs = d.extract_references('Uses `gh issue create/close` for issues.')
+        self.assertEqual(refs[0].shape, "other")
+        table = d.reference_table('Uses `gh issue create/close` for issues.')
+        self.assertEqual(table, [])
+
     def test_span_ending_in_extension_absent_from_repo_is_not_path(self):
         refs = d.extract_references("A stray `thing.zzzzqqq` token.")
         self.assertNotEqual(refs[0].shape, "path")
@@ -1134,6 +1159,30 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
         self.assertTrue(result.valid, result.defects)
 
+    # --- f3a: word-boundary symbol matching (final review) ------------------
+
+    def test_symbol_matching_only_as_substring_of_a_longer_identifier_is_rejected(self):
+        # scripts/forge_common.py defines REPO_ROOT but never a standalone
+        # `REPO` — a fixed-string-without-boundaries search would satisfy
+        # this claim on the substring; word-boundary matching must not.
+        verdict = _valid_verdict(dependencies_read=[
+            {"symbol": "REPO", "file": "scripts/forge_common.py", "behavior": "x"},
+        ])
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(
+            "REPO" in defect and "scripts/forge_common.py" in defect
+            for defect in result.defects
+        ))
+
+    def test_symbol_matching_the_whole_identifier_still_resolves(self):
+        # The companion case: over-tightening word-boundary matching so a
+        # legitimate whole-symbol claim is wrongly rejected would be the
+        # worse defect. REPO_ROOT is the whole identifier, not a substring.
+        found, found_at = d._resolve_symbol("REPO_ROOT", pathspec="scripts/forge_common.py")
+        self.assertTrue(found)
+        self.assertIsNotNone(found_at)
+
     def test_wholly_fabricated_file_and_symbol_pair_is_rejected(self):
         # The motivating case (spec: Spec review) — a reviewer claiming to
         # have read a function that was never opened, in a file that was
@@ -1419,6 +1468,24 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIsNone(refs[0].found_at)
         self.assertIsNone(refs[0].ambiguous_matches)
 
+    # --- f3a: word-boundary symbol matching, the reference-table caller
+    # (the same `_resolve_symbol` the dependency check reuses — see
+    # DependenciesReadStructuralTests for that caller) ---------------------
+
+    def test_reference_table_symbol_substring_of_longer_identifier_does_not_resolve(self):
+        self._track("scripts/example.py", content="LONGER_IDENTIFIER = 1\n")
+        refs = d.extract_references("Calls `LONGER` somewhere.")
+        self.assertEqual(refs[0].shape, "symbol")
+        self.assertFalse(refs[0].resolved)
+        self.assertIsNone(refs[0].found_at)
+
+    def test_reference_table_symbol_whole_identifier_still_resolves(self):
+        self._track("scripts/example.py", content="LONGER_IDENTIFIER = 1\n")
+        refs = d.extract_references("Calls `LONGER_IDENTIFIER` somewhere.")
+        self.assertEqual(refs[0].shape, "symbol")
+        self.assertTrue(refs[0].resolved)
+        self.assertIsNotNone(refs[0].found_at)
+
 
 class PipelineSpecClassificationPrecisionTests(unittest.TestCase):
     """t44 — against the real repo (not the isolated fixture repo above):
@@ -1439,6 +1506,30 @@ class PipelineSpecClassificationPrecisionTests(unittest.TestCase):
         # pipeline.md — must no longer show up unresolved.
         self.assertNotIn("design-anti-patterns.md", unresolved)
         self.assertNotIn("testing-anti-patterns.md", unresolved)
+
+
+class OtherSpecsClassificationPrecisionTests(unittest.TestCase):
+    """f2 (final review) — every earlier classification test exercised
+    pipeline.md, the document the classifier was designed while staring at.
+    These two findings were only found by running against specs the plan
+    never touched: codex-runner.md and project-memory.md. Measures the
+    three exact spans the final review named, on the real repo."""
+
+    def _table_refs(self, relpath):
+        text = (pathlib.Path(REPO_ROOT) / relpath).read_text(encoding="utf-8")
+        return [r.ref for r in d.reference_table(text)]
+
+    def test_codex_runner_spec_drops_json_fragment_with_quotes_and_slash(self):
+        refs = self._table_refs("docs/forge/specs/codex-runner.md")
+        self.assertNotIn('source: {source: "local", path: "./"}', refs)
+
+    def test_codex_runner_spec_drops_shell_command_with_whitespace_and_slash(self):
+        refs = self._table_refs("docs/forge/specs/codex-runner.md")
+        self.assertNotIn("sh .forge/watch", refs)
+
+    def test_project_memory_spec_drops_shell_command_with_whitespace_and_slash(self):
+        refs = self._table_refs("docs/forge/specs/project-memory.md")
+        self.assertNotIn("gh issue create/close", refs)
 
 
 class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
