@@ -19,7 +19,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/forcetrainer/forge.git",
-        "sha": "02adfe4cdf4dc70ffa426892678f2fb2f8b79397"
+        "sha": "4ee1256545bdc51253854e6204d07df07ab6d6e3"
       },
       "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.3-beta): a spec is now validated against the codebase by a cold reviewer before planning begins — a mechanical reference table the reviewer owes a disposition on, a document-shaped verdict whose dependency and section claims are verified rather than trusted, and design-anti-patterns.md as the single tuning surface for what the review hunts."
     }
