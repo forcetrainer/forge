@@ -36,8 +36,26 @@ confined to the manifests.
   JSON on stdout) and Codex sets `CLAUDE_PLUGIN_ROOT`, so no Codex-specific hook file
   and no manual `config.toml` wiring. A hook fires only in a repo carrying the forge
   signal directory (constraint: `hooks-inert-without-signal`).
-- Install is `codex plugin marketplace add <path>` + `codex plugin add forge@forge`.
-  Codex has no `install` subcommand; the verb is `add`.
+- Install is `codex plugin marketplace add <source>` + `codex plugin add forge@forge`.
+  Codex has no `install` subcommand; the verb is `add`, and removal needs
+  `<plugin>@<marketplace>`. The source is a local path, `owner/repo[@ref]`, or an HTTPS
+  or SSH Git URL; `--ref` selects one explicitly, and `codex plugin marketplace upgrade`
+  refreshes a Git snapshot.
+- **The two harnesses version differently, and a release states both.** Claude pins a
+  `sha` inside `.claude-plugin/marketplace.json`, so one registry carries a `forge` and a
+  `forge-beta` channel. Codex takes the ref when the marketplace is *added*:
+  `plugins[].source` is `{source: "local", path: "./"}`, meaning the plugin sits at the
+  root of whatever tree was fetched — so **the git ref is the version selector** and no
+  second channel entry exists or is needed. A release tag is therefore the Codex
+  distribution artifact:
+
+      codex plugin marketplace add forcetrainer/forge --ref forge--v<version>
+      codex plugin add forge@forge
+
+  Verified against codex-cli 0.154.0: that pair installs to
+  `~/.codex/plugins/cache/forge/forge/<version>/`. A marketplace added from a local path
+  serves the working tree, and one added at a branch serves its last snapshot until
+  upgraded — neither is a packaging fault, but both are why a version can appear stale.
   No agent-copy step: `codex exec` takes model and effort as flags, and the worker
   contract text is sourced from `agents/*.md`.
 - Invocation model: no Workflow tool, no auto-delegation — Codex subagents spawn only
@@ -504,6 +522,8 @@ staleness is never an exit condition.
   pass.
 
 ## Changelog
+
+2026-09-12: the install contract records what the CLI actually accepts — a marketplace source may be a local path, `owner/repo[@ref]` or a Git URL, `--ref` selects a version, and `marketplace upgrade` refreshes a snapshot; and the two harnesses' versioning asymmetry is stated, since Codex selects a version by git ref where Claude pins a sha in its marketplace entry. Verified against codex-cli 0.154.0 rather than inferred (#96)
 
 2026-09-07: a halted final-review or doc-sync stage freezes its uncommitted edits too, under a stage-keyed ref — the run exits clean and re-invocation is not refused (#59)
 2026-09-07: freezing is per-halt, not per-class — `regression`, `stuck`, `backstop` and `gate` freeze too (#59)
