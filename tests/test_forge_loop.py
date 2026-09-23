@@ -68,7 +68,7 @@ class LoopSubprocessTests(unittest.TestCase):
             self.assertIn(key, receipt)
         self.assertEqual(receipt["status"], "passed")
         self.assertEqual(receipt["tier"], "trivial")
-        self.assertEqual(receipt["model"], "gpt-5.6-luna")
+        self.assertEqual(receipt["model"], "gpt-6-luna")
         self.assertEqual(receipt["effort"], "low")
         import hashlib
         with open(receipt["brief_path"], "rb") as f:

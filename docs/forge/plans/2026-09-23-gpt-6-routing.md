@@ -11,7 +11,7 @@
 - No `gpt-5.6-*` model id remains in `scripts/` or `tests/`.
 
 ### Task 1: Remap TIER_MAP to GPT-6
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`TIER_MAP` values only; keys, `TIER_ORDER` and `CONTRACT_AGENT` unchanged)
