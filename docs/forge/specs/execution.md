@@ -54,18 +54,23 @@ and overridable before anything runs.
 
 ### Routing — model and effort per tier
 
-The first pass runs at each provider's **recommended default**. The stronger settings
+The first pass runs at each provider's **recommended default**, with one deliberate
+exception, Codex complex (below). The stronger settings
 are not deleted; they are what a human may bump a single task to at the escalation
 gate after rework is exhausted. Nothing escalates model or effort automatically.
 
 | Tier | Claude agent · profile | Codex model · effort |
 |---|---|---|
-| trivial | `forge:forge-light` · haiku | gpt-5.6-luna · low |
-| standard | `forge:forge-standard` · sonnet · medium | gpt-5.6-terra · medium |
-| complex | `forge:forge-deep` · opus · high | gpt-5.6-sol · medium |
+| trivial | `forge:forge-light` · haiku | gpt-6-luna · low |
+| standard | `forge:forge-standard` · sonnet · medium | gpt-6-sol · medium |
+| complex | `forge:forge-deep` · opus · high | gpt-6-sol · high |
 
-The cross-harness asymmetry (opus·high against sol·medium) is intentional — each
-value is its own provider's stated default, not a forced-symmetric number. Routing is
+Codex routes three tiers onto two models. GPT-6 has no mid-tier model, and Sol is
+priced where the old mid-tier was, so standard and complex share Sol and differ by
+effort alone. Complex at sol·high departs from the provider's default of medium on
+purpose: with the model shared, effort is the only thing that gives a complex task
+more than a standard one. The tiers themselves stay three on both harnesses — the
+`Tier:` field, its evidence contract and the Claude routing are unchanged. Routing is
 absolute: the session's own model and effort settings never apply to a dispatched
 worker. The Codex half of the table lives in `forge_common.TIER_MAP`, the single
 update point on model churn (`codex-runner` spec).
@@ -998,6 +1003,8 @@ Any cost claim requires measurement against a comparable run.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
 
 ## Changelog
+
+2026-09-23: Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high. GPT-6 shipped no mid-tier model, so standard and complex share Sol and complex takes high effort, the one deliberate departure from provider defaults. Supersedes the opus·high-against-sol·medium asymmetry note. Model ids verified with `codex exec` on codex-cli 0.154.0
 
 2026-09-09: a groundedness re-review runs over the whole document, matching pipeline's amended Spec review rule — the two specs contradicted each other for one commit, which plan lint structurally cannot catch since --spec takes a single file (#62, #96)
 

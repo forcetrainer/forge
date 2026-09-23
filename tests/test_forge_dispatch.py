@@ -594,7 +594,7 @@ class OversizedPromptTests(unittest.TestCase):
         os.environ["FORGE_FAKE_RESPONSES"] = responses
         self.addCleanup(os.environ.pop, "FORGE_FAKE_RESPONSES", None)
         v = forge_run._dispatch_review_call(
-            "gpt-5.6-luna", "low", "review preamble", self.brief, self.fake,
+            "gpt-6-luna", "low", "review preamble", self.brief, self.fake,
             last_msg, os.path.join(self.run_dir, "live.log"),
             os.path.join(self.run_dir, "events.jsonl"), "-- header --",
             "task-1-reviewer", {},

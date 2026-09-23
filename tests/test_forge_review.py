@@ -63,7 +63,7 @@ PLAN_STD_THEN_TRIVIAL_JUSTIFIED = """# Fixture Plan
 # covers this (standard is the floor tier and needs no justification).
 
 # A single complex-tier task, used to prove the final review of a plan
-# containing a complex task routes to complex-tier (sol·medium), not a pinned
+# containing a complex task routes to complex-tier (sol·high), not a pinned
 # ceiling.
 PLAN_COMPLEX = """# Fixture Plan
 
@@ -129,7 +129,7 @@ class DispatchReviewerUnitTests(unittest.TestCase):
                         return a
         return None
 
-    def test_standard_reviewer_maps_terra_medium(self):
+    def test_standard_reviewer_maps_sol_medium(self):
         run_dir = os.path.join(self.d, "run-s")
         os.makedirs(run_dir)
         task = forge_run.Task(number=1, title="t", tier="standard")
@@ -137,11 +137,11 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-1-review-last")
         self.assertIsNotNone(argv)
-        self.assertIn("gpt-5.6-terra", argv)
+        self.assertIn("gpt-6-sol", argv)
         self.assertIn("model_reasoning_effort=medium", argv)
         self.assertNotIn("ultra", " ".join(argv))
 
-    def test_complex_reviewer_maps_sol_medium(self):
+    def test_complex_reviewer_maps_sol_high(self):
         run_dir = os.path.join(self.d, "run-c")
         os.makedirs(run_dir)
         task = forge_run.Task(number=2, title="t", tier="complex")
@@ -149,8 +149,8 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-2-review-last")
         self.assertIsNotNone(argv)
-        self.assertIn("gpt-5.6-sol", argv)
-        self.assertIn("model_reasoning_effort=medium", argv)
+        self.assertIn("gpt-6-sol", argv)
+        self.assertIn("model_reasoning_effort=high", argv)
         self.assertNotIn("ultra", " ".join(argv))
 
 
@@ -236,7 +236,7 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         rev = _find_dispatch(argvs, "task-1-review-last")
         self.assertIsNotNone(rev, argvs)
-        self.assertIn("gpt-5.6-terra", rev)
+        self.assertIn("gpt-6-sol", rev)
         self.assertIn("model_reasoning_effort=medium", rev)
         with open(os.path.join(self.run_dir, "task-1-attempt-1.json")) as f:
             receipt = json.load(f)
@@ -341,7 +341,7 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         fr = _find_dispatch(argvs, "final-review-last")
         self.assertIsNotNone(fr, argvs)
-        self.assertIn("gpt-5.6-luna", fr)
+        self.assertIn("gpt-6-luna", fr)
         self.assertIn("model_reasoning_effort=low", fr)
         # A trivial task never dispatches a per-task reviewer.
         self.assertIsNone(_find_dispatch(argvs, "task-1-review-last"))
@@ -358,7 +358,7 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         fr = _find_dispatch(argvs, "final-review-last")
         self.assertIsNotNone(fr, argvs)
-        self.assertIn("gpt-5.6-terra", fr)
+        self.assertIn("gpt-6-sol", fr)
         self.assertIn("model_reasoning_effort=medium", fr)
 
     def test_final_review_of_plan_with_complex_task_routes_to_complex_tier(self):
@@ -373,12 +373,12 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         rev = _find_dispatch(argvs, "task-1-review-last")
         self.assertIsNotNone(rev, argvs)
-        self.assertIn("gpt-5.6-sol", rev)
-        self.assertIn("model_reasoning_effort=medium", rev)
+        self.assertIn("gpt-6-sol", rev)
+        self.assertIn("model_reasoning_effort=high", rev)
         fr = _find_dispatch(argvs, "final-review-last")
         self.assertIsNotNone(fr, argvs)
-        self.assertIn("gpt-5.6-sol", fr)
-        self.assertIn("model_reasoning_effort=medium", fr)
+        self.assertIn("gpt-6-sol", fr)
+        self.assertIn("model_reasoning_effort=high", fr)
 
     def test_final_review_improvement_finding_defers_run_completes(self):
         # An improvement-only final-review finding (no contract_ref) defers

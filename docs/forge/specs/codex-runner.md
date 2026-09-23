@@ -109,9 +109,9 @@ forge-run.py --status --run-dir DIR
 
 | Tier | model | model_reasoning_effort |
 |---|---|---|
-| trivial | gpt-5.6-luna | low |
-| standard | gpt-5.6-terra | medium |
-| complex | gpt-5.6-sol | medium |
+| trivial | gpt-6-luna | low |
+| standard | gpt-6-sol | medium |
+| complex | gpt-6-sol | high |
 
 - Passed per process as `codex exec -m <model> -c model_reasoning_effort=<effort>` —
   pinned, never inherited.
@@ -318,12 +318,12 @@ One log per task, `run_dir/task-<N>-live.log`; final review, `run_dir/final-revi
 Appended across phases with a header rule per phase:
 
 ```
-── worker · codex exec · gpt-5.6-sol · medium ──
+── worker · codex exec · gpt-6-sol · medium ──
 <streamed worker output, verbatim>
 ── acceptance ──
 $ pytest -q
 <streamed acceptance output>
-── review · codex exec · gpt-5.6-terra · medium ──
+── review · codex exec · gpt-6-sol · medium ──
 <streamed reviewer output>
 ```
 
@@ -405,7 +405,7 @@ Layout — two panels plus a terminal-state banner:
   ○  5  Monitor: task ledger        standard  queued
   …
 └──────────────────────────────────────────────────────────┘
-┌ ▸ task 4 · worker · codex exec · gpt-5.6-sol · medium ─ live ─┐
+┌ ▸ task 4 · worker · codex exec · gpt-6-sol · high ─ live ─┐
   <in-flight task's stream, tailing>
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -522,6 +522,8 @@ staleness is never an exit condition.
   pass.
 
 ## Changelog
+
+2026-09-23: tier mapping moves to GPT-6 — gpt-6-luna·low, gpt-6-sol·medium, gpt-6-sol·high; standard and complex share one model and differ by effort, rationale in the `execution` spec's routing section. The live-log and monitor examples follow, and the live-log example's reviewer now runs at its task's tier as Reviewer routing requires. Verified against codex-cli 0.154.0
 
 2026-09-12: the install contract records what the CLI actually accepts — a marketplace source may be a local path, `owner/repo[@ref]` or a Git URL, `--ref` selects a version, and `marketplace upgrade` refreshes a snapshot; and the two harnesses' versioning asymmetry is stated, since Codex selects a version by git ref where Claude pins a sha in its marketplace entry. Verified against codex-cli 0.154.0 rather than inferred (#96)
 

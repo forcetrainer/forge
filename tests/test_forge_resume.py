@@ -126,7 +126,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
             [
                 self.fake, "exec", "resume", "--json",
                 "--output-last-message", last_msg_path,
-                "-m", "gpt-5.6-terra",
+                "-m", "gpt-6-sol",
                 "-c", 'model_reasoning_effort="medium"',
                 "th-worker-1",
                 # no trailing PROMPT: it rides stdin, unbounded by ARG_MAX
@@ -166,7 +166,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
             "exec", "resume", "--json", "--output-last-message", last_msg_path,
         ])
         self.assertEqual(argv[5:9], [
-            "-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="medium"',
+            "-m", "gpt-6-sol", "-c", 'model_reasoning_effort="medium"',
         ])
         self.assertEqual(argv[9], "th-reviewer-1")
 

@@ -227,7 +227,7 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
             [
                 self.fake, "exec", "resume", "--json",
                 "--output-last-message", last_msg_path,
-                "-m", "gpt-5.6-terra",
+                "-m", "gpt-6-sol",
                 "-c", 'model_reasoning_effort="medium"',
                 "th-fixer-1",
                 # no trailing PROMPT: it rides stdin, unbounded by ARG_MAX
