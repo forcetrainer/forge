@@ -19,7 +19,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/forcetrainer/forge.git",
-        "sha": "4ee1256545bdc51253854e6204d07df07ab6d6e3"
+        "sha": "a237026015995ee9db64aa07fe17b887949b01c8"
       },
       "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.4-beta): Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high; GPT-6 has no mid-tier model, so standard and complex share Sol and differ by effort."
     }
