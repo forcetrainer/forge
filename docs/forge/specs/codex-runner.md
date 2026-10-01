@@ -163,6 +163,21 @@ forge-run.py --status --run-dir DIR
   `timed_out` — the caller treats it exactly like a failed iteration. A hung
   `codex exec` never hangs the run.
 
+### Worker isolation
+
+- **Flags on every dispatch** — worker, task reviewer, final reviewer, final-review fixer,
+  doc-sync; cold and resume alike: `--disable multi_agent --disable multi_agent_v2
+  --disable memories`. In-worker subagents break brief isolation (the `ultra`
+  rationale); `multi_agent_v2` is disabled too because a user config enabling it selects
+  that backend; memories carry state across tasks. All three features exist in
+  codex-cli 0.154.0; `multi_agent` is on by default.
+- **Reviewers read-only** — task and final reviewer dispatches add
+  `-c sandbox_mode="read-only"` (`-c`, because `codex exec resume` has no `-s`). Writer
+  dispatches carry no sandbox override.
+- One definition in `forge_common` for each argument group — the single update point,
+  as `TIER_MAP` is for models.
+- Other user config (provider, profile, instructions) still applies.
+
 ## Commit discipline
 
 - Precondition: every invocation — first run and resume — requires a clean working
@@ -485,6 +500,10 @@ staleness is never an exit condition.
   task, banner text and semantic color per state. `--latest` selects the newest dir; the
   reduced-motion path renders static.
 - Manifests: JSON validity and version equality across both plugin manifests.
+- Worker isolation: each recorded `codex exec` argv carries all three `--disable` flags —
+  task worker cold and resume, task reviewer cold and resume, final reviewer cold and
+  resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
+  carry `sandbox_mode="read-only"`; the five writer shapes do not.
 - Live `codex exec` stream texture is deferred verification on a Codex install, not a
   unit test; the format contract is the phase headers plus verbatim passthrough, which
   is texture-independent.
@@ -501,6 +520,10 @@ staleness is never an exit condition.
   in-flight task streams live, and completion or halt paints the banner.
 - Killing the runner mid-task makes the monitor show `stalled?` within the cutoff, not
   a perpetual live spinner.
+- On a real codex-cli 0.154.0, the same prompt — "list your available tools by name;
+  if `spawn_agent` is among them, call it once" — run twice: without the isolation
+  flags its final message lists or its events record `spawn_agent`; with them, neither.
+  Repeated with `multi_agent_v2` enabled in config, the flagged run still shows none.
 - Claude Code behavior is unchanged by anything in this system: the plugin updates and
   loads, and its hooks and skills work as before.
 
@@ -512,16 +535,20 @@ staleness is never an exit condition.
 - Reviewer JSON discipline: models wrap JSON in prose. The extraction rule — the last
   fenced or parseable JSON object in the message — is specified in the reviewer
   contract and still fails loud when absent.
-- The Codex subagent surface is young: custom-agent selection has regressed (v0.137.0),
-  spawned agents have silently inherited the parent model, and completed workers pile up
-  against the thread limit (openai/codex#19197, #22779). Plan execution sidesteps both
-  by construction — one process per task, no inheritance, no accumulation — which is
-  why the caveats apply only to ad-hoc in-session subagents.
+- The Codex subagent surface is young: under the default `multi_agent` (v1) backend,
+  spawned agents inherit the parent model unless a role pins one, and completed workers
+  count against the thread limit (openai/codex#19197, #22779, open). The opt-in
+  `multi_agent_v2` backend pins per role and evicts finished agents. Plan execution
+  sidesteps both by construction — one process per task with in-worker subagents
+  disabled (Worker isolation) — so the caveats apply only to ad-hoc in-session
+  subagents.
 - Acceptance commands must treat an environment-gated skip as failure: assert the
   required infra is present, or make the skip exit non-zero. A skipped check is not a
   pass.
 
 ## Changelog
+
+2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
 
 2026-09-23: tier mapping moves to GPT-6 — gpt-6-luna·low, gpt-6-sol·medium, gpt-6-sol·high; standard and complex share one model and differ by effort, rationale in the `execution` spec's routing section. The live-log and monitor examples follow, and the live-log example's reviewer now runs at its task's tier as Reviewer routing requires. Verified against codex-cli 0.154.0
 
