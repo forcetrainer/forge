@@ -216,14 +216,15 @@ setup.
 ```
 {
   "status": "running",              // running | passed | escalated
-                                    // | escalated-final-review | contract-error
+                                    // | escalated-final-review | escalated-doc-sync
+                                    // | contract-error
   "base_commit": "9f0aa21",         // whole-plan final-review diff base
   "plan": "...", "spec": "...",
   "started_at": "2026-07-15T09:11:42Z",   // run start (UTC ISO-8601)
   "updated_at": "2026-07-15T09:17:03Z",   // heartbeat, rewritten every phase transition
   "pid": 48213,                            // runner pid (liveness hint, same host)
   "current_task": 4,                       // in-flight task; null between/at terminal
-  "current_phase": "worker",               // worker|acceptance|review|final-review; null at terminal
+  "current_phase": "worker",               // worker|acceptance|review|final-review|final-review-fix|doc-sync; null at terminal
   "tasks": [
     { "number": 1, "title": "...", "tier": "standard", "status": "passed",
       "attempts": 1, "commit": "abc1234",
@@ -233,6 +234,8 @@ setup.
 ```
 
 - Per-task `commit` is that task's commit SHA, or null when the commit was skipped.
+- `doc_sync` — the terminal doc-sync stage's record; on `escalated-doc-sync` its
+  `contradiction` is the halt reason.
 - `current_task`/`current_phase` are set at the start of each phase and cleared to
   `null` at any terminal status.
 - Written **incrementally** — `status: running` right after the clean-tree check
@@ -278,7 +281,8 @@ setup.
 
 ## Halt / escalation
 
-Two halt classes, distinguished by exit code:
+Two exit codes, three halt kinds: task and stage escalation share exit 2 (the `halt`
+record names a task or a stage), contract error is exit 1.
 
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
@@ -446,8 +450,8 @@ bottom banner is painted; the semantic fill carries the state before a word is p
 - Completed (`passed`): green — `✓ RUN COMPLETE — N/N tasks passed ·
   <final-review outcome> · <elapsed>` · `press q to exit`. It claims a clean review
   only when a final review actually ran and passed.
-- Halted (`escalated` / `escalated-final-review`): red-orange, two lines —
-  `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
+- Halted (`escalated` / `escalated-final-review` / `escalated-doc-sync`): red-orange,
+  two lines — `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
   from the receipt (from `final-review.json` for a final-review halt) ·
   `press q to exit`.
 - Contract error: red-orange — `■ CONTRACT ERROR — <reason>` · `press q to exit`. A
@@ -549,6 +553,7 @@ staleness is never an exit condition.
 ## Changelog
 
 2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
+2026-09-30: the run.json status enum, `current_phase` values and Halted banner name the doc-sync stage the runner already writes (`escalated-doc-sync`, `doc_sync`); the Halt section's class count is corrected
 
 2026-09-23: tier mapping moves to GPT-6 — gpt-6-luna·low, gpt-6-sol·medium, gpt-6-sol·high; standard and complex share one model and differ by effort, rationale in the `execution` spec's routing section. The live-log and monitor examples follow, and the live-log example's reviewer now runs at its task's tier as Reviewer routing requires. Verified against codex-cli 0.154.0
 
