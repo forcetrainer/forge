@@ -27,6 +27,9 @@ import unittest
 
 from _forge_support import *  # noqa: F401,F403
 
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import forge_common  # noqa: E402
+
 
 def _approved_halt_plus_regression_msg():
     """A single review verdict carrying two findings: `h1` (pre-existing x
@@ -125,6 +128,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
             res.argv,
             [
                 self.fake, "exec", "resume", "--json",
+                *forge_common.CODEX_ISOLATION_ARGS,
                 "--output-last-message", last_msg_path,
                 "-m", "gpt-6-sol",
                 "-c", 'model_reasoning_effort="medium"',
@@ -162,13 +166,16 @@ class DispatchResumeArgvTests(unittest.TestCase):
         argv = argvs[-1]
         # The fake codex's own log strips argv[0] (its own path, sys.argv[1:]),
         # so this starts at "exec".
-        self.assertEqual(argv[0:5], [
-            "exec", "resume", "--json", "--output-last-message", last_msg_path,
-        ])
-        self.assertEqual(argv[5:9], [
+        iso = list(forge_common.CODEX_ISOLATION_ARGS)
+        self.assertEqual(argv[0:3], ["exec", "resume", "--json"])
+        self.assertEqual(argv[3:3 + len(iso)], iso)
+        rest = argv[3 + len(iso):]
+        self.assertEqual(rest[0:2], ["--output-last-message", last_msg_path])
+        self.assertEqual(rest[2:6], [
             "-m", "gpt-6-sol", "-c", 'model_reasoning_effort="medium"',
         ])
-        self.assertEqual(argv[9], "th-reviewer-1")
+        self.assertEqual(rest[6], "th-reviewer-1")
+        self.assertEqual(rest[7:], list(forge_common.CODEX_REVIEWER_SANDBOX_ARGS))
 
     def test_resume_output_last_message_still_captures_verdict(self):
         self._set_responses([{"exit": 0, "msg": _pass_msg()}])

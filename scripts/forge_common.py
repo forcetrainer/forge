@@ -44,6 +44,16 @@ TIER_MAP = {
     "standard": ("gpt-6-sol", "medium"),
     "complex": ("gpt-6-sol", "high"),
 }
+# Argument groups for every `codex exec` the runner spawns, cold and resume
+# alike. Single update point, as TIER_MAP is for models: subagents and memories
+# are off whatever the user's Codex config says; reviewers are read-only (-c,
+# because `codex exec resume` has no -s).
+CODEX_ISOLATION_ARGS = (
+    "--disable", "multi_agent",
+    "--disable", "multi_agent_v2",
+    "--disable", "memories",
+)
+CODEX_REVIEWER_SANDBOX_ARGS = ("-c", 'sandbox_mode="read-only"')
 TIER_ORDER = ("trivial", "standard", "complex")  # ascending; index gives rank
 # Reviewer routing reads TIER_MAP directly (reviewer tier = task tier; the
 # once-separate reviewer table is retired to remove the stale-drift hazard of

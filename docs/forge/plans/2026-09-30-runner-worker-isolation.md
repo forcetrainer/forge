@@ -10,7 +10,7 @@
 - Scripts under `scripts/` import the Python 3 standard library only.
 
 ### Task 1: Isolation flags on every dispatch
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `scripts/forge_common.py` (two argument-group constants)

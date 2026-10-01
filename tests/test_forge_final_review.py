@@ -226,6 +226,7 @@ class DispatchFinalReviewFixResumeArgvTests(unittest.TestCase):
             res.argv,
             [
                 self.fake, "exec", "resume", "--json",
+                *forge_common.CODEX_ISOLATION_ARGS,
                 "--output-last-message", last_msg_path,
                 "-m", "gpt-6-sol",
                 "-c", 'model_reasoning_effort="medium"',
