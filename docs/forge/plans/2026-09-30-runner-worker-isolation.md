@@ -80,3 +80,21 @@
 **Tier:** standard
 
 **Depends on:** Task 1
+
+### Task 4: Spec matches the doc-sync halt the runner already writes
+- [x] Done — passed, 1 attempt
+
+**Files:**
+- Test: `tests/test_forge_status.py` (existing coverage of `escalated-doc-sync` and `doc_sync`, run unchanged)
+
+**Spec:** Receipts and run state, Halt / escalation, Terminal-state banner
+
+**Tests:** none — the spec amendment documents existing behavior that existing tests already exercise
+
+**Acceptance:**
+- `python3 -m pytest -q tests/test_forge_status.py` passes with no skips
+- `grep -q 'escalated-doc-sync' scripts/forge_status.py` exits 0
+
+**Tier:** trivial — no code change, only existing tests run against behavior the spec now names
+
+**Depends on:** nothing.
