@@ -17,6 +17,12 @@ claude plugin update forge@forge
 # 3. restart the session to apply
 ```
 
+If the release changes `hooks/hooks.json` (any entry's event, matcher,
+command, `async` or timeout, or the order of entries), say so in the release
+notes: Codex users get a "Hooks need review" prompt at every startup, and
+forge's hooks stay off until they re-trust. Editing a hook *script* needs no note.
+See `docs/forge/running-on-codex.md`, Hook trust after a forge update.
+
 This repo uses its own conventions: binding rules live in
 `docs/forge/constraints.md` (CLI-authored, user-approved — see the
 project-memory skill; read it before changing skill behavior), skipped

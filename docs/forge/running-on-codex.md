@@ -79,6 +79,26 @@ Receipts land in `.forge/runs/<timestamp>/`, uncommitted — the runner writes
 a self-ignoring `.forge/.gitignore` (`*`) on first run, so there's no
 target-repo setup.
 
+## Hook trust after a forge update
+
+Codex runs a plugin's hooks only after you trust them. Trust is keyed per
+`hooks/hooks.json` entry — plugin, event, and position — and hashes the
+entry itself (event, matcher, command, `async`, timeout), not the script it
+runs. So:
+
+- Upgrading forge, or upgrading Codex, does not by itself revoke trust, and
+  edits to the hook scripts never do.
+- A forge release that **changes `hooks/hooks.json`** does: an edited entry
+  reads as modified, an added one as untrusted, and inserting or reordering
+  entries shifts the positions of the ones after it, untrusting them too.
+
+The interactive TUI then opens **"Hooks need review"** at startup. Choose
+**Trust all and continue** (or review first). **Continue without trusting
+(hooks won't run)** leaves forge's hooks off for that session — no
+session-start context, no `constraints.md` write guard — and records nothing,
+so the prompt returns at the next startup. `codex exec` never prompts; an
+untrusted hook simply does not run there.
+
 ## Known Codex caveats
 
 These apply to ad-hoc in-session Codex subagents (exploration, one-off
