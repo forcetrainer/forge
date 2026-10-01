@@ -166,11 +166,15 @@ forge-run.py --status --run-dir DIR
 ### Worker isolation
 
 - **Flags on every dispatch** — worker, task reviewer, final reviewer, final-review fixer,
-  doc-sync; cold and resume alike: `--disable multi_agent --disable multi_agent_v2
+  doc-sync; cold and resume alike: `-c agents.enabled=false --disable multi_agent_v2
   --disable memories`. In-worker subagents break brief isolation (the `ultra`
-  rationale); `multi_agent_v2` is disabled too because a user config enabling it selects
-  that backend; memories carry state across tasks. All three features exist in
-  codex-cli 0.154.0; `multi_agent` is on by default.
+  rationale); memories carry state across tasks.
+- `agents.enabled=false`, not `--disable multi_agent`: Codex resolves the multi-agent
+  backend as an override (`multi_agent_v2` enabled → v2; `agents.enabled=false` →
+  disabled), then the model catalog's own setting, then the `multi_agent` feature flag.
+  GPT-6 catalog entries declare a backend, so the feature flag alone is ignored.
+  `multi_agent_v2` is disabled because it outranks `agents.enabled`. Verified live
+  against codex-cli 0.154.0.
 - **Reviewers read-only** — task and final reviewer dispatches add
   `-c sandbox_mode="read-only"` (`-c`, because `codex exec resume` has no `-s`). Writer
   dispatches carry no sandbox override.
@@ -504,7 +508,7 @@ staleness is never an exit condition.
   task, banner text and semantic color per state. `--latest` selects the newest dir; the
   reduced-motion path renders static.
 - Manifests: JSON validity and version equality across both plugin manifests.
-- Worker isolation: each recorded `codex exec` argv carries all three `--disable` flags —
+- Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
   resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
   carry `sandbox_mode="read-only"`; the five writer shapes do not.
@@ -554,6 +558,7 @@ staleness is never an exit condition.
 
 2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
 2026-09-30: the run.json status enum, `current_phase` values and Halted banner name the doc-sync stage the runner already writes (`escalated-doc-sync`, `doc_sync`); the Halt section's class count is corrected
+2026-09-30: subagents are disabled with `-c agents.enabled=false`, not `--disable multi_agent` — the live check showed the GPT-6 model catalog overrides the feature flag (codex-rs core/src/config/mod.rs, multi-agent version precedence)
 
 2026-09-23: tier mapping moves to GPT-6 — gpt-6-luna·low, gpt-6-sol·medium, gpt-6-sol·high; standard and complex share one model and differ by effort, rationale in the `execution` spec's routing section. The live-log and monitor examples follow, and the live-log example's reviewer now runs at its task's tier as Reviewer routing requires. Verified against codex-cli 0.154.0
 
