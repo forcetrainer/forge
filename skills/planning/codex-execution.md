@@ -25,9 +25,11 @@ mechanical changes, small plans) that never needed the runner.
 process boundary is what makes it deterministic: no parent-model inheritance,
 no child-thread quota accumulation. Every dispatch — worker, task reviewer, final
 reviewer, final-review fixer, doc-sync; cold and resume alike — carries
-`--disable multi_agent --disable multi_agent_v2 --disable memories`
+`-c agents.enabled=false --disable multi_agent_v2 --disable memories`
 (`CODEX_ISOLATION_ARGS` in `forge_common`): no in-worker subagents (either
-backend) and no memories carried across tasks. Task and final reviewers also
+backend; `agents.enabled=false` rather than `--disable multi_agent` because
+the model catalog's multi-agent setting outranks that feature flag, which
+codex ignores) and no memories carried across tasks. Task and final reviewers also
 carry `-c sandbox_mode="read-only"` (`CODEX_REVIEWER_SANDBOX_ARGS`; `-c`
 because `codex exec resume` has no `-s`) so they are read-only; writers carry
 no sandbox override. Other user config still applies. The rest of this document specifies the

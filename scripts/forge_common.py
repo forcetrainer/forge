@@ -47,9 +47,11 @@ TIER_MAP = {
 # Argument groups for every `codex exec` the runner spawns, cold and resume
 # alike. Single update point, as TIER_MAP is for models: subagents and memories
 # are off whatever the user's Codex config says; reviewers are read-only (-c,
-# because `codex exec resume` has no -s).
+# because `codex exec resume` has no -s). agents.enabled=false, not
+# `--disable multi_agent`: the model catalog's multi-agent setting outranks
+# that feature flag (codex-cli 0.154.0), so the flag alone is ignored.
 CODEX_ISOLATION_ARGS = (
-    "--disable", "multi_agent",
+    "-c", "agents.enabled=false",
     "--disable", "multi_agent_v2",
     "--disable", "memories",
 )

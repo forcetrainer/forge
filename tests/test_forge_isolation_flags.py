@@ -13,7 +13,8 @@ from _forge_support import _log_argvs
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import forge_common  # noqa: E402
 
-DISABLES = ("multi_agent", "multi_agent_v2", "memories")
+DISABLES = ("multi_agent_v2", "memories")
+AGENTS_OFF = "agents.enabled=false"
 SANDBOX = 'sandbox_mode="read-only"'
 PASS_MSG = json.dumps({"verdict": "pass", "findings": []})
 
@@ -95,13 +96,18 @@ class IsolationFlagsTests(unittest.TestCase):
     def test_constants_have_spec_values(self):
         self.assertEqual(
             forge_common.CODEX_ISOLATION_ARGS,
-            ("--disable", "multi_agent", "--disable", "multi_agent_v2",
+            ("-c", AGENTS_OFF, "--disable", "multi_agent_v2",
              "--disable", "memories"),
         )
+        # `--disable multi_agent` alone is ignored by codex (the model catalog
+        # outranks the feature flag); agents.enabled=false is the real switch.
+        self.assertIn(AGENTS_OFF, forge_common.CODEX_ISOLATION_ARGS)
+        self.assertNotIn("multi_agent", forge_common.CODEX_ISOLATION_ARGS)
         self.assertEqual(forge_common.CODEX_REVIEWER_SANDBOX_ARGS, ("-c", SANDBOX))
 
     def test_every_shape_carries_all_disable_pairs(self):
         for name, argv in self._all_shapes().items():
+            self.assertTrue(_has_pair(argv, "-c", AGENTS_OFF), name)
             for feat in DISABLES:
                 self.assertTrue(_has_pair(argv, "--disable", feat), (name, feat))
 
