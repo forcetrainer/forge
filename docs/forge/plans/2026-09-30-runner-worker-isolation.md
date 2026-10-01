@@ -65,7 +65,7 @@
 **Depends on:** Task 1
 
 ### Task 3: Live isolation check on a real Codex
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Create: `tests/live/check_codex_isolation.sh` (runs the spec's paired prompt with and without the isolation flags, then flagged with `multi_agent_v2` enabled; exits non-zero when `codex` is absent or older than 0.154.0)
