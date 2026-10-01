@@ -43,7 +43,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Codex docs describe worker isolation
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `skills/planning/codex-execution.md` (dispatch description names the isolation flags and the read-only reviewer)
