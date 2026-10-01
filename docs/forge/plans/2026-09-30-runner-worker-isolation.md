@@ -22,15 +22,15 @@
 **Spec:** Worker isolation, Worker dispatch mechanics, Testing
 
 **Interface:**
-- `forge_common.CODEX_ISOLATION_ARGS: tuple[str, ...]` — `("--disable", "multi_agent", "--disable", "multi_agent_v2", "--disable", "memories")`
+- `forge_common.CODEX_ISOLATION_ARGS: tuple[str, ...]` — `("-c", "agents.enabled=false", "--disable", "multi_agent_v2", "--disable", "memories")`
 - `forge_common.CODEX_REVIEWER_SANDBOX_ARGS: tuple[str, ...]` — `("-c", 'sandbox_mode="read-only"')`
 
 **Tests:**
-- task worker cold and resume argvs carry all three `--disable` pairs and no sandbox override
-- task reviewer cold and resume argvs carry all three `--disable` pairs and `sandbox_mode="read-only"`
-- final reviewer cold and resume argvs carry all three `--disable` pairs and `sandbox_mode="read-only"`
-- final-review fixer cold and resume argvs carry all three `--disable` pairs and no sandbox override
-- doc-sync cold argv carries all three `--disable` pairs and no sandbox override
+- task worker cold and resume argvs carry the isolation args and no sandbox override
+- task reviewer cold and resume argvs carry the isolation args and `sandbox_mode="read-only"`
+- final reviewer cold and resume argvs carry the isolation args and `sandbox_mode="read-only"`
+- final-review fixer cold and resume argvs carry the isolation args and no sandbox override
+- doc-sync cold argv carries the isolation args and no sandbox override
 - every dispatch site builds its flags from the two constants (changing a constant changes every recorded argv)
 - `ultra` is still never emitted
 
@@ -54,7 +54,7 @@
 **Tests:** none — prose artifacts take mechanical acceptance
 
 **Acceptance:**
-- `grep -q -- '--disable multi_agent' skills/planning/codex-execution.md` exits 0
+- `grep -q 'agents.enabled=false' skills/planning/codex-execution.md` exits 0
 - `grep -q 'read-only' skills/planning/codex-execution.md` exits 0
 - `grep -q 'multi_agent_v2' docs/forge/running-on-codex.md` exits 0
 - `grep -q 'v0.137.0' docs/forge/running-on-codex.md` exits 1
