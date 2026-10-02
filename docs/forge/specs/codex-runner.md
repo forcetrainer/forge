@@ -110,8 +110,8 @@ forge-run.py --status --run-dir DIR
 | Tier | model | model_reasoning_effort |
 |---|---|---|
 | trivial | gpt-6-luna | low |
-| standard | gpt-6-sol | medium |
-| complex | gpt-6-sol | high |
+| standard | gpt-6.1-sol | medium |
+| complex | gpt-6.1-sol | high |
 
 - Passed per process as `codex exec -m <model> -c model_reasoning_effort=<effort>` —
   pinned, never inherited.
@@ -163,6 +163,25 @@ forge-run.py --status --run-dir DIR
   `timed_out` — the caller treats it exactly like a failed iteration. A hung
   `codex exec` never hangs the run.
 
+### Worker isolation
+
+- **Flags on every dispatch** — worker, task reviewer, final reviewer, final-review fixer,
+  doc-sync; cold and resume alike: `-c agents.enabled=false --disable multi_agent_v2
+  --disable memories`. In-worker subagents break brief isolation (the `ultra`
+  rationale); memories carry state across tasks.
+- `agents.enabled=false`, not `--disable multi_agent`: Codex resolves the multi-agent
+  backend as an override (`multi_agent_v2` enabled → v2; `agents.enabled=false` →
+  disabled), then the model catalog's own setting, then the `multi_agent` feature flag.
+  GPT-6 catalog entries declare a backend, so the feature flag alone is ignored.
+  `multi_agent_v2` is disabled because it outranks `agents.enabled`. Verified live
+  against codex-cli 0.154.0.
+- **Reviewers read-only** — task and final reviewer dispatches add
+  `-c sandbox_mode="read-only"` (`-c`, because `codex exec resume` has no `-s`). Writer
+  dispatches carry no sandbox override.
+- One definition in `forge_common` for each argument group — the single update point,
+  as `TIER_MAP` is for models.
+- Other user config (provider, profile, instructions) still applies.
+
 ## Commit discipline
 
 - Precondition: every invocation — first run and resume — requires a clean working
@@ -201,14 +220,15 @@ setup.
 ```
 {
   "status": "running",              // running | passed | escalated
-                                    // | escalated-final-review | contract-error
+                                    // | escalated-final-review | escalated-doc-sync
+                                    // | contract-error
   "base_commit": "9f0aa21",         // whole-plan final-review diff base
   "plan": "...", "spec": "...",
   "started_at": "2026-07-15T09:11:42Z",   // run start (UTC ISO-8601)
   "updated_at": "2026-07-15T09:17:03Z",   // heartbeat, rewritten every phase transition
   "pid": 48213,                            // runner pid (liveness hint, same host)
   "current_task": 4,                       // in-flight task; null between/at terminal
-  "current_phase": "worker",               // worker|acceptance|review|final-review; null at terminal
+  "current_phase": "worker",               // worker|acceptance|review|final-review|final-review-fix|doc-sync; null at terminal
   "tasks": [
     { "number": 1, "title": "...", "tier": "standard", "status": "passed",
       "attempts": 1, "commit": "abc1234",
@@ -218,6 +238,8 @@ setup.
 ```
 
 - Per-task `commit` is that task's commit SHA, or null when the commit was skipped.
+- `doc_sync` — the terminal doc-sync stage's record; on `escalated-doc-sync` its
+  `contradiction` is the halt reason.
 - `current_task`/`current_phase` are set at the start of each phase and cleared to
   `null` at any terminal status.
 - Written **incrementally** — `status: running` right after the clean-tree check
@@ -263,7 +285,8 @@ setup.
 
 ## Halt / escalation
 
-Two halt classes, distinguished by exit code:
+Two exit codes, three halt kinds: task and stage escalation share exit 2 (the `halt`
+record names a task or a stage), contract error is exit 1.
 
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
@@ -318,12 +341,12 @@ One log per task, `run_dir/task-<N>-live.log`; final review, `run_dir/final-revi
 Appended across phases with a header rule per phase:
 
 ```
-── worker · codex exec · gpt-6-sol · medium ──
+── worker · codex exec · gpt-6.1-sol · medium ──
 <streamed worker output, verbatim>
 ── acceptance ──
 $ pytest -q
 <streamed acceptance output>
-── review · codex exec · gpt-6-sol · medium ──
+── review · codex exec · gpt-6.1-sol · medium ──
 <streamed reviewer output>
 ```
 
@@ -405,7 +428,7 @@ Layout — two panels plus a terminal-state banner:
   ○  5  Monitor: task ledger        standard  queued
   …
 └──────────────────────────────────────────────────────────┘
-┌ ▸ task 4 · worker · codex exec · gpt-6-sol · high ─ live ─┐
+┌ ▸ task 4 · worker · codex exec · gpt-6.1-sol · high ─ live ─┐
   <in-flight task's stream, tailing>
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -431,8 +454,8 @@ bottom banner is painted; the semantic fill carries the state before a word is p
 - Completed (`passed`): green — `✓ RUN COMPLETE — N/N tasks passed ·
   <final-review outcome> · <elapsed>` · `press q to exit`. It claims a clean review
   only when a final review actually ran and passed.
-- Halted (`escalated` / `escalated-final-review`): red-orange, two lines —
-  `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
+- Halted (`escalated` / `escalated-final-review` / `escalated-doc-sync`): red-orange,
+  two lines — `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
   from the receipt (from `final-review.json` for a final-review halt) ·
   `press q to exit`.
 - Contract error: red-orange — `■ CONTRACT ERROR — <reason>` · `press q to exit`. A
@@ -485,6 +508,10 @@ staleness is never an exit condition.
   task, banner text and semantic color per state. `--latest` selects the newest dir; the
   reduced-motion path renders static.
 - Manifests: JSON validity and version equality across both plugin manifests.
+- Worker isolation: each recorded `codex exec` argv carries the isolation args —
+  task worker cold and resume, task reviewer cold and resume, final reviewer cold and
+  resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
+  carry `sandbox_mode="read-only"`; the five writer shapes do not.
 - Live `codex exec` stream texture is deferred verification on a Codex install, not a
   unit test; the format contract is the phase headers plus verbatim passthrough, which
   is texture-independent.
@@ -501,6 +528,10 @@ staleness is never an exit condition.
   in-flight task streams live, and completion or halt paints the banner.
 - Killing the runner mid-task makes the monitor show `stalled?` within the cutoff, not
   a perpetual live spinner.
+- On a real codex-cli 0.154.0, the same prompt — "list your available tools by name;
+  if `spawn_agent` is among them, call it once" — run twice: without the isolation
+  flags its final message lists or its events record `spawn_agent`; with them, neither.
+  Repeated with `multi_agent_v2` enabled in config, the flagged run still shows none.
 - Claude Code behavior is unchanged by anything in this system: the plugin updates and
   loads, and its hooks and skills work as before.
 
@@ -512,16 +543,23 @@ staleness is never an exit condition.
 - Reviewer JSON discipline: models wrap JSON in prose. The extraction rule — the last
   fenced or parseable JSON object in the message — is specified in the reviewer
   contract and still fails loud when absent.
-- The Codex subagent surface is young: custom-agent selection has regressed (v0.137.0),
-  spawned agents have silently inherited the parent model, and completed workers pile up
-  against the thread limit (openai/codex#19197, #22779). Plan execution sidesteps both
-  by construction — one process per task, no inheritance, no accumulation — which is
-  why the caveats apply only to ad-hoc in-session subagents.
+- The Codex subagent surface is young: under the default `multi_agent` (v1) backend,
+  spawned agents inherit the parent model unless a role pins one, and completed workers
+  count against the thread limit (openai/codex#19197, #22779, open). The opt-in
+  `multi_agent_v2` backend pins per role and evicts finished agents. Plan execution
+  sidesteps both by construction — one process per task with in-worker subagents
+  disabled (Worker isolation) — so the caveats apply only to ad-hoc in-session
+  subagents.
 - Acceptance commands must treat an environment-gated skip as failure: assert the
   required infra is present, or make the skip exit non-zero. A skipped check is not a
   pass.
 
 ## Changelog
+
+2026-10-02: standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. gpt-6.1-sol is OpenAI's listed upgrade of GPT-6 Sol for Codex (learn.chatgpt.com/docs/models). Each tier's model·effort verified with `codex exec -m` on codex-cli 0.154.0
+2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
+2026-09-30: the run.json status enum, `current_phase` values and Halted banner name the doc-sync stage the runner already writes (`escalated-doc-sync`, `doc_sync`); the Halt section's class count is corrected
+2026-09-30: subagents are disabled with `-c agents.enabled=false`, not `--disable multi_agent` — the live check showed the GPT-6 model catalog overrides the feature flag (codex-rs core/src/config/mod.rs, multi-agent version precedence)
 
 2026-09-23: tier mapping moves to GPT-6 — gpt-6-luna·low, gpt-6-sol·medium, gpt-6-sol·high; standard and complex share one model and differ by effort, rationale in the `execution` spec's routing section. The live-log and monitor examples follow, and the live-log example's reviewer now runs at its task's tier as Reviewer routing requires. Verified against codex-cli 0.154.0
 

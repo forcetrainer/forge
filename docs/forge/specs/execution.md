@@ -62,8 +62,8 @@ gate after rework is exhausted. Nothing escalates model or effort automatically.
 | Tier | Claude agent · profile | Codex model · effort |
 |---|---|---|
 | trivial | `forge:forge-light` · haiku | gpt-6-luna · low |
-| standard | `forge:forge-standard` · sonnet · medium | gpt-6-sol · medium |
-| complex | `forge:forge-deep` · opus · high | gpt-6-sol · high |
+| standard | `forge:forge-standard` · sonnet · medium | gpt-6.1-sol · medium |
+| complex | `forge:forge-deep` · opus · high | gpt-6.1-sol · high |
 
 Codex routes three tiers onto two models. GPT-6 has no mid-tier model, and Sol is
 priced where the old mid-tier was, so standard and complex share Sol and differ by
@@ -1004,6 +1004,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-02: Codex standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. Standard and complex still share one model and differ by effort. Verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-23: Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high. GPT-6 shipped no mid-tier model, so standard and complex share Sol and complex takes high effort, the one deliberate departure from provider defaults. Supersedes the opus·high-against-sol·medium asymmetry note. Model ids verified with `codex exec` on codex-cli 0.154.0
 
 2026-09-09: a groundedness re-review runs over the whole document, matching pipeline's amended Spec review rule — the two specs contradicted each other for one commit, which plan lint structurally cannot catch since --spec takes a single file (#62, #96)

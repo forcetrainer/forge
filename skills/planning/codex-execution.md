@@ -23,7 +23,16 @@ mechanical changes, small plans) that never needed the runner.
 `scripts/forge-run.py` — a deterministic runner that drives one fresh
 `codex exec` process per task instead of in-session subagent dispatch. The
 process boundary is what makes it deterministic: no parent-model inheritance,
-no child-thread quota accumulation. The rest of this document specifies the
+no child-thread quota accumulation. Every dispatch — worker, task reviewer, final
+reviewer, final-review fixer, doc-sync; cold and resume alike — carries
+`-c agents.enabled=false --disable multi_agent_v2 --disable memories`
+(`CODEX_ISOLATION_ARGS` in `forge_common`): no in-worker subagents (either
+backend; `agents.enabled=false` rather than `--disable multi_agent` because
+the model catalog's multi-agent setting outranks that feature flag, which
+codex ignores) and no memories carried across tasks. Task and final reviewers also
+carry `-c sandbox_mode="read-only"` (`CODEX_REVIEWER_SANDBOX_ARGS`; `-c`
+because `codex exec resume` has no `-s`) so they are read-only; writers carry
+no sandbox override. Other user config still applies. The rest of this document specifies the
 runner (the dispatch branch). The disposition-matrix and convergence decision
 logic described below (Convergence stop) lives in shared `scripts/forge_dispose.py`
 (Phase 12b) — the runner calls it in-process; the Claude dispatch path (planning

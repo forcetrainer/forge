@@ -79,19 +79,39 @@ Receipts land in `.forge/runs/<timestamp>/`, uncommitted — the runner writes
 a self-ignoring `.forge/.gitignore` (`*`) on first run, so there's no
 target-repo setup.
 
+## Hook trust after a forge update
+
+Codex runs a plugin's hooks only after you trust them. Trust is keyed per
+`hooks/hooks.json` entry — plugin, event, and position — and hashes the
+entry itself (event, matcher, command, `async`, timeout), not the script it
+runs. So:
+
+- Upgrading forge, or upgrading Codex, does not by itself revoke trust, and
+  edits to the hook scripts never do.
+- A forge release that **changes `hooks/hooks.json`** does: an edited entry
+  reads as modified, an added one as untrusted, and inserting or reordering
+  entries shifts the positions of the ones after it, untrusting them too.
+
+The interactive TUI then opens **"Hooks need review"** at startup. Choose
+**Trust all and continue** (or review first). **Continue without trusting
+(hooks won't run)** leaves forge's hooks off for that session — no
+session-start context, no `constraints.md` write guard — and records nothing,
+so the prompt returns at the next startup. `codex exec` never prompts; an
+untrusted hook simply does not run there.
+
 ## Known Codex caveats
 
 These apply to ad-hoc in-session Codex subagents (exploration, one-off
 review) — the only place forge still spawns them. Plan execution goes
-through `forge-run.py`'s one-`codex exec`-process-per-task instead, which
-sidesteps both issues by construction (no parent-model inheritance, no
-completed-worker accumulation).
+through `forge-run.py`'s one-`codex exec`-process-per-task instead, with
+in-worker subagents disabled on every dispatch, which sidesteps both issues
+by construction.
 
-- Subagent selection has known regressions (custom-agent selection broke in
-  v0.137.0 and spawned agents silently inherited the parent model). If
-  spawned agents run the wrong model, check acceptance-command output rather
-  than trusting the spawn.
-- Spawned subagents pile up in the CLI's agent list, and completed workers
-  keep counting against the thread limit
+- Under the default `multi_agent` (v1) backend, spawned agents inherit the
+  parent model unless a role pins one. The opt-in `multi_agent_v2` backend
+  pins per role. If spawned agents run the wrong model, check
+  acceptance-command output rather than trusting the spawn.
+- Under v1, completed workers keep counting against the thread limit; v2
+  evicts finished agents
   ([openai/codex#19197](https://github.com/openai/codex/issues/19197),
-  [openai/codex#22779](https://github.com/openai/codex/issues/22779)).
+  [openai/codex#22779](https://github.com/openai/codex/issues/22779), open).

@@ -41,9 +41,21 @@ rp = _load_sibling("forge_run_review_packet", "review-packet.py")
 # Tier -> (model, model_reasoning_effort). Single update point on model churn.
 TIER_MAP = {
     "trivial": ("gpt-6-luna", "low"),
-    "standard": ("gpt-6-sol", "medium"),
-    "complex": ("gpt-6-sol", "high"),
+    "standard": ("gpt-6.1-sol", "medium"),
+    "complex": ("gpt-6.1-sol", "high"),
 }
+# Argument groups for every `codex exec` the runner spawns, cold and resume
+# alike. Single update point, as TIER_MAP is for models: subagents and memories
+# are off whatever the user's Codex config says; reviewers are read-only (-c,
+# because `codex exec resume` has no -s). agents.enabled=false, not
+# `--disable multi_agent`: the model catalog's multi-agent setting outranks
+# that feature flag (codex-cli 0.154.0), so the flag alone is ignored.
+CODEX_ISOLATION_ARGS = (
+    "-c", "agents.enabled=false",
+    "--disable", "multi_agent_v2",
+    "--disable", "memories",
+)
+CODEX_REVIEWER_SANDBOX_ARGS = ("-c", 'sandbox_mode="read-only"')
 TIER_ORDER = ("trivial", "standard", "complex")  # ascending; index gives rank
 # Reviewer routing reads TIER_MAP directly (reviewer tier = task tier; the
 # once-separate reviewer table is retired to remove the stale-drift hazard of
