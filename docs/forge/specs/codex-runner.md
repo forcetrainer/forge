@@ -110,8 +110,8 @@ forge-run.py --status --run-dir DIR
 | Tier | model | model_reasoning_effort |
 |---|---|---|
 | trivial | gpt-6-luna | low |
-| standard | gpt-6-sol | medium |
-| complex | gpt-6-sol | high |
+| standard | gpt-6.1-sol | medium |
+| complex | gpt-6.1-sol | high |
 
 - Passed per process as `codex exec -m <model> -c model_reasoning_effort=<effort>` —
   pinned, never inherited.
@@ -341,12 +341,12 @@ One log per task, `run_dir/task-<N>-live.log`; final review, `run_dir/final-revi
 Appended across phases with a header rule per phase:
 
 ```
-── worker · codex exec · gpt-6-sol · medium ──
+── worker · codex exec · gpt-6.1-sol · medium ──
 <streamed worker output, verbatim>
 ── acceptance ──
 $ pytest -q
 <streamed acceptance output>
-── review · codex exec · gpt-6-sol · medium ──
+── review · codex exec · gpt-6.1-sol · medium ──
 <streamed reviewer output>
 ```
 
@@ -428,7 +428,7 @@ Layout — two panels plus a terminal-state banner:
   ○  5  Monitor: task ledger        standard  queued
   …
 └──────────────────────────────────────────────────────────┘
-┌ ▸ task 4 · worker · codex exec · gpt-6-sol · high ─ live ─┐
+┌ ▸ task 4 · worker · codex exec · gpt-6.1-sol · high ─ live ─┐
   <in-flight task's stream, tailing>
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -556,6 +556,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-02: standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. gpt-6.1-sol is OpenAI's listed upgrade of GPT-6 Sol for Codex (learn.chatgpt.com/docs/models). Each tier's model·effort verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
 2026-09-30: the run.json status enum, `current_phase` values and Halted banner name the doc-sync stage the runner already writes (`escalated-doc-sync`, `doc_sync`); the Halt section's class count is corrected
 2026-09-30: subagents are disabled with `-c agents.enabled=false`, not `--disable multi_agent` — the live check showed the GPT-6 model catalog overrides the feature flag (codex-rs core/src/config/mod.rs, multi-agent version precedence)

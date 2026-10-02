@@ -137,7 +137,7 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-1-review-last")
         self.assertIsNotNone(argv)
-        self.assertIn("gpt-6-sol", argv)
+        self.assertIn("gpt-6.1-sol", argv)
         self.assertIn("model_reasoning_effort=medium", argv)
         self.assertNotIn("ultra", " ".join(argv))
 
@@ -149,7 +149,7 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-2-review-last")
         self.assertIsNotNone(argv)
-        self.assertIn("gpt-6-sol", argv)
+        self.assertIn("gpt-6.1-sol", argv)
         self.assertIn("model_reasoning_effort=high", argv)
         self.assertNotIn("ultra", " ".join(argv))
 
@@ -236,7 +236,7 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         rev = _find_dispatch(argvs, "task-1-review-last")
         self.assertIsNotNone(rev, argvs)
-        self.assertIn("gpt-6-sol", rev)
+        self.assertIn("gpt-6.1-sol", rev)
         self.assertIn("model_reasoning_effort=medium", rev)
         with open(os.path.join(self.run_dir, "task-1-attempt-1.json")) as f:
             receipt = json.load(f)
@@ -358,7 +358,7 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         fr = _find_dispatch(argvs, "final-review-last")
         self.assertIsNotNone(fr, argvs)
-        self.assertIn("gpt-6-sol", fr)
+        self.assertIn("gpt-6.1-sol", fr)
         self.assertIn("model_reasoning_effort=medium", fr)
 
     def test_final_review_of_plan_with_complex_task_routes_to_complex_tier(self):
@@ -373,11 +373,11 @@ class ReviewLoopTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         rev = _find_dispatch(argvs, "task-1-review-last")
         self.assertIsNotNone(rev, argvs)
-        self.assertIn("gpt-6-sol", rev)
+        self.assertIn("gpt-6.1-sol", rev)
         self.assertIn("model_reasoning_effort=high", rev)
         fr = _find_dispatch(argvs, "final-review-last")
         self.assertIsNotNone(fr, argvs)
-        self.assertIn("gpt-6-sol", fr)
+        self.assertIn("gpt-6.1-sol", fr)
         self.assertIn("model_reasoning_effort=high", fr)
 
     def test_final_review_improvement_finding_defers_run_completes(self):

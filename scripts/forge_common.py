@@ -41,8 +41,8 @@ rp = _load_sibling("forge_run_review_packet", "review-packet.py")
 # Tier -> (model, model_reasoning_effort). Single update point on model churn.
 TIER_MAP = {
     "trivial": ("gpt-6-luna", "low"),
-    "standard": ("gpt-6-sol", "medium"),
-    "complex": ("gpt-6-sol", "high"),
+    "standard": ("gpt-6.1-sol", "medium"),
+    "complex": ("gpt-6.1-sol", "high"),
 }
 # Argument groups for every `codex exec` the runner spawns, cold and resume
 # alike. Single update point, as TIER_MAP is for models: subagents and memories

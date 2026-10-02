@@ -130,7 +130,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
                 self.fake, "exec", "resume", "--json",
                 *forge_common.CODEX_ISOLATION_ARGS,
                 "--output-last-message", last_msg_path,
-                "-m", "gpt-6-sol",
+                "-m", "gpt-6.1-sol",
                 "-c", 'model_reasoning_effort="medium"',
                 "th-worker-1",
                 # no trailing PROMPT: it rides stdin, unbounded by ARG_MAX
@@ -172,7 +172,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
         rest = argv[3 + len(iso):]
         self.assertEqual(rest[0:2], ["--output-last-message", last_msg_path])
         self.assertEqual(rest[2:6], [
-            "-m", "gpt-6-sol", "-c", 'model_reasoning_effort="medium"',
+            "-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="medium"',
         ])
         self.assertEqual(rest[6], "th-reviewer-1")
         self.assertEqual(rest[7:], list(forge_common.CODEX_REVIEWER_SANDBOX_ARGS))
