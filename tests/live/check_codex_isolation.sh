@@ -31,6 +31,7 @@ PROMPT='List your available tools by name; if spawn_agent is among them, call it
 run() {
   name=$1; shift
   mkdir -p "$WORK/$name"
+  rm -f "$WORK/$name.last"  # a try that writes no final message must not reuse the last one
   (cd "$WORK/$name" && codex exec --json --skip-git-repo-check -s read-only \
       -o "$WORK/$name.last" "$@" "$PROMPT" </dev/null >"$WORK/$name.jsonl" 2>"$WORK/$name.err") \
     || { echo "FAIL: codex run '$name' exited non-zero" >&2; sed 's/^/  /' "$WORK/$name.err" >&2; exit 1; }
