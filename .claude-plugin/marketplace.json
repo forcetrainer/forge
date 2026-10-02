@@ -12,7 +12,7 @@
         "url": "https://github.com/forcetrainer/forge.git",
         "sha": "653093a07689ec871eaf72f80f978521f3b94a3b"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Stable (0.10.3)."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Stable (0.13.0)."
     },
     {
       "name": "forge-beta",
@@ -21,7 +21,7 @@
         "url": "https://github.com/forcetrainer/forge.git",
         "sha": "a237026015995ee9db64aa07fe17b887949b01c8"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Pre-release (0.12.4-beta): Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high; GPT-6 has no mid-tier model, so standard and complex share Sol and differ by effort."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Tracks stable (0.13.0) until the next prerelease."
     }
   ]
 }
