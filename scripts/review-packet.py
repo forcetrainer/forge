@@ -225,12 +225,18 @@ def build_prior_findings_section(prior_findings):
     )
 
 
+CITABLE_ROLE_LINE = (
+    "Ids a finding's contract_ref may cite. Not coverage items "
+    "\u2014 coverage answers the Contract checklist only."
+)
+
+
 def build_citable_section(ids):
     """Render a '## Citable refs' markdown section, one '- <id>' line per id,
     sorted — byte-identical to forge_checklist.render_citable_section (kept
     as a local copy for the same reason as build_checklist_section: this
     module is loaded before forge_checklist can be imported)."""
-    lines = ["## Citable refs", ""]
+    lines = ["## Citable refs", "", CITABLE_ROLE_LINE, ""]
     lines.extend("- {}".format(i) for i in sorted(set(ids)))
     return "\n".join(lines) + "\n"
 

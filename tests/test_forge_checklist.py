@@ -550,10 +550,30 @@ class FinalCitableRefsTests(unittest.TestCase):
 
 
 class RenderCitableSectionTests(unittest.TestCase):
+    ROLE = ("Ids a finding's contract_ref may cite. Not coverage items "
+            "\u2014 coverage answers the Contract checklist only.")
+
+    def test_role_line_sits_between_heading_and_first_id(self):
+        out = fc.render_citable_section(["t1.t1", "g1"])
+        self.assertTrue(
+            out.startswith("## Citable refs\n\n" + self.ROLE + "\n\n- g1\n"),
+            out,
+        )
+
+    def test_role_line_contains_no_heading_marker(self):
+        line = fc.render_citable_section(["g1"]).split("\n")[2]
+        self.assertNotIn("##", line)
+
+    def test_role_line_names_contract_ref_and_denies_coverage_items(self):
+        line = fc.render_citable_section(["g1"]).split("\n")[2]
+        self.assertIn("contract_ref", line)
+        self.assertIn("Not coverage items", line)
+
     def test_lists_every_id_once_sorted_under_the_heading(self):
         out = fc.render_citable_section(["t1.t2", "g1", "t1.t1", "g1"])
         self.assertEqual(
-            out, "## Citable refs\n\n- g1\n- t1.t1\n- t1.t2\n",
+            out, "## Citable refs\n\n" + self.ROLE
+            + "\n\n- g1\n- t1.t1\n- t1.t2\n",
         )
 
     def test_spec_id_renders_as_collapsed_heading_text_citable_refs_produces(self):
@@ -645,6 +665,7 @@ class CitableCLITests(unittest.TestCase):
             ).rstrip("\n"),
         )
         self.assertIn("## Citable refs", result.stdout)
+        self.assertIn(RenderCitableSectionTests.ROLE, result.stdout)
 
     def test_final_citable_with_format_md_prints_the_rendered_section(self):
         result = self.run_cli([

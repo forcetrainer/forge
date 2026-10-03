@@ -630,6 +630,13 @@ class BuildCitableSectionTests(unittest.TestCase):
             forge_checklist.render_citable_section(ids),
         )
 
+    def test_section_carries_the_role_line_between_heading_and_ids(self):
+        out = rp.build_citable_section(["t1.t1", "g1"])
+        self.assertTrue(out.startswith(
+            "## Citable refs\n\nIds a finding's contract_ref may cite. "
+            "Not coverage items \u2014 coverage answers the "
+            "Contract checklist only.\n\n- g1\n- t1.t1\n"), out)
+
     def test_build_packet_with_citable_contains_section_with_every_id(self):
         packet = rp.build_packet(
             "### Task 1: First task\n- [ ] Done\n", "HEAD", "",

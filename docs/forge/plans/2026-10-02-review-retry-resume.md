@@ -166,7 +166,7 @@
 **Depends on:** nothing.
 
 ### Task 6: The Citable refs section states its role
-- [ ] Done
+- [x] Done — passed, 2 attempts (full suite caught `##` in the role line; plan Interface amended)
 
 **Files:**
 - Modify: `scripts/forge_checklist.py` (`render_citable_section` emits the role line)
@@ -177,7 +177,7 @@
 **Spec:** Contract checklist
 
 **Interface:**
-- Rendered section: the `## Citable refs` heading, a blank line, the role line `Ids a finding's contract_ref may cite. Not coverage items — coverage answers the ## Contract checklist only.`, a blank line, then one `- <id>` line per id, sorted
+- Rendered section: the `## Citable refs` heading, a blank line, the role line `Ids a finding's contract_ref may cite. Not coverage items — coverage answers the Contract checklist only.` (no `##` inside the line: it must never read as a section heading or match one), a blank line, then one `- <id>` line per id, sorted
 
 **Tests:**
 - `render_citable_section` output has the role line between the heading and the first id

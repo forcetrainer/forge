@@ -294,11 +294,17 @@ def render_section(items):
     return "\n".join(lines) + "\n"
 
 
+CITABLE_ROLE_LINE = (
+    "Ids a finding's contract_ref may cite. Not coverage items "
+    "\u2014 coverage answers the Contract checklist only."
+)
+
+
 def render_citable_section(ids):
     """A '## Citable refs' markdown section: one '- <id>' line per id, sorted.
     The reviewer copies a finding's ``contract_ref`` verbatim from it —
     citable ids are printed, never derived."""
-    lines = ["## Citable refs", ""]
+    lines = ["## Citable refs", "", CITABLE_ROLE_LINE, ""]
     lines.extend("- {}".format(i) for i in sorted(set(ids)))
     return "\n".join(lines) + "\n"
 
