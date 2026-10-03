@@ -219,3 +219,25 @@ class AnnotateLedgerTests(unittest.TestCase):
         self.assertIn("[ ] Done", content)
         self.assertNotIn("[x] Done", content)
         self.assertIn("escalated: worker exited 1", content)
+
+
+class AcceptanceResultReceiptTests(unittest.TestCase):
+    def test_acceptance_results_entry_carries_outcome_and_passed(self):
+        d = tempfile.mkdtemp(prefix="forge-accres-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        task = forge_run.forge_common.Task(
+            number=1, title="T", tier="trivial",
+            acceptance_checks=[forge_run.forge_plan.parse_acceptance_clause(
+                "`echo hi` prints `hi`")],
+        )
+        [res] = forge_run.run_acceptance(task, d)
+        entry = forge_run.asdict(res)
+        self.assertEqual(
+            set(entry),
+            {"command", "outcome", "exit_code", "output_tail", "passed"},
+        )
+        self.assertEqual(entry["command"], "echo hi")
+        self.assertEqual(entry["outcome"], "prints `hi`")
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertEqual(entry["output_tail"], "hi\n")
+        self.assertIs(entry["passed"], True)

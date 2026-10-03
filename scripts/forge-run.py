@@ -124,6 +124,7 @@ from forge_git import (  # noqa: F401
 )
 from forge_plan import (  # noqa: F401
     order_tasks,
+    outcome_met,
     parse_effort_overrides,
     parse_plan_tasks,
 )
@@ -305,7 +306,8 @@ def run_acceptance(task, cwd, live_path=None):
     and an output tail. Output is tee'd to ``live_path`` (the task's live log) so
     the monitor sees acceptance output scroll; ``live_path=None`` (unit calls)
     tees to os.devnull, preserving the returned tail either way. A timed-out
-    command is a non-zero (failed) acceptance."""
+    command meets no outcome. ``passed`` is whether the clause's stated outcome
+    was met (``forge_plan.outcome_met``) against the full output."""
     lp = live_path or os.devnull
     results = []
     for check in task.acceptance_checks:
@@ -317,8 +319,12 @@ def run_acceptance(task, cwd, live_path=None):
         results.append(
             AcceptanceResult(
                 command=cmd,
+                outcome=check.stated,
                 exit_code=result.exit_code if not result.timed_out else -1,
                 output_tail=result.tail,
+                passed=outcome_met(
+                    check, result.exit_code, result.output, result.timed_out
+                ),
             )
         )
     return results
@@ -1062,7 +1068,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         acceptance = run_acceptance(task, cwd, live_path)
 
         worker_ok = worker.exit_code == 0 and not worker.timed_out
-        acc_ok = all(r.exit_code == 0 for r in acceptance)
+        acc_ok = all(r.passed for r in acceptance)
 
         review_verdict = None
         findings = []       # classified Finding objects for this attempt
@@ -1082,11 +1088,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 "Prior worker attempt exited {} with no usable result — reattempt "
                 "the task.".format(worker.exit_code))]
         elif not acc_ok:
-            failed = next(r for r in acceptance if r.exit_code != 0)
+            failed = next(r for r in acceptance if not r.passed)
             cause = "acceptance failed: {}".format(failed.command)
             findings = [_execution_failure_finding(
-                "Acceptance command `{}` failed (exit {}). Output tail:\n{}".format(
-                    failed.command, failed.exit_code, failed.output_tail))]
+                "Acceptance command `{}` did not meet its stated outcome `{}` "
+                "(exit {}). Output tail:\n{}".format(
+                    failed.command, failed.outcome, failed.exit_code,
+                    failed.output_tail))]
         elif task.tier != "trivial":
             # Trivial tier: acceptance is the whole verification. Standard/complex:
             # a reviewer judges the diff against the spec, and the runner verifies

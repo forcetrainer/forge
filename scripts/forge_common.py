@@ -193,8 +193,10 @@ class Task:
 @dataclass
 class AcceptanceResult:
     command: str
+    outcome: str  # the stated outcome, as written in the plan
     exit_code: int
     output_tail: str
+    passed: bool
 
 
 @dataclass
@@ -288,6 +290,7 @@ class TeeResult:
     exit_code: "int | None"  # None when timed out
     timed_out: bool
     tail: str  # last _ACC_TAIL_CHARS of merged stdout+stderr
+    output: str  # the full merged stdout+stderr
 
 
 @dataclass
@@ -407,7 +410,8 @@ def run_teed(argv, *, cwd=None, shell=False, timeout, live_path, header,
 
     merged = "".join(buf)
     return TeeResult(
-        exit_code=exit_code, timed_out=timed_out, tail=merged[-_ACC_TAIL_CHARS:]
+        exit_code=exit_code, timed_out=timed_out, tail=merged[-_ACC_TAIL_CHARS:],
+        output=merged,
     )
 
 

@@ -395,3 +395,39 @@ class ParseEffortOverridesTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             forge_run.parse_effort_overrides(["1=bogus"])
         self.assertIn("bogus", str(ctx.exception))
+
+
+class OutcomeMetTests(unittest.TestCase):
+    def setUp(self):
+        self.parse = forge_run.forge_plan.parse_acceptance_clause
+        self.met = forge_run.forge_plan.outcome_met
+
+    def _met(self, clause, exit_code, output="", timed_out=False):
+        return self.met(self.parse(clause), exit_code, output, timed_out)
+
+    def test_passes_met_by_exit_0_not_exit_1(self):
+        self.assertTrue(self._met("`t` passes", 0))
+        self.assertFalse(self._met("`t` passes", 1))
+
+    def test_exits_n_met_by_exactly_n(self):
+        self.assertTrue(self._met("`t` exits 1", 1))
+        self.assertFalse(self._met("`t` exits 1", 0))
+
+    def test_prints_nothing_met_by_empty_output_any_exit(self):
+        for code in (0, 1, 2):
+            self.assertTrue(self._met("`t` prints nothing", code, ""))
+            self.assertFalse(self._met("`t` prints nothing", code, "x"))
+
+    def test_prints_text_needs_text_and_exit_0(self):
+        self.assertTrue(self._met("`t` prints `ok`", 0, "all ok\n"))
+        self.assertFalse(self._met("`t` prints `ok`", 1, "all ok\n"))
+        self.assertFalse(self._met("`t` prints `ok`", 0, "nope\n"))
+
+    def test_prints_text_found_before_the_tail_window(self):
+        out = "ok\n" + "x" * 10000
+        self.assertTrue(self._met("`t` prints `ok`", 0, out))
+
+    def test_timed_out_meets_no_outcome(self):
+        for clause in ("`t` passes", "`t` exits 1", "`t` prints nothing",
+                       "`t` prints `ok`"):
+            self.assertFalse(self._met(clause, None, "ok", timed_out=True))

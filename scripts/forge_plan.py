@@ -30,6 +30,23 @@ _EXITS_RE = re.compile(r"exits ([0-9]+)")
 _PRINTS_RE = re.compile(r"prints `([^`]+)`")
 
 
+def outcome_met(check, exit_code, output, timed_out):
+    """Whether a command clause's stated outcome is met (spec: pipeline,
+    Acceptance clause grammar). ``output`` is the full merged stdout+stderr, not
+    the tail. A timed-out command meets no outcome."""
+    if timed_out:
+        return False
+    if check.outcome == "passes":
+        return exit_code == 0
+    if check.outcome == "exits":
+        return exit_code == check.expected
+    if check.outcome == "prints-nothing":
+        return output == ""
+    if check.outcome == "prints":
+        return exit_code == 0 and check.expected in output
+    raise ValueError("unknown acceptance outcome {!r}".format(check.outcome))
+
+
 def parse_acceptance_clause(clause):
     """Parse one ``**Acceptance:**`` clause. Returns None for a prose clause
     (first character after trimming is not a backtick); an ``AcceptanceCheck``

@@ -60,7 +60,7 @@
 **Depends on:** nothing.
 
 ### Task 2: The runner checks each stated outcome
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Read: `docs/forge/specs/codex-runner.md` (sections "Task loop (per task)", "Receipts and run state")

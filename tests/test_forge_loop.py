@@ -152,6 +152,47 @@ class LoopSubprocessTests(unittest.TestCase):
             any(r["exit_code"] != 0 for r in receipt["acceptance_results"])
         )
 
+    def _acc_plan(self, *clauses):
+        return PLAN_PASS.replace("**Acceptance:** `true` passes",
+                                 "**Acceptance:**\n" + "\n".join("- " + c for c in clauses))
+
+    def _receipt(self, attempt=1):
+        with open(os.path.join(self.run_dir, "task-1-attempt-{}.json".format(attempt))) as f:
+            return json.load(f)
+
+    def test_prints_nothing_clause_with_grep_finding_nothing_passes(self):
+        open(os.path.join(self.d, "foo.txt"), "w").write("alpha\n")
+        plan = self._plan(self._acc_plan("`grep -n zzz foo.txt` prints nothing"))
+        res = self._run(plan)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        r = self._receipt()["acceptance_results"][0]
+        self.assertEqual(r["exit_code"], 1)
+        self.assertTrue(r["passed"])
+
+    def test_prose_clause_with_inline_code_is_never_executed(self):
+        plan = self._plan(self._acc_plan(
+            "The marker is created by `touch proof.txt` in the worker."))
+        res = self._run(plan)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "proof.txt")))
+
+    def test_rework_finding_names_first_failing_clause_in_plan_order(self):
+        plan = self._plan(self._acc_plan(
+            "`true` passes",
+            "`echo first-out; exit 3` passes",
+            "`echo second-out; exit 4` passes"))
+        self._run(plan)
+        rc = self._receipt()
+        self.assertEqual([r["passed"] for r in rc["acceptance_results"]],
+                         [True, False, False])
+        with open(os.path.join(self.run_dir, "task-1-attempt-2-brief.md")) as f:
+            text = f.read().split("## Rework", 1)[1]
+        self.assertIn("echo first-out; exit 3", text)
+        self.assertIn("passes", text)
+        self.assertIn("exit 3", text)
+        self.assertIn("first-out", text)
+        self.assertNotIn("second-out", text)
+
     def test_malformed_plan_bad_heading_exits_one_naming_cause(self):
         plan = self._plan(PLAN_BAD_HEADING)
         res = self._run(plan)
