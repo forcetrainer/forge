@@ -252,6 +252,9 @@ This plan is itself a legacy plan run with `--spec docs/forge/specs/pipeline.md`
 - a per-task packet for a two-spec plan pastes the named sections labeled with their spec ids
 - a per-task packet for a one-spec plan pastes its sections unlabeled, as before
 - the diff block in every packet is unchanged
+- a two-spec run through the runner, with a standard-tier task naming a section in each spec, completes its task review, final review and doc-sync, and each of those stages receives both specs
+- a run through the runner of a plan with no spec that produces a diff completes final review and doc-sync
+- no call site in the runner passes only the first declared spec to a packet or brief
 
 **Acceptance:**
 - `python3 -m pytest -q tests/test_forge_run_specs.py tests/test_review_packet.py tests/test_forge_final_review.py tests/test_forge_docsync.py` passes
