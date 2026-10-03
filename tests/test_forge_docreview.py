@@ -728,6 +728,15 @@ class BuildPacketTests(unittest.TestCase):
         self.assertIn("replaced_system", packet)
         self.assertIn("dependencies_read", packet)
 
+    def test_packet_states_how_dependencies_read_is_verified(self):
+        # `_validate_dependencies_read` requires `file` to be exactly a
+        # tracked path and `symbol` to appear literally in it. A reviewer
+        # told neither writes `path.py:88` and `module.func`, and both are
+        # rejected — observed 2026-10-03, two reviewers, one retry each.
+        packet = d.build_packet(self.spec_path)
+        self.assertIn("no line number", packet)
+        self.assertIn("appears literally in that file", packet)
+
     def test_packet_states_the_top_level_verdict_envelope(self):
         # A fresh reviewer's entire prompt is this packet — a field the
         # packet doesn't name is a field the reviewer has no way to know to
