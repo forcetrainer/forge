@@ -106,6 +106,8 @@ Three checks, and three is the whole set: (1) no plan element contradicts the sp
 
 Run plan lint (`scripts/forge_lint.py`) before the packet is built, since the packet is built by parsing the plan, and again on the plan as amended. Build the packet: `scripts/forge_docreview.py --plan <plan> --out <path>`. The reviewer is a **fresh** agent — discovery is cold — whose prompt is the packet file's path. Capture its verdict JSON to a file, then run `scripts/forge_docreview.py --plan <plan> --verdict <file>` to validate and dispose it. Add `--spec <spec>` to both only for a legacy plan with no `**Spec files:**` header. Verdict schema and dispositions: execution spec, Plan review verdict.
 
+On Codex, start the reviewer as `codex-execution.md` in this skill directory says, under Document reviews on Codex. On either harness, if a cold reviewer cannot be started, stop and tell the user — never substitute a self-review.
+
 An invalid verdict (non-zero exit) gets one retry resuming the reviewer that emitted it (`SendMessage`, prompt is the defect list alone); a failed resume falls back to a fresh reviewer given the packet plus the defects; a second invalid verdict is a contract error.
 
 `uncovered` and `contradiction` findings are amended by the plan's author. A re-review after an amendment resumes the reviewer and is whole-plan, its verdict carrying the full `coverage` array; a failed resume falls back to a fresh reviewer given the full packet. `spec-defect` findings are surfaced to the user with `proposed_amendment`, never auto-applied; a spec amended in response re-enters spec review, plan lint re-runs against it, and plan review restarts cold.
@@ -118,11 +120,13 @@ Execution is not offered until plan review passes.
 
 Each task's tier routes to a shipped worker agent. Routing is absolute — the session's model and effort settings never apply to subagent execution:
 
-| Tier | Agent | Profile |
-|---|---|---|
-| trivial | `forge:forge-light` | haiku |
-| standard | `forge:forge-standard` | sonnet · medium |
-| complex | `forge:forge-deep` | opus · high |
+| Tier | Claude agent | Claude profile | Codex model · effort |
+|---|---|---|---|
+| trivial | `forge:forge-light` | haiku | gpt-6-luna · low |
+| standard | `forge:forge-standard` | sonnet · medium | gpt-6.1-sol · medium |
+| complex | `forge:forge-deep` | opus · high | gpt-6.1-sol · high |
+
+The two harnesses never share a model: a Claude profile is never passed to `codex`, and a Codex model is never an `agentType`. The Codex column mirrors `TIER_MAP` in `scripts/forge_common.py`, which the runner reads; a test keeps the two equal.
 
 These are each provider's stated default, not escalation targets: the stronger settings removed as defaults (xhigh/max) aren't deleted — they remain what a human may bump a halted task to (see rework guardrails), never a default.
 

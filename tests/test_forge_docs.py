@@ -526,3 +526,88 @@ def test_five_rules_check_does_not_see_a_rule_hidden_in_a_helper():
     assert mutated_source != source
     full_module = hidden_helper + mutated_source
     assert _count_rule_statements(full_module) == 5
+
+
+# --- Codex routing for document reviews --------------------------------
+#
+# A Codex session starts spec and plan reviewers itself; they never pass
+# through forge-run.py, the only reader of TIER_MAP. So the skill carries the
+# Codex routing and the reviewer command, and these checks keep both equal to
+# the script — a model or flag change that updates one and not the other
+# fails here.
+
+import forge_common  # noqa: E402
+
+PLANNING_SKILL_PATH = REPO_ROOT / "skills" / "planning" / "SKILL.md"
+CODEX_EXECUTION_PATH = REPO_ROOT / "skills" / "planning" / "codex-execution.md"
+
+
+def _routing_rows():
+    """The planning skill's routing table rows, keyed by tier."""
+    rows = {}
+    for line in PLANNING_SKILL_PATH.read_text().splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0] in forge_common.TIER_MAP:
+            rows[cells[0]] = cells
+    return rows
+
+
+def test_planning_skill_routing_table_carries_the_codex_tier_map():
+    rows = _routing_rows()
+    assert set(rows) == set(forge_common.TIER_MAP)
+    for tier, (model, effort) in forge_common.TIER_MAP.items():
+        assert rows[tier][-1] == "{} · {}".format(model, effort), rows[tier]
+
+
+def test_routing_table_check_catches_a_stale_model():
+    # The check above must be able to fail: a model the script no longer
+    # uses in the table is a mismatch.
+    rows = _routing_rows()
+    model, effort = forge_common.TIER_MAP["standard"]
+    assert rows["standard"][-1] != "{}-old · {}".format(model, effort)
+
+
+def _codex_doc_review_section():
+    text = CODEX_EXECUTION_PATH.read_text()
+    start = text.index("## Document reviews on Codex")
+    rest = text[start + 1:]
+    end = rest.find("\n## ")
+    return text[start:] if end == -1 else text[start:start + 1 + end]
+
+
+def test_codex_doc_review_command_uses_the_runners_model_and_flags():
+    section = _codex_doc_review_section()
+    model, effort = forge_common.TIER_MAP["standard"]
+    assert "-m {}".format(model) in section
+    assert "model_reasoning_effort={}".format(effort) in section
+    isolation = " ".join(forge_common.CODEX_ISOLATION_ARGS)
+    assert isolation in section, isolation
+    for arg in forge_common.CODEX_REVIEWER_SANDBOX_ARGS:
+        assert arg in section, arg
+    assert "--output-last-message" in section
+    # Without a closed stdin, `codex exec` given a prompt argument waits for
+    # more input and hangs (observed live, codex-cli 0.160.0).
+    assert "< /dev/null" in section
+
+
+def test_codex_doc_review_section_names_no_claude_model():
+    section = _codex_doc_review_section().lower()
+    for name in ("sonnet", "haiku", "opus"):
+        assert name not in section
+
+
+def test_no_self_review_rule_is_stated_where_a_reviewer_is_started():
+    rule = "never substitute a self-review"
+    assert rule in _step_8_text()
+    planning = PLANNING_SKILL_PATH.read_text()
+    plan_review = planning[planning.index("## Plan review"):planning.index("## Execution")]
+    assert rule in plan_review
+    assert rule in _codex_doc_review_section()
+
+
+def test_both_review_steps_point_codex_at_the_document_review_section():
+    pointer = "Document reviews on Codex"
+    assert pointer in _step_8_text()
+    planning = PLANNING_SKILL_PATH.read_text()
+    plan_review = planning[planning.index("## Plan review"):planning.index("## Execution")]
+    assert pointer in plan_review

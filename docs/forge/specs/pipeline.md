@@ -111,6 +111,16 @@ check against a document written to satisfy it — the failure this gate exists 
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
 re-review after an amendment is a verification lap and may resume.
 
+**Starting the reviewer.** On Claude the session spawns an agent. On Codex the session
+runs the one `codex exec` command given in `skills/planning/codex-execution.md`, under
+Document reviews on Codex: standard tier, read-only, standard input closed, verdict taken
+from the last message. `forge-run.py` is not involved, so that command and the Codex
+column of the planning skill's routing table are the only places a session learns the
+Codex model; a test keeps both equal to `TIER_MAP`. On Codex a retry or re-review is a
+fresh dispatch, since the session holds no handle to resume. This applies to Plan review
+too. **If a cold reviewer cannot be started, the session stops and tells the user. It
+never substitutes a self-review, and never retries with a different model.**
+
 **Amendments re-enter, and the review is always whole-document** — never scoped to the
 changed sections. Scoping was specified first and dropped: "changed sections" never said
 changed *relative to what*, and three incompatible baselines each satisfied the words
@@ -558,6 +568,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-03: a Codex session is told how to start a spec or plan reviewer — one `codex exec` command at the standard tier, read-only, with standard input closed — and the planning skill's routing table gains a Codex column, both test-guarded against `TIER_MAP`. Until now the review steps said only "a fresh agent", the skills named Claude models alone, and Codex sessions dispatched reviewers as `sonnet`, then fell back to reviewing their own document. A session that cannot start a cold reviewer now stops; it never self-reviews
 2026-10-03: a plan declares its spec files in a `**Spec files:**` header and its tasks name sections as `[<spec id>] <heading>`, so one plan implements any number of specs and every tool reads them from the plan; `--spec` remains for legacy plans only. An exact heading match now wins over a prefix match. Until now a run took one `--spec`, and a plan amending two specs got coverage checking on one and silence on the other (#62)
 2026-10-03: plan review — a cold reviewer validates a plan against its spec before execution is offered: no plan element contradicts the spec, every requirement in a named section is covered by a plan promise, and plan lint runs before the packet and on the amended plan. Until now the only checks were the author's self-review and a lint rule satisfied by naming a section, so a spec obligation dropped at planning surfaced only at the final review (#97, #113)
 2026-10-03: TDD test scope — verify-GREEN runs the touched test files, the whole suite once at completion (plan close-out for a plan task); coverage is per behavior through a public interface, not per function; lowest level that proves it; the description-asserting anti-pattern covers a stand-in for an effect the harness cannot observe. Replaces "run the full suite" on every cycle and "every new function/method has a test", which drove repeated heavy-suite runs and tests coupled to internals in two downstream repos

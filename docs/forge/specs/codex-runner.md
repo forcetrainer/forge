@@ -138,8 +138,11 @@ forge-run.py --status --run-dir DIR
   escalation gate.
 - The whole-plan final review is one `codex exec` call routed at the plan's **highest**
   task tier.
-- The table lives in one place, `forge_common.TIER_MAP` — the single update point on
-  model churn.
+- The table is defined in one place, `forge_common.TIER_MAP`, which is all the runner
+  reads. It has one mirror, in the planning skill (the routing table's Codex column and
+  the document-review command in `codex-execution.md`), for the reviewers a session
+  starts without the runner. A test fails when the mirror differs, so a model change is
+  two edits, and forgetting the second is caught.
 
 ## Task loop (per task)
 
@@ -592,6 +595,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-03: amended by [pipeline] — `TIER_MAP` gains one guarded mirror: the Codex column of the planning skill's routing table and the document-review command in `codex-execution.md`, kept equal by test, because spec and plan reviewers are started by the session and never pass through the runner. Verified live on codex-cli 0.160.0: the command runs with `gpt-6.1-sol`, and a read-only reviewer opens a file given only its path (`tests/live/check_codex_spec_by_path.sh` passes)
 2026-10-03: amended by [pipeline] — `--spec` is optional: the runner reads a plan's specs from its `**Spec files:**` header and passes that set to every brief, checklist, packet and lint call; `--spec` remains for legacy plans. The final-review packet and doc-sync brief carry spec paths, not spec text; `run.json` records `specs` as a list and a resumed run's spec set must match it (#62)
 2026-10-03: the Claude marketplace drops the `forge-beta` channel — it had tracked stable since 0.13.0; `forge` is the single sha-pinned entry
 2026-10-02: acceptance runs command clauses and checks each stated outcome, never prose clauses; receipts record the outcome and pass flag. `--timeout` drops "recommend ~900" for the 3600 default — two turns died at ~900s mid-build and later builds ran 30 minutes (#112)
