@@ -42,8 +42,7 @@ confined to the manifests.
   or SSH Git URL; `--ref` selects one explicitly, and `codex plugin marketplace upgrade`
   refreshes a Git snapshot.
 - **The two harnesses version differently, and a release states both.** Claude pins a
-  `sha` inside `.claude-plugin/marketplace.json`, so one registry carries a `forge` and a
-  `forge-beta` channel. Codex takes the ref when the marketplace is *added*:
+  `sha` inside `.claude-plugin/marketplace.json`, on a single `forge` entry. Codex takes the ref when the marketplace is *added*:
   `plugins[].source` is `{source: "local", path: "./"}`, meaning the plugin sits at the
   root of whatever tree was fetched — so **the git ref is the version selector** and no
   second channel entry exists or is needed. A release tag is therefore the Codex
@@ -559,6 +558,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-03: the Claude marketplace drops the `forge-beta` channel — it had tracked stable since 0.13.0; `forge` is the single sha-pinned entry
 2026-10-02: acceptance runs command clauses and checks each stated outcome, never prose clauses; receipts record the outcome and pass flag. `--timeout` drops "recommend ~900" for the 3600 default — two turns died at ~900s mid-build and later builds ran 30 minutes (#112)
 2026-10-02: standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. gpt-6.1-sol is OpenAI's listed upgrade of GPT-6 Sol for Codex (learn.chatgpt.com/docs/models). Each tier's model·effort verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
