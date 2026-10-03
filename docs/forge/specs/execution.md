@@ -381,12 +381,16 @@ proposes, the runner decides:
 
 - every checklist id appears exactly once; a missing, unknown or duplicated id is a
   defect;
-- every `violated` entry carries `finding`, naming a finding in the same verdict whose
-  `impact` is `contract-breaking`; a missing `finding`, one naming no finding in the
-  verdict, or one naming a finding of any other impact is a defect. Several entries may
+- every `violated` entry carries `finding`, naming a finding in the same verdict that is
+  **effectively** contract-breaking — `impact: "contract-breaking"` **and** a non-null
+  `contract_ref` that is a citable ref for this review, i.e. a finding the named-evidence
+  rule does not downgrade. A missing `finding`, one naming no finding in the verdict, one
+  naming a finding of any other impact, or one naming a finding whose `contract_ref` is
+  null or not citable is a defect; otherwise a violated item could be backed by a
+  finding that dispositions to `defer` and is never fixed or halted. Several entries may
   name the same finding — one defect commonly breaks several items, and the backing
   link runs from the coverage entry to the finding, so the finding's single
-  `contract_ref` never has to equal each violated id. That equality was the previous
+  `contract_ref` must be citable but never has to equal each violated id. That equality was the previous
   rule and is **replaced, not kept as an alternative**: it forced a reviewer to split
   one defect into a finding per violated item or under-report what it breaks. Observed
   2026-10-02: 12 of 16 validation retries across one repo's runs were unbacked
