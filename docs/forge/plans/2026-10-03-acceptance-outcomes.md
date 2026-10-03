@@ -136,7 +136,7 @@
 **Depends on:** Task 2.
 
 ### Task 4: Planning skill text — clause grammar, Claude acceptance step, timeout
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Read: `docs/forge/specs/pipeline.md` (section "Plan documents", bullet "Acceptance clause grammar"), `docs/forge/specs/codex-runner.md` (sections "Runner", "Session awareness — foreground execution")
