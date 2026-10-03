@@ -150,7 +150,7 @@
 **Depends on:** Task 3.
 
 ### Task 5: discovery-review-is-cold admits the validation retry
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `docs/forge/constraints.md` (via `scripts/forge_memory.py update-constraint`, never a hand edit)
