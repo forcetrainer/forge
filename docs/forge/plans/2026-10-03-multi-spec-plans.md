@@ -174,6 +174,7 @@ This plan is itself a legacy plan run with `--spec docs/forge/specs/pipeline.md`
 - a `contradiction` finding citing `[<spec id>] <heading>` for any heading in either declared spec is valid
 - a finding citing a heading under the wrong spec id is a defect
 - a one-spec header plan's packet and legal sections are unprefixed and equal a legacy plan's
+- the packet states that a `pass` verdict still carries an empty `findings` list
 - `--plan` on a header plan with no `--spec` emits the packet and exits 0
 - `--plan` on a header plan with `--spec` also given exits 1 naming both
 - `--plan` on a plan with no spec exits 1 naming the cause and writes no packet
