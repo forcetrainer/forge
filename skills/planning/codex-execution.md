@@ -42,10 +42,12 @@ callers, so the two harnesses' rework/halt rules can't drift apart.
 **Invocation:** after the execution approval gate, the orchestrator runs the runner in the **foreground** (not backgrounded) so a halt surfaces in the conversation the instant it happens (see Session awareness):
 
 ```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> \
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> [--spec <spec.md>] \
   --run-dir .forge/runs/<name> --autofix auto \
   [--resolve <finding-id>=repair|defer ...]
 ```
+
+**`--spec <spec.md>`** is optional and only for a legacy plan with no `**Spec files:**` header. The plan's specs come from that header, and every brief, checklist, packet and lint call the runner makes uses that set. Passing `--spec` alongside a header is a plan lint error (contract error, exit 1). A plan with neither has no spec.
 
 **`--resolve <finding-id>=repair|defer`** (repeatable, resume-only): carries the human's
 resolution of a `scope-decision` halt's drafted `repair_task` into the re-invocation.
@@ -58,7 +60,7 @@ raised, is a contract error naming it. The runner applies no fix of its own.
 
 **Precondition — clean working tree:** every invocation (first run and resume) requires `git status --porcelain` to be empty, with `.forge/` self-ignored. A dirty tree causes a contract error (exit 1) naming the dirty paths; the human must commit or discard those changes before re-invoking. This is not the halted-run path: every halt freezes before the runner exits and returns the tree to the last committed checkpoint — a task halt freezes the in-progress attempt, and a final-review or doc-sync halt freezes the uncommitted edits that stage was holding — so a resume finds a clean tree with no human git work required. The precondition still refuses a tree left dirty for an unrelated reason — no flag bypasses it. The runner never resets or stashes user work.
 
-**Plan lint (`run_plan`, right after the clean-tree check, before the run dir is created or anything dispatches):** `forge_lint.lint_plan(plan_path, spec_path)` validates the plan/spec against documented grammar only — task headings, `Tier:`, `Goal:`, `Spec:`, `Depends on:`, `Acceptance:`, `Tests:` grammar, every changed spec section claimed by some task, and checklist generation for every task and `--final` — and reports every defect in one run, not the first. Every defect line (`[error]`/`[warning]`) prints; any `error` raises a contract error (exit 1) naming the full list, before `run.json` exists. An empty checklist is a `warning` only — it never fails the run.
+**Plan lint (`run_plan`, right after the clean-tree check, before the run dir is created or anything dispatches):** `forge_lint.lint_plan` validates the plan and its declared specs (the legacy `--spec` path stands in for a plan with no header) against documented grammar only — task headings, `Tier:`, `Goal:`, `Spec:`, `Depends on:`, `Acceptance:`, `Tests:` grammar, every changed spec section claimed by some task, and checklist generation for every task and `--final` — and reports every defect in one run, not the first. Every defect line (`[error]`/`[warning]`) prints; any `error` raises a contract error (exit 1) naming the full list, before `run.json` exists. An empty checklist is a `warning` only — it never fails the run.
 
 That single call is whole-plan scope. The runner owns the task loop
 (`Depends on` order, sequential, one worker at a time — no pipelining, no
@@ -161,7 +163,7 @@ stale against `TIER_MAP` on a model-churn edit.
 **Final review:** once every task passes, the runner dispatches one more
 `codex exec` call, at the model/effort for the **plan's highest task tier**
 (read from `TIER_MAP` — not a pinned sol/high), against the whole-plan diff
-and spec — integration issues a per-task review can't see. It now runs
+and the plan's specs — integration issues a per-task review can't see. Its packet lists each declared spec's path and the sections the tasks name, never spec text; the reviewer reads the files itself. It now runs
 through the **same disposition matrix + convergence loop** as a per-task
 review: a fix dispatch reworks its own in-diff/contract-breaking findings,
 committing a single `fix: final-review` commit when it applied any; only a
@@ -175,7 +177,7 @@ field apply.
 
 **Terminal doc-sync stage:** once final review passes, the runner dispatches
 one more `codex exec` call that reconciles **existing** documentation to the
-shipped whole-plan diff — stale references, changed signatures/behavior, spec
+shipped whole-plan diff (its brief lists spec paths and named sections, not spec text) — stale references, changed signatures/behavior, spec
 changelog entries. It never authors new docs (that would be the gold-plating
 the disposition matrix already forbids), never touches code, and never
 reconciles issue status — closing an issue is planning's job, not doc-sync's.

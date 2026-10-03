@@ -16,8 +16,10 @@ orchestrator's reduced role.
 ## Invocation
 
 ```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> --timeout 900
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> [--spec <spec.md>] --timeout 900
 ```
+
+The plan's specs come from its `**Spec files:**` header; `--spec` is optional and only for a legacy plan with no header (passing both is an error).
 
 That single call is whole-plan scope. The runner owns the task loop, brief
 generation, worker dispatch, acceptance-command execution, review dispatch,
