@@ -735,5 +735,187 @@ class CitableCLITests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+PROMISE_PLAN_MD = """# Plan header
+
+**Goal:** Promises.
+**Global Constraints:**
+- Stay stdlib only.
+- Fail loud.
+
+# Task 1
+
+### Task 1: First
+
+**Spec:** Alpha section, Beta section
+
+**Tests:**
+- case one
+- case two
+
+**Acceptance:**
+- `make one` passes
+- reads well
+- `make two` exits 0
+- also reads well
+
+**Tier:** `standard`
+
+**Depends on:** nothing.
+
+# Task 2
+
+### Task 2: Second
+
+**Spec:** ALPHA SEC
+
+**Tests:** none \u2014 prose only
+
+**Acceptance:** `make three` passes
+
+**Tier:** `standard`
+
+**Depends on:** nothing.
+
+# Task 3
+
+### Task 3: Third
+
+**Spec:** Beta section
+
+**Acceptance:** reads fine
+
+**Tier:** `standard`
+
+**Depends on:** nothing.
+"""
+
+
+class PlanPromiseTests(unittest.TestCase):
+    """build_plan_promises / build_section_table: the plan-review packet's
+    promise table and section table."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-checklist-promises-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.spec_path = os.path.join(self.tmp, "spec.md")
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_MD + "\n### Zeta child\n\nChild.\n")
+        self.plan_path = self.write_plan("plan.md", PROMISE_PLAN_MD)
+
+    def write_plan(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_promise_table_lists_each_id_form_in_plan_order(self):
+        items = fc.build_plan_promises(self.plan_path)
+        self.assertEqual(
+            [it.id for it in items],
+            ["g1", "g2", "t1.t1", "t1.t2", "t1.c1", "t1.a1", "t1.c2",
+             "t1.a2", "t2.c1", "t3.a1"],
+        )
+        by_id = {it.id: it for it in items}
+        self.assertEqual(by_id["g1"].text, "Stay stdlib only.")
+        self.assertEqual(by_id["t1.t2"].text, "case two")
+        self.assertEqual(by_id["t1.a1"].text, "reads well")
+        self.assertEqual(by_id["t1.c1"].source, "acceptance-command")
+        self.assertEqual(by_id["t1.c1"].text, "`make one` passes")
+
+    def test_command_clauses_number_among_commands_only(self):
+        by_id = {it.id: it for it in fc.build_plan_promises(self.plan_path)}
+        self.assertEqual(by_id["t1.c2"].text, "`make two` exits 0")
+        self.assertNotIn("t1.c3", by_id)
+
+    def test_prose_ids_equal_build_task_checklist_ids(self):
+        promises = fc.build_plan_promises(self.plan_path)
+        for n in (1, 2, 3):
+            mine = {it.id for it in promises
+                    if it.id.startswith("t{}.a".format(n))}
+            theirs = {it.id for it in
+                      fc.build_task_checklist(self.plan_path, self.spec_path, n)
+                      if it.id.startswith("t{}.a".format(n))}
+            self.assertEqual(mine, theirs)
+
+    def test_existing_builders_emit_no_command_ids(self):
+        ids = set()
+        ids |= {it.id for it in
+                fc.build_final_checklist(self.plan_path, self.spec_path)}
+        ids |= fc.final_citable_refs(self.plan_path, self.spec_path)
+        for n in (1, 2, 3):
+            ids |= {it.id for it in
+                    fc.build_task_checklist(self.plan_path, self.spec_path, n)}
+            ids |= fc.citable_refs(self.plan_path, self.spec_path, n)
+        self.assertFalse([i for i in ids if ".c" in i], ids)
+
+    def test_tests_none_form_contributes_no_test_ids(self):
+        ids = [it.id for it in fc.build_plan_promises(self.plan_path)]
+        self.assertFalse([i for i in ids if i.startswith("t2.t")])
+
+    def test_no_global_constraints_block_contributes_no_g_ids(self):
+        path = self.write_plan(
+            "plan_no_gc.md",
+            PROMISE_PLAN_MD.replace(
+                "**Global Constraints:**\n- Stay stdlib only.\n- Fail loud.\n",
+                "",
+            ),
+        )
+        ids = [it.id for it in fc.build_plan_promises(path)]
+        self.assertFalse([i for i in ids if i.startswith("g")])
+        self.assertIn("t1.t1", ids)
+
+    def test_unparseable_acceptance_clause_raises(self):
+        path = self.write_plan(
+            "plan_bad_acc.md",
+            PROMISE_PLAN_MD.replace("`make three` passes", "`make three`"),
+        )
+        with self.assertRaises(fc.forge_plan.AcceptanceClauseError):
+            fc.build_plan_promises(path)
+
+    def test_section_table_one_entry_per_heading_with_ascending_tasks(self):
+        table = fc.build_section_table(self.plan_path, self.spec_path)
+        self.assertEqual(
+            [(e.heading, e.tasks) for e in table],
+            [("Alpha section", [1, 2]), ("Beta section", [1, 3])],
+        )
+
+    def test_prefix_and_case_resolve_to_full_collapsed_heading(self):
+        path = self.write_plan(
+            "plan_prefix.md",
+            PROMISE_PLAN_MD.replace("**Spec:** ALPHA SEC", "**Spec:** gamma"),
+        )
+        table = fc.build_section_table(path, self.spec_path)
+        self.assertIn("Gamma Section", [e.heading for e in table])
+
+    def test_section_and_subsection_are_separate_entries(self):
+        path = self.write_plan(
+            "plan_sub.md",
+            PROMISE_PLAN_MD.replace("**Spec:** ALPHA SEC", "**Spec:** Zeta child"),
+        )
+        # a subsection named by another task is its own entry
+        headings = [e.heading for e in fc.build_section_table(path, self.spec_path)]
+        self.assertIn("Zeta child", headings)
+        self.assertIn("Alpha section", headings)
+
+    def test_no_task_naming_a_section_raises(self):
+        path = self.write_plan(
+            "plan_nospec.md",
+            "\n".join(l for l in PROMISE_PLAN_MD.splitlines()
+                      if not l.startswith("**Spec:**")) + "\n",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_section_table(path, self.spec_path)
+        self.assertIn("no task names a spec section", str(ctx.exception))
+
+    def test_unresolvable_spec_name_raises_section_not_found(self):
+        path = self.write_plan(
+            "plan_unres.md",
+            PROMISE_PLAN_MD.replace("**Spec:** ALPHA SEC", "**Spec:** Nonexistent"),
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_section_table(path, self.spec_path)
+        self.assertIn("spec section not found", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
