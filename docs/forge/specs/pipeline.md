@@ -299,7 +299,7 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   | `passes` | exit code 0 |
   | `exits <N>` | exit code exactly `<N>` (a non-negative decimal integer) |
   | `prints nothing` | stdout and stderr both empty; exit code not checked |
-  | `` prints `<text>` `` | stdout contains `<text>` literally and exit code 0 |
+  | `` prints `<text>` `` | the full output (stdout and stderr combined) contains `<text>` literally and exit code 0 |
 
   A command that times out fails whatever its outcome. A clause beginning with inline
   code that does not match this shape exactly — a bare `` `<command>` ``, an unknown or
@@ -423,7 +423,7 @@ and a session restart to apply.
 
 ## Changelog
 
-2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` ``) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)
+2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` `` over combined output) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)
 2026-09-09: amendment re-review is whole-document, never scoped — "scoped to the changed sections" never defined the baseline, and three incompatible readings each satisfied it while covering different things; scoping saved little because the whole-document contradiction question forces a full read regardless (#96 final review)
 
 2026-09-09: the prose exception to execute-don't-substring gains a bar — a mechanical text check must be demonstrated to fail when the thing it guards is violated, and is written against the requirement's meaning rather than its spelling; five checks in the #96 run were green while guarding nothing, including one whose requirement, acceptance command and eponymous test all passed with the violation in place (#98)
