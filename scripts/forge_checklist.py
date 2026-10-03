@@ -59,19 +59,35 @@ def _collapse_whitespace(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _spec_items(spec_lines, spec_names):
-    sections = eb.find_spec_sections(spec_lines, spec_names)
-    items = []
-    for raw_text, content in sections:
-        heading = _collapse_whitespace(eb.strip_heading_text(raw_text))
-        items.append(
-            ChecklistItem(
-                id="spec:{}".format(heading),
-                source="spec",
-                text=_collapse_whitespace(content),
-            )
+def _section_heading(section, spec_set):
+    """The resolved heading, whitespace-collapsed, prefixed ``[<spec id>] ``
+    when the spec set holds more than one file — built from the resolved
+    section, never from how the entry was written."""
+    heading = _collapse_whitespace(eb.strip_heading_text(section.heading))
+    if len(spec_set) > 1:
+        return "[{}] {}".format(section.spec.spec_id, heading)
+    return heading
+
+
+def _task_sections(task_block, task_number, spec_set):
+    entries = eb.parse_spec_entries(task_block)
+    if entries and not spec_set:
+        raise RuntimeError(
+            "task {} declares **Spec:** but the plan has no spec (no **Spec "
+            "files:** header and --spec was not given)".format(task_number)
         )
-    return items
+    return eb.resolve_entries(entries, spec_set, task_number)
+
+
+def _spec_items(sections, spec_set):
+    return [
+        ChecklistItem(
+            id="spec:{}".format(_section_heading(section, spec_set)),
+            source="spec",
+            text=_collapse_whitespace("".join(section.lines)),
+        )
+        for section in sections
+    ]
 
 
 def _global_constraint_items(gc_block):
@@ -110,15 +126,6 @@ def _acceptance_items(task_block, task_number):
     ]
 
 
-def _require_spec_path(task_number, spec_names, spec_path):
-    if spec_names and not spec_path:
-        raise RuntimeError(
-            "task {} declares **Spec:** but --spec was not given".format(
-                task_number
-            )
-        )
-
-
 def build_task_checklist(plan_path, spec_path, task_number):
     """That task's own promises: plan **Global Constraints:** clauses + the
     task's **Tests:** cases + the task's **Acceptance:** prose clauses.
@@ -137,15 +144,11 @@ def build_task_checklist(plan_path, spec_path, task_number):
         raise RuntimeError(eb.diagnose_missing_task(lines, task_number, plan_path))
     _, gc_block = eb.extract_header(lines)
 
-    spec_names = eb.parse_spec_names(task_block)
-    _require_spec_path(task_number, spec_names, spec_path)
-    if spec_names:
-        # The task's **Spec:** line still pulls context into the worker
-        # brief and review packet, so an unresolvable/ambiguous name is
-        # still a defect to surface here — even though it contributes no
-        # checklist item (spec: items are a final-review-only source).
-        spec_lines = eb.read_lines(spec_path)
-        eb.find_spec_sections(spec_lines, spec_names)
+    # The task's **Spec:** line still pulls context into the worker
+    # brief and review packet, so an unresolvable/ambiguous name is
+    # still a defect to surface here — even though it contributes no
+    # checklist item (spec: items are a final-review-only source).
+    _task_sections(task_block, task_number, eb.load_spec_set(plan_path, spec_path))
 
     items = []
     items.extend(_global_constraint_items(gc_block))
@@ -182,16 +185,14 @@ def citable_refs(plan_path, spec_path, task_number):
         raise RuntimeError(eb.diagnose_missing_task(lines, task_number, plan_path))
     _, gc_block = eb.extract_header(lines)
 
-    spec_names = eb.parse_spec_names(task_block)
-    _require_spec_path(task_number, spec_names, spec_path)
+    spec_set = eb.load_spec_set(plan_path, spec_path)
+    sections = _task_sections(task_block, task_number, spec_set)
 
     refs = set()
     refs.update(item.id for item in _global_constraint_items(gc_block))
     refs.update(item.id for item in _test_items(task_block, task_number))
     refs.update(item.id for item in _acceptance_items(task_block, task_number))
-    if spec_names:
-        spec_lines = eb.read_lines(spec_path)
-        refs.update(item.id for item in _spec_items(spec_lines, spec_names))
+    refs.update(item.id for item in _spec_items(sections, spec_set))
     return refs
 
 
@@ -216,22 +217,18 @@ def _final_items(plan_path, spec_path):
     _, gc_block = eb.extract_header(lines)
     tasks = forge_plan.parse_plan_tasks(plan_path)
 
+    spec_set = eb.load_spec_set(plan_path, spec_path)
     items = list(_global_constraint_items(gc_block))
     seen_spec_ids = set()
-    spec_lines = None
 
     for task in tasks:
         task_number, title = task.number, task.title
         task_block = eb.extract_task_block(lines, task_number)
-        spec_names = eb.parse_spec_names(task_block)
-        _require_spec_path(task_number, spec_names, spec_path)
-        if spec_names:
-            if spec_lines is None:
-                spec_lines = eb.read_lines(spec_path)
-            for item in _spec_items(spec_lines, spec_names):
-                if item.id not in seen_spec_ids:
-                    seen_spec_ids.add(item.id)
-                    items.append(item)
+        sections = _task_sections(task_block, task_number, spec_set)
+        for item in _spec_items(sections, spec_set):
+            if item.id not in seen_spec_ids:
+                seen_spec_ids.add(item.id)
+                items.append(item)
         items.extend(_acceptance_items(task_block, task_number))
         items.append(
             ChecklistItem(
@@ -322,16 +319,11 @@ def build_section_table(plan_path, spec_path):
     numbers naming it. Raises when no task names a section."""
     lines = eb.read_lines(plan_path)
     entries = {}
-    spec_lines = None
+    spec_set = eb.load_spec_set(plan_path, spec_path)
     for task in forge_plan.parse_plan_tasks(plan_path):
         task_block = eb.extract_task_block(lines, task.number)
-        spec_names = eb.parse_spec_names(task_block)
-        _require_spec_path(task.number, spec_names, spec_path)
-        if not spec_names:
-            continue
-        if spec_lines is None:
-            spec_lines = eb.read_lines(spec_path)
-        for item in _spec_items(spec_lines, spec_names):
+        sections = _task_sections(task_block, task.number, spec_set)
+        for item in _spec_items(sections, spec_set):
             heading = item.id[len("spec:"):]
             tasks = entries.setdefault(heading, SectionEntry(heading, []))
             if task.number not in tasks.tasks:

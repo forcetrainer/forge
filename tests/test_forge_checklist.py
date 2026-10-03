@@ -920,5 +920,132 @@ class PlanPromiseTests(unittest.TestCase):
         self.assertIn("spec section not found", str(ctx.exception))
 
 
+class MultiSpecTests(unittest.TestCase):
+    """A plan declaring **Spec files:** reads its sections through the spec
+    set: ids carry [<spec id>] when more than one file is declared."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-checklist-multispec-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.mkdir(os.path.join(self.tmp, ".git"))
+        self.write("specs/alpha.md", self.spec("alpha", "Shared", "Alpha Only"))
+        self.write("specs/beta.md", self.spec("beta", "Shared", "Beta Only"))
+
+    @staticmethod
+    def spec(system, *headings):
+        body = "".join(
+            "\n## {}\n\n{} content.\n".format(h, h) for h in headings
+        )
+        return "---\nsystem: {}\n---\n# Spec\n{}".format(system, body)
+
+    def write(self, rel, text):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def plan(self, spec_files, *spec_lines, name="plan.md"):
+        tasks = "".join(
+            "\n# Task {n}\n\n### Task {n}: Thing {n}\n- [ ] Done\n\n"
+            "**Files:**\n- Create: `f{n}.py`\n\n**Spec:** {s}\n\n"
+            "**Tests:**\n- case {n}\n\n**Tier:** `standard`\n\n"
+            "**Depends on:** nothing.\n".format(n=n, s=s)
+            for n, s in enumerate(spec_lines, start=1)
+        )
+        header = "# Plan header\n\n**Goal:** Build.\n"
+        if spec_files:
+            header += "**Spec files:**\n" + "".join(
+                "- {}\n".format(f) for f in spec_files
+            )
+        return self.write(name, header + tasks)
+
+    def two_spec_plan(self):
+        return self.plan(
+            ["specs/alpha.md", "specs/beta.md"],
+            "[alpha] Shared, [beta] Shared",
+            "[beta] beta only",
+        )
+
+    def test_two_spec_final_checklist_holds_prefixed_ids_from_both_files(self):
+        ids = [it.id for it in fc.build_final_checklist(self.two_spec_plan(), None)]
+        self.assertIn("spec:[beta] Beta Only", ids)
+        self.assertIn("spec:[alpha] Shared", ids)
+
+    def test_same_heading_in_two_specs_yields_two_distinct_ids(self):
+        ids = [it.id for it in fc.build_final_checklist(self.two_spec_plan(), None)
+               if it.source == "spec"]
+        self.assertIn("spec:[alpha] Shared", ids)
+        self.assertIn("spec:[beta] Shared", ids)
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_bare_and_bracketed_entries_naming_one_section_yield_one_id(self):
+        one = self.plan(["specs/alpha.md"], "Alpha Only, [alpha] Alpha Only")
+        ids = [it.id for it in fc.build_final_checklist(one, None)
+               if it.source == "spec"]
+        self.assertEqual(ids, ["spec:Alpha Only"])
+
+    def test_id_uses_resolved_heading_not_the_entry_spelling(self):
+        path = self.plan(
+            ["specs/alpha.md", "specs/beta.md"], "[alpha] alpha on",
+        )
+        ids = [it.id for it in fc.build_final_checklist(path, None)
+               if it.source == "spec"]
+        self.assertEqual(ids, ["spec:[alpha] Alpha Only"])
+
+    def test_one_spec_header_plan_ids_equal_a_legacy_plans(self):
+        header = self.plan(["specs/alpha.md"], "Alpha Only, shared")
+        legacy = self.plan([], "Alpha Only, shared", name="legacy.md")
+        legacy_ids = [
+            it.id for it in fc.build_final_checklist(
+                legacy, os.path.join(self.tmp, "specs/alpha.md"))
+            if it.source == "spec"
+        ]
+        header_ids = [
+            it.id for it in fc.build_final_checklist(header, None)
+            if it.source == "spec"
+        ]
+        self.assertEqual(header_ids, ["spec:Alpha Only", "spec:Shared"])
+        self.assertEqual(header_ids, legacy_ids)
+
+    def test_citable_refs_hold_the_prefixed_ids_of_the_tasks_sections(self):
+        refs = fc.citable_refs(self.two_spec_plan(), None, 2)
+        self.assertIn("spec:[beta] Beta Only", refs)
+        self.assertNotIn("spec:[alpha] Shared", refs)
+        final = fc.final_citable_refs(self.two_spec_plan(), None)
+        self.assertIn("spec:[alpha] Shared", final)
+
+    def test_section_table_lists_both_files_with_prefixed_headings(self):
+        table = fc.build_section_table(self.two_spec_plan(), None)
+        got = {e.heading: e.tasks for e in table}
+        self.assertEqual(got, {
+            "[alpha] Shared": [1],
+            "[beta] Shared": [1],
+            "[beta] Beta Only": [2],
+        })
+
+    def test_header_plan_with_a_legacy_spec_path_raises_the_both_given_error(self):
+        path = self.plan(["specs/alpha.md"], "Alpha Only")
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_final_checklist(path, os.path.join(self.tmp, "specs/beta.md"))
+        self.assertIn("also given", str(ctx.exception))
+
+    def test_spec_line_in_a_plan_with_no_spec_raises_naming_the_task(self):
+        path = self.plan([], "Alpha Only")
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_task_checklist(path, None, 1)
+        self.assertIn("task 1", str(ctx.exception))
+
+    def test_cli_on_a_header_plan_without_spec_emits_the_checklist(self):
+        path = self.two_spec_plan()
+        result = subprocess.run(
+            [sys.executable, SCRIPT, path, "--final"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ids = [it["id"] for it in json.loads(result.stdout)]
+        self.assertIn("spec:[beta] Beta Only", ids)
+
+
 if __name__ == "__main__":
     unittest.main()
