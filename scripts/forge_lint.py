@@ -124,6 +124,41 @@ def _header_end(lines, mask):
     return len(lines)
 
 
+def _acceptance_clause_defects(lines, mask, marker_idx):
+    """One error per ``**Acceptance:**`` command clause that does not parse
+    (spec: pipeline, Acceptance clause grammar), each naming the task, the
+    plan line and the clause, and listing the legal outcomes. A marker with
+    neither bullets nor a value is reported by the caller, not here."""
+    task_number = None
+    for j in range(marker_idx - 1, -1, -1):
+        m = None if mask[j] else eb.ANY_LEVEL_TASK_HEADING_RE.match(lines[j])
+        if m:
+            task_number = int(m.group(2))
+            break
+    try:
+        clauses = eb.parse_field_clause_lines("".join(lines[marker_idx:]), "Acceptance")
+    except RuntimeError:
+        return []
+    defects = []
+    for idx, clause in clauses:
+        line = marker_idx + idx + 1
+        try:
+            forge_plan.parse_acceptance_clause(clause)
+        except ValueError as e:
+            where = "line {}".format(line)
+            if task_number is not None:
+                where = "task {}, {}".format(task_number, where)
+            defects.append(_error(
+                where,
+                "**Acceptance:** clause {!r} does not parse — {}; a clause "
+                "beginning with inline code must be \"`<command>` <outcome>\" "
+                "with one outcome of: {}".format(
+                    clause, e, "; ".join(forge_common.ACCEPTANCE_OUTCOMES)
+                ),
+            ))
+    return defects
+
+
 def _field_clause_defects(lines, mask):
     """Every Field clause grammar defect in the document, each naming the
     offending line, all reported in one run — never just the first."""
@@ -139,6 +174,8 @@ def _field_clause_defects(lines, mask):
                 continue
             where = "line {}".format(i + 1)
             content = line[len(prefix):].strip()
+            if field_name == "Acceptance":
+                defects.extend(_acceptance_clause_defects(lines, mask, i))
             if content:
                 if field_name == "Acceptance" and _semicolon_outside_inline_code(content):
                     defects.append(_error(
@@ -442,6 +479,8 @@ def _parse_task_tier(block, where, num):
             f.write(normalized + "\n")
         try:
             forge_plan.parse_plan_tasks(tmp_path)
+        except forge_plan.AcceptanceClauseError:
+            return []  # reported once, with its plan line, by _field_clause_defects
         except RuntimeError as e:
             return [_error(where, str(e))]
         return []
@@ -552,6 +591,8 @@ def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean):
     for num in task_numbers:
         try:
             forge_checklist.build_task_checklist(plan_path, spec_path, num)
+        except forge_plan.AcceptanceClauseError:
+            continue  # reported once, with its plan line, by _field_clause_defects
         except RuntimeError as e:
             msg = str(e)
             where = "task {}".format(num)
@@ -560,6 +601,8 @@ def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean):
     if task_numbers and structural_clean:
         try:
             forge_checklist.build_final_checklist(plan_path, spec_path)
+        except forge_plan.AcceptanceClauseError:
+            pass  # reported once, with its plan line, by _field_clause_defects
         except RuntimeError as e:
             msg = str(e)
             m = _TASK_SCOPED_MESSAGE_RE.match(msg)

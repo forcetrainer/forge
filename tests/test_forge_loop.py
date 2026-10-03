@@ -358,7 +358,7 @@ PLAN_FREEZE = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `grep -q FROZENWORK f1.txt`
+**Acceptance:** `grep -q FROZENWORK f1.txt` passes
 
 **Tier:** standard
 
@@ -374,7 +374,7 @@ PLAN_FREEZE_NOOP = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -719,7 +719,7 @@ PLAN_REGRESSION = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `test ! -f fail_flag`
+**Acceptance:** `test ! -f fail_flag` passes
 
 **Tier:** standard
 
@@ -737,7 +737,7 @@ PLAN_REGRESSION_SEQUENCE = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `grep -q PARTIALFIX f1.txt`
+**Acceptance:** `grep -q PARTIALFIX f1.txt` passes
 
 **Tier:** standard
 

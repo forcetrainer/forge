@@ -11,7 +11,7 @@
 - A command clause that does not parse raises or lint-errors naming the task, line and cause; it is never defaulted to `passes` and never read as prose.
 
 ### Task 1: Acceptance clause grammar — parse, lint, checklist
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Read: `docs/forge/specs/pipeline.md` (section "Plan documents", bullet "Acceptance clause grammar")

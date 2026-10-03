@@ -41,7 +41,9 @@ PLAN_STD_CHECKLIST = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** the output file must contain the marker; `echo NEEDFIX >> f1.txt`
+**Acceptance:**
+- the output file must contain the marker
+- `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
 
@@ -65,7 +67,7 @@ PLAN_STD_CHECKLIST_MULTI = """# Fixture Plan
 **Acceptance:**
 - the output must contain marker one
 - the output must contain marker two
-- `echo NEEDFIX >> f1.txt`
+- `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
 

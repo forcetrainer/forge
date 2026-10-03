@@ -44,7 +44,7 @@ PLAN_FINAL = """# Fixture Plan
 
 **Spec:** Alpha section
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -613,9 +613,9 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
 # emit, and therefore the one a replayed seeded finding can cite into a
 # membership failure.
 PLAN_FINAL_WITH_TESTS = PLAN_FINAL.replace(
-    "**Acceptance:** `true`",
+    "**Acceptance:** `true` passes",
     "**Tests:**\n- the alpha path holds\n- the beta path holds\n"
-    "\n**Acceptance:** `true`",
+    "\n**Acceptance:** `true` passes",
 )
 
 

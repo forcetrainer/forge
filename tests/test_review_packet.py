@@ -30,7 +30,7 @@ PLAN_TASK1 = """# Fixture Plan
 **Files:**
 - Modify: `foo.txt`
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial
 
@@ -267,7 +267,7 @@ class ReviewPacketGitFixtureTests(unittest.TestCase):
             content = f.read()
         expected = (
             "### Task 1: First task\n- [ ] Done\n\n**Files:**\n"
-            "- Modify: `foo.txt`\n\n**Acceptance:** `true`\n\n"
+            "- Modify: `foo.txt`\n\n**Acceptance:** `true` passes\n\n"
             "**Tier:** trivial\n\n**Depends on:** nothing\n\n"
             "```diff\ndiff --git a/src.txt b/src.txt\n"
             "index 2d00bd5..e5c5c55 100644\n--- a/src.txt\n+++ b/src.txt\n"
@@ -325,7 +325,7 @@ class ReviewPacketGitFixtureTests(unittest.TestCase):
             content = f.read()
         expected = (
             "### Task 1: First task\n- [ ] Done\n\n**Files:**\n"
-            "- Modify: `foo.txt`\n\n**Acceptance:** `true`\n\n"
+            "- Modify: `foo.txt`\n\n**Acceptance:** `true` passes\n\n"
             "**Tier:** trivial\n\n**Depends on:** nothing\n\n"
             "```diff\ndiff --git a/src.txt b/src.txt\n"
             "index 2d00bd5..e5c5c55 100644\n--- a/src.txt\n+++ b/src.txt\n"
@@ -613,7 +613,7 @@ class BuildPacketSpecContextTests(unittest.TestCase):
             content = f.read()
         expected = (
             "### Task 1: First task\n- [ ] Done\n\n**Files:**\n"
-            "- Modify: `foo.txt`\n\n**Acceptance:** `true`\n\n"
+            "- Modify: `foo.txt`\n\n**Acceptance:** `true` passes\n\n"
             "**Tier:** trivial\n\n**Depends on:** nothing\n\n"
             "no changes vs {}\n".format(base)
         )
@@ -700,7 +700,7 @@ class PacketForSpecContextTests(unittest.TestCase):
                 "### Task 1: Build the widget\n- [ ] Done\n\n"
                 "**Files:**\n- Modify: `foo.txt`\n\n"
                 "**Spec:** Widget behavior\n\n"
-                "**Acceptance:** `true`\n\n**Tier:** standard\n\n"
+                "**Acceptance:** `true` passes\n\n**Tier:** standard\n\n"
                 "**Depends on:** nothing\n"
             )
         with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:
@@ -731,7 +731,7 @@ class PacketForSpecContextTests(unittest.TestCase):
                 "# Plan\n\n**Goal:** Do it.\n\n"
                 "### Task 1: Build the widget\n- [ ] Done\n\n"
                 "**Files:**\n- Modify: `foo.txt`\n\n"
-                "**Acceptance:** `true`\n\n**Tier:** standard\n\n"
+                "**Acceptance:** `true` passes\n\n**Tier:** standard\n\n"
                 "**Depends on:** nothing\n"
             )
         with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:

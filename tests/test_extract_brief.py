@@ -679,6 +679,49 @@ class ExtractBriefTests(unittest.TestCase):
         self.assertIn("### Task 2: Ship the widget", content)
         self.assertIn("`ship.py`", content)
 
+    # --- parse_field_clause_lines (acceptance outcomes, Task 1) ---
+
+    def test_clause_lines_single_line_form_gives_marker_line_index(self):
+        block = "### Task 1: Thing\n- [ ] Done\n\n**Acceptance:** `make test` passes\n\n**Tier:** standard\n"
+        self.assertEqual(
+            extract_brief.parse_field_clause_lines(block, "Acceptance"),
+            [(3, "`make test` passes")],
+        )
+
+    def test_clause_lines_bulleted_form_gives_each_first_line_index(self):
+        block = (
+            "### Task 1: Thing\n- [ ] Done\n\n**Acceptance:**\n"
+            "- `a` passes\n"
+            "- prose that wraps\n"
+            "  onto a second line\n"
+            "- `b` exits 1\n"
+        )
+        self.assertEqual(
+            extract_brief.parse_field_clause_lines(block, "Acceptance"),
+            [
+                (4, "`a` passes"),
+                (5, "prose that wraps onto a second line"),
+                (7, "`b` exits 1"),
+            ],
+        )
+        self.assertEqual(
+            extract_brief.parse_field_clauses(block, "Acceptance"),
+            [
+                "`a` passes",
+                "prose that wraps onto a second line",
+                "`b` exits 1",
+            ],
+        )
+
+    def test_clause_lines_absent_field_is_empty_and_bare_marker_raises(self):
+        self.assertEqual(
+            extract_brief.parse_field_clause_lines("### Task 1: T\n", "Acceptance"), []
+        )
+        with self.assertRaises(RuntimeError):
+            extract_brief.parse_field_clause_lines(
+                "### Task 1: T\n**Acceptance:**\nnot a bullet\n", "Acceptance"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

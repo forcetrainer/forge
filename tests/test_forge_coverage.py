@@ -1034,7 +1034,7 @@ PLAN_EMPTY_CHECKLIST = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -1054,7 +1054,7 @@ PLAN_NONEMPTY_CHECKLIST = """# Fixture Plan
 
 **Acceptance:**
 - must handle X correctly
-- `true`
+- `true` passes
 
 **Tier:** standard
 

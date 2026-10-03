@@ -262,7 +262,7 @@ NONE_TESTS_RE = re.compile(r'^none\b')
 BULLET_RE = re.compile(r'^-\s+(.*)$')
 
 
-def parse_field_clauses(block, field_name):
+def parse_field_clause_lines(block, field_name):
     """Parse a machine-read multi-clause field (``**Tests:**``,
     ``**Acceptance:**``, ``**Global Constraints:**``) into its list of
     clauses, per the field clause grammar (spec: Plan documents).
@@ -284,6 +284,9 @@ def parse_field_clauses(block, field_name):
 
     ``block`` may be a task block or the plan header block, since
     ``**Global Constraints:**`` lives in the header, not a task.
+
+    Returns ``[(index, clause)]`` — each clause with the 0-based index,
+    within ``block``, of its first line.
     """
     lines = block.splitlines()
     mask = fence_mask(lines)
@@ -296,7 +299,7 @@ def parse_field_clauses(block, field_name):
         return []
     content = lines[idx][len(prefix):].strip()
     if content:
-        return [content]
+        return [(idx, content)]
     clauses = []
     for j in range(idx + 1, len(lines)):
         line = lines[j]
@@ -309,9 +312,10 @@ def parse_field_clauses(block, field_name):
             break
         m = BULLET_RE.match(line)
         if m:
-            clauses.append(m.group(1).strip())
+            clauses.append((j, m.group(1).strip()))
         elif clauses:
-            clauses[-1] = (clauses[-1] + " " + line.strip()).strip()
+            first, text = clauses[-1]
+            clauses[-1] = (first, (text + " " + line.strip()).strip())
         else:
             break
     if not clauses:
@@ -319,6 +323,12 @@ def parse_field_clauses(block, field_name):
             f"{prefix} is declared but lists no '-' bullets: {lines[idx]!r}"
         )
     return clauses
+
+
+def parse_field_clauses(block, field_name):
+    """The clauses of ``parse_field_clause_lines``, without their line
+    indices."""
+    return [clause for _, clause in parse_field_clause_lines(block, field_name)]
 
 
 def parse_test_cases(task_block):

@@ -109,7 +109,10 @@ class RunAcceptanceTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         task = forge_run.Task(
             number=1, title="t", tier="trivial",
-            acceptance_commands=["true", "false"],
+            acceptance_checks=[
+                forge_run.forge_common.AcceptanceCheck("true", "passes", None, "passes"),
+                forge_run.forge_common.AcceptanceCheck("false", "passes", None, "passes"),
+            ],
         )
         results = forge_run.run_acceptance(task, d)
         self.assertEqual([r.command for r in results], ["true", "false"])

@@ -308,7 +308,8 @@ def run_acceptance(task, cwd, live_path=None):
     command is a non-zero (failed) acceptance."""
     lp = live_path or os.devnull
     results = []
-    for cmd in task.acceptance_commands:
+    for check in task.acceptance_checks:
+        cmd = check.command
         header = "── acceptance ──\n$ {}".format(cmd)
         result = run_teed(
             cmd, shell=True, cwd=cwd, timeout=DEFAULT_TIMEOUT, live_path=lp, header=header

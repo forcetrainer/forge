@@ -23,7 +23,7 @@
 - the existing decision-logic suites pass unchanged, proving the move is behavior-preserving
 - any required edit to a decision-logic assertion means the move altered behavior and must be corrected
 
-**Acceptance:** `python3 -m pytest -q`
+**Acceptance:** `python3 -m pytest -q` passes
 
 **Tier:** `standard`
 
@@ -44,7 +44,7 @@
 - a churning one halts at the churn
 - a pre-existing contract-breaking finding halts with a drafted repair task
 
-**Acceptance:** `grep -n "forge_dispose" skills/planning/SKILL.md`
+**Acceptance:** `grep -n "forge_dispose" skills/planning/SKILL.md` passes
 
 **Tier:** `standard`
 
@@ -64,7 +64,7 @@
 **Tests:**
 - none — mechanical edits
 
-**Acceptance:** `grep -H '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json`
+**Acceptance:** `grep -H '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json` passes
 
 **Tier:** `trivial` — mechanical doc edits and a version bump, no design content.
 

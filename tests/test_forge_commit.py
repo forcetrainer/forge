@@ -311,7 +311,7 @@ PLAN_NEW_FILE_ONLY = """# Fixture Plan
 ### Task 1: New file only
 - [ ] Done
 
-**Acceptance:** `printf 'def added():\\n    return 1\\n' > brand_new.py`
+**Acceptance:** `printf 'def added():\\n    return 1\\n' > brand_new.py` passes
 
 **Tier:** standard
 
