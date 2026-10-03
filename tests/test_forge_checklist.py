@@ -348,7 +348,7 @@ class ForgeChecklistTests(unittest.TestCase):
         with open(plan_path, "w", encoding="utf-8") as f:
             f.write(PLAN_MD.replace(
                 "**Spec:** Alpha section, Beta section",
-                "**Spec:** Gamma",
+                "**Spec:** Gam",
             ))
         with self.assertRaises(RuntimeError) as ctx:
             fc.build_task_checklist(plan_path, spec_path, 1)

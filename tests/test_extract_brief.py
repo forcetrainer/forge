@@ -723,5 +723,331 @@ class ExtractBriefTests(unittest.TestCase):
             )
 
 
+HEADER_PLAN_TWO = """# Two Spec Plan
+
+**Goal:** Cover two specs.
+**Spec files:**
+- `specs/alpha.md`
+- specs/beta.md
+**Global Constraints:** One constraint.
+
+### Task 1: Both
+- [ ] Done
+
+**Files:**
+- Create: `x.py`
+
+**Spec:** [alpha] Alpha Design, [beta] Beta Design
+"""
+
+HEADER_PLAN_ONE = """# One Spec Plan
+
+**Goal:** Cover one spec.
+**Spec files:** specs/alpha.md
+
+### Task 1: One
+- [ ] Done
+
+**Spec:** [alpha] Alpha Design, Alpha Other
+"""
+
+SPEC_ALPHA = """---
+system: alpha
+---
+# Alpha
+
+## 1. Alpha Design
+
+Alpha design text.
+
+## Alpha Other
+
+Other text.
+"""
+
+SPEC_BETA = """---
+system: beta
+---
+# Beta
+
+## Beta Design
+
+Beta design text.
+"""
+
+
+class SpecSetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        os.makedirs(os.path.join(self.root, "specs"))
+        os.makedirs(os.path.join(self.root, ".git"))
+        self.alpha = self._write("specs/alpha.md", SPEC_ALPHA)
+        self.beta = self._write("specs/beta.md", SPEC_BETA)
+
+    def _write(self, name, content):
+        path = os.path.join(self.root, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = extract_brief.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def _plan_lines(self, text):
+        return text.splitlines(keepends=True)
+
+    # --- parse_spec_files -------------------------------------------------
+
+    def test_bulleted_spec_files_in_order_and_backticks_removed(self):
+        self.assertEqual(
+            extract_brief.parse_spec_files(self._plan_lines(HEADER_PLAN_TWO)),
+            ["specs/alpha.md", "specs/beta.md"],
+        )
+
+    def test_single_line_spec_files_yields_one_path(self):
+        self.assertEqual(
+            extract_brief.parse_spec_files(self._plan_lines(HEADER_PLAN_ONE)),
+            ["specs/alpha.md"],
+        )
+
+    def test_backticked_path_equals_plain_path(self):
+        a = "**Goal:** g\n**Spec files:** `specs/a.md`\n"
+        b = "**Goal:** g\n**Spec files:** specs/a.md\n"
+        self.assertEqual(
+            extract_brief.parse_spec_files(self._plan_lines(a)),
+            extract_brief.parse_spec_files(self._plan_lines(b)),
+        )
+
+    def test_spec_files_block_ends_at_blank_field_or_heading(self):
+        for ender in ("\n", "**Global Constraints:** c\n", "### Task 1: T\n"):
+            text = "**Goal:** g\n**Spec files:**\n- a.md\n" + ender + "- not-a-path.md\n"
+            self.assertEqual(
+                extract_brief.parse_spec_files(self._plan_lines(text)),
+                ["a.md"],
+                ender,
+            )
+
+    def test_spec_files_continuation_line_joins_preceding_bullet(self):
+        text = "**Goal:** g\n**Spec files:**\n- dir/a.md\n  more\n- b.md\n"
+        self.assertEqual(
+            extract_brief.parse_spec_files(self._plan_lines(text)),
+            ["dir/a.md more", "b.md"],
+        )
+
+    def test_no_spec_files_header_yields_nothing(self):
+        self.assertEqual(
+            extract_brief.parse_spec_files(self._plan_lines(PLAN_NO_SPEC)), []
+        )
+
+    # --- load_spec_set ----------------------------------------------------
+
+    def test_legacy_plan_spec_set_is_legacy_path_or_empty(self):
+        plan = self._write("legacy.md", PLAN_NO_SPEC)
+        self.assertEqual(extract_brief.load_spec_set(plan, None, self.root), [])
+        got = extract_brief.load_spec_set(plan, self.alpha, self.root)
+        self.assertEqual([f.path for f in got], [self.alpha])
+
+    def test_legacy_spec_file_is_not_opened_when_no_task_names_a_section(self):
+        plan = self._write("legacy.md", PLAN_NO_SPEC)
+        missing = os.path.join(self.root, "specs", "missing.md")
+        unterminated = self._write("unterminated.md", "---\nsystem: x\n# no close\n")
+        for spec in (missing, unterminated):
+            brief = extract_brief.build_brief(plan, 1, spec)
+            self.assertIn("**Goal:** Ship a widget.", brief)
+            code, _out, err = self._run([plan, "1", "--spec", spec, "--out", self.root])
+            self.assertEqual(code, 0, err)
+
+    def test_legacy_plan_naming_a_section_raises_when_spec_file_missing(self):
+        plan = self._write("legacy.md", PLAN_WITH_SPEC)
+        missing = os.path.join(self.root, "specs", "missing.md")
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.build_brief(plan, 1, missing)
+        self.assertIn("missing.md", str(cm.exception))
+
+    def test_declared_paths_resolve_against_repo_root_with_frontmatter_ids(self):
+        plan = self._write("plan.md", HEADER_PLAN_TWO)
+        cwd = os.getcwd()
+        os.chdir(tempfile.gettempdir())
+        self.addCleanup(os.chdir, cwd)
+        got = extract_brief.load_spec_set(plan, None, self.root)
+        self.assertEqual([f.path for f in got], [self.alpha, self.beta])
+        self.assertEqual([f.spec_id for f in got], ["alpha", "beta"])
+
+    def test_header_with_legacy_path_raises_naming_both(self):
+        plan = self._write("plan.md", HEADER_PLAN_TWO)
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.load_spec_set(plan, self.alpha, self.root)
+        self.assertIn("**Spec files:**", str(cm.exception))
+        self.assertIn("--spec", str(cm.exception))
+
+    def test_declared_path_naming_no_file_raises_naming_path(self):
+        plan = self._write(
+            "plan.md", "**Goal:** g\n**Spec files:** specs/missing.md\n"
+        )
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.load_spec_set(plan, None, self.root)
+        self.assertIn("specs/missing.md", str(cm.exception))
+
+    def test_two_files_with_one_id_raise_naming_both(self):
+        self._write("specs/dup.md", SPEC_ALPHA)
+        plan = self._write(
+            "plan.md",
+            "**Goal:** g\n**Spec files:**\n- specs/alpha.md\n- specs/dup.md\n",
+        )
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.load_spec_set(plan, None, self.root)
+        self.assertIn("specs/alpha.md", str(cm.exception))
+        self.assertIn("specs/dup.md", str(cm.exception))
+
+    # --- parse_spec_entries -----------------------------------------------
+
+    def test_entry_parsing(self):
+        block = "### Task 1: T\n\n**Spec:** [execution] Plan lint, Bare Name\n"
+        self.assertEqual(
+            extract_brief.parse_spec_entries(block),
+            [("execution", "Plan lint"), (None, "Bare Name")],
+        )
+
+    def test_entry_splits_at_first_bracket(self):
+        block = "### Task 1: T\n\n**Spec:** [a] Name [x] tail\n"
+        self.assertEqual(
+            extract_brief.parse_spec_entries(block), [("a", "Name [x] tail")]
+        )
+
+    def test_whitespace_inside_brackets_raises_naming_entry(self):
+        block = "### Task 1: T\n\n**Spec:** [ a ] Name\n"
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.parse_spec_entries(block)
+        self.assertIn("[ a ] Name", str(cm.exception))
+
+    # --- resolve_entries --------------------------------------------------
+
+    def _two(self):
+        plan = self._write("plan.md", HEADER_PLAN_TWO)
+        return extract_brief.load_spec_set(plan, None, self.root)
+
+    def _one(self):
+        plan = self._write("plan.md", HEADER_PLAN_ONE)
+        return extract_brief.load_spec_set(plan, None, self.root)
+
+    def _legacy(self):
+        plan = self._write("legacy.md", PLAN_NO_SPEC)
+        return extract_brief.load_spec_set(plan, self.alpha, self.root)
+
+    def test_case_differing_id_is_error_listing_declared_ids(self):
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.resolve_entries([("Alpha", "Alpha Design")], self._two(), 3)
+        msg = str(cm.exception)
+        self.assertIn("alpha", msg)
+        self.assertIn("beta", msg)
+        self.assertIn("task 3", msg)
+
+    def test_bare_entry_in_two_spec_plan_lists_declared_ids(self):
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.resolve_entries([(None, "Alpha Design")], self._two(), 1)
+        self.assertIn("alpha", str(cm.exception))
+        self.assertIn("beta", str(cm.exception))
+
+    def test_bracketed_entry_in_one_spec_plan(self):
+        got = extract_brief.resolve_entries([("alpha", "Alpha Design")], self._one(), 1)
+        self.assertEqual(got[0].heading, "1. Alpha Design")
+        with self.assertRaises(RuntimeError):
+            extract_brief.resolve_entries([("beta", "Alpha Design")], self._one(), 1)
+
+    def test_bracketed_entry_in_legacy_plan_is_error_even_when_id_matches(self):
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.resolve_entries([("alpha", "Alpha Design")], self._legacy(), 2)
+        self.assertIn("task 2", str(cm.exception))
+        self.assertIn("[alpha] Alpha Design", str(cm.exception))
+
+    def test_section_in_second_spec_is_taken_from_that_file(self):
+        got = extract_brief.resolve_entries([("beta", "Beta Design")], self._two(), 1)
+        self.assertEqual(got[0].spec.path, self.beta)
+        self.assertIn("Beta design text.", "".join(got[0].lines))
+
+    def test_unmatched_entry_names_task_and_entry(self):
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.resolve_entries([("beta", "Nope")], self._two(), 4)
+        self.assertIn("task 4", str(cm.exception))
+        self.assertIn("[beta] Nope", str(cm.exception))
+
+    # --- match_heading_names ----------------------------------------------
+
+    def _spec_names(self, text, names):
+        lines = text.splitlines(keepends=True)
+        return [h for h, _ in extract_brief.find_spec_sections(lines, names)]
+
+    def test_exact_name_beats_longer_prefix_heading(self):
+        spec = "## Plan\n\na\n\n## Plan review\n\nb\n"
+        self.assertEqual(self._spec_names(spec, ["plan"]), ["Plan"])
+
+    def test_unique_prefix_resolves(self):
+        spec = "## Plan review\n\nb\n\n## Other\n"
+        self.assertEqual(self._spec_names(spec, ["Plan"]), ["Plan review"])
+
+    def test_prefix_of_two_headings_is_error_naming_both(self):
+        spec = "## Plan one\n\n## Plan two\n"
+        with self.assertRaises(RuntimeError) as cm:
+            self._spec_names(spec, ["Plan"])
+        self.assertIn("Plan one", str(cm.exception))
+        self.assertIn("Plan two", str(cm.exception))
+
+    def test_identical_headings_make_exact_name_ambiguous(self):
+        spec = "## Same\n\na\n\n## Same\n\nb\n"
+        with self.assertRaises(RuntimeError) as cm:
+            self._spec_names(spec, ["Same"])
+        self.assertIn("ambiguous", str(cm.exception))
+
+    def test_comparison_ignores_case_collapses_whitespace_strips_heading_numbering(self):
+        spec = "## 2.3  Plan   Review\n\nb\n"
+        self.assertEqual(
+            self._spec_names(spec, ["plan  REVIEW"]), ["2.3 Plan Review"]
+        )
+
+    def test_name_beginning_with_digit_is_not_stripped(self):
+        spec = "## 3 3 Plan\n\na\n\n## Plan\n\nb\n"
+        self.assertEqual(self._spec_names(spec, ["3 Plan"]), ["3 3 Plan"])
+        with self.assertRaises(RuntimeError):
+            self._spec_names("## 3 Plan\n\na\n", ["3 Plan"])
+
+    # --- build_brief and CLI ----------------------------------------------
+
+    def test_two_spec_brief_labels_each_section(self):
+        plan = self._write("plan.md", HEADER_PLAN_TWO)
+        brief = extract_brief.build_brief(plan, 1)
+        self.assertIn("# Spec: [alpha] 1. Alpha Design", brief)
+        self.assertIn("# Spec: [beta] Beta Design", brief)
+
+    def test_one_spec_and_legacy_briefs_are_unlabeled(self):
+        plan = self._write("plan.md", HEADER_PLAN_ONE)
+        brief = extract_brief.build_brief(plan, 1)
+        self.assertIn("# Spec: 1. Alpha Design", brief)
+        self.assertNotIn("[alpha]", brief.split("# Spec:", 1)[1])
+        legacy = self._write("legacy.md", PLAN_WITH_SPEC.replace(
+            "Gadget Design, Gadget Testing", "Alpha Design"))
+        brief = extract_brief.build_brief(legacy, 1, self.alpha)
+        self.assertIn("# Spec: 1. Alpha Design", brief)
+
+    def test_cli_header_plan_without_spec_flag_has_both_specs(self):
+        plan = self._write("plan.md", HEADER_PLAN_TWO)
+        code, out, err = self._run([plan, "1", "--out", self.root])
+        self.assertEqual(code, 0, err)
+        with open(out.strip()) as f:
+            content = f.read()
+        self.assertIn("Alpha design text.", content)
+        self.assertIn("Beta design text.", content)
+
+    def test_cli_spec_line_in_plan_with_no_spec_exits_nonzero_naming_task(self):
+        plan = self._write("plan.md", PLAN_WITH_SPEC)
+        code, _out, err = self._run([plan, "2", "--out", self.root])
+        self.assertNotEqual(code, 0)
+        self.assertIn("task 2", err)
+
+
 if __name__ == "__main__":
     unittest.main()
