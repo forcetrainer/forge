@@ -133,7 +133,9 @@ the session model; the offer says so. **Inline is the same act on both harnesses
 `scripts/forge_lint.py` validates plan and spec documents against **documented
 grammar only** — never taste, never style — before any dispatch: after the clean-tree
 precondition, before the first task. On Codex `forge-run.py` calls it in-process; on
-Claude the orchestrator invokes the CLI.
+Claude the orchestrator invokes the CLI. The same CLI, same rules, also runs at plan
+authoring as part of Plan review (`pipeline` spec: Plan review); the run-start
+invocation stays, since a plan can be edited between review and dispatch.
 
 | check | failure |
 |---|---|
@@ -211,6 +213,7 @@ satisfy — no new authoring burden, no new plan fields.
 | `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
 | `t<N>.a<M>` | each **prose clause** of task N's `**Acceptance:**` field (`pipeline` spec: Acceptance clause grammar) — command clauses are checked deterministically by the acceptance runner and would be dead checklist weight |
 | `t<N>` | final review only: task N's title, as an integration item |
+| `t<N>.c<M>` | **plan review only:** each **command clause** of task N's `**Acceptance:**` field, numbered among command clauses in field order, emitted only by `forge_checklist.py`'s plan-promise builder — never a coverage item or citable ref in a task or final review, where the acceptance runner checks it; `build_task_checklist`, `build_final_checklist` and `citable_refs` never return one |
 
 **A task's checklist is what that task promised, not what the spec asserts.** Spec
 sections are a **final-review** source only. A task is allocated a slice of a spec
@@ -477,6 +480,69 @@ identical to the reviewer verdict contract's behavior, and for the same reason. 
 retry resumes the reviewer that emitted the invalid verdict (on Claude, `SendMessage`
 to it), with the defect list as its prompt; a failed resume falls back to a fresh
 reviewer given the packet plus the defect list.
+
+### Plan review verdict
+
+The verdict a plan reviewer emits (`pipeline` spec: Plan review). Its own schema, for
+the reason the spec verdict has one: a plan review has no diff and no codebase
+references, so neither existing schema fits.
+
+One JSON object:
+
+```
+{"verdict": "pass" | "findings",
+ "coverage": [{"section", "requirements": [{"requirement", "covered_by": ["<id>", ...],
+                                             "na": "<reason>" | null}]}],
+ "findings": [{"id", "summary", "kind": "uncovered"|"contradiction"|"spec-defect",
+               "section", "task": <N> | null, "evidence", "proposed_amendment"}]}
+```
+
+- `coverage` — exactly one entry per section in the packet's section table, `section`
+  copied verbatim (the resolved heading text). A missing section, a duplicate, or a
+  section not in the table invalidates the verdict. `requirements` is non-empty. When a
+  section and its subsection are both in the table, the subsection's requirements are
+  listed under the subsection only.
+- `covered_by` — promise ids copied verbatim from the packet's promise table: `g<N>`,
+  `t<N>.t<M>`, `t<N>.a<M>`, `t<N>.c<M>`. An id not in the table invalidates the verdict;
+  a near-miss is a defect, never normalized (`parsers-fail-loud`).
+- `na` — non-null marks a requirement the plan deliberately does not build. It requires
+  a non-empty reason and an empty `covered_by`, and takes no finding.
+- A requirement with an empty `covered_by` and a null `na` is **uncovered**: it requires
+  an `uncovered` finding naming its section, and an `uncovered` finding requires such a
+  requirement in its section. Either without the other invalidates the verdict.
+- `verdict: "pass"` with any finding, and `verdict: "findings"` with none, are both
+  invalid.
+- `kind` outside the three values invalidates the verdict. It is never downgraded or
+  defaulted (#63).
+- Finding `id`s are unique within a verdict.
+- Finding `section` — for `uncovered`, a section in the section table; for
+  `contradiction` and `spec-defect`, any heading in the spec, by its exact text. A value
+  naming no such heading invalidates the verdict.
+- `task` — the task number a finding is raised against; `null` means the plan header.
+  A number naming no task invalidates the verdict. On an `uncovered` finding, `task` is
+  `null` or a task whose `**Spec:**` line names that section.
+
+**Disposition:**
+
+- `uncovered`, `contradiction` → the plan's author amends the plan; the review re-runs
+  over the whole plan, resuming the reviewer — a failed resume falls back to a fresh
+  reviewer given the full packet — and its verdict carries the full
+  `coverage` array — the discovery-only `coverage` rule of the reviewer verdict contract
+  does not apply here. Converges on the rework loop's rules, same backstop. The spec is the approved document and the plan is derived from it, so a plan
+  defect is a repair, not a decision.
+- `spec-defect` — the plan is faithful and the spec is wrong or silent → **surfaced to
+  the user** with `proposed_amendment`, never auto-applied. A spec amended in response
+  re-enters Spec review; plan lint re-runs against the amended spec, and plan review
+  then restarts cold.
+
+**Invalid verdict:** as above — one retry naming the specific defect, resuming the
+reviewer that emitted it, then a contract error.
+
+**Known limit:** the requirements a reviewer lists inside a section are its own
+reading; validation enforces that each section is answered and each answer is
+well-formed, not that the list is complete. Whether a cited promise actually covers its
+requirement, and whether an `na` reason is sound, are likewise the reviewer's judgment
+and are not validated.
 
 ## The disposition matrix
 
@@ -1061,6 +1127,8 @@ Any cost claim requires measurement against a comparable run.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
 
 ## Changelog
+
+2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 
 2026-10-02: acceptance is green when every command clause meets its stated outcome, not when every inline-code span exits 0; the checklist takes prose clauses, lint rejects an unparseable command clause; a repeated first-failing acceptance clause on consecutive attempts halts `stuck` (state `prev_failed_acceptance`, CLI `--failed-acceptance`) instead of looping to the backstop — 7 tasks looped on failed acceptance, 4 to the backstop, across 14 audited runs (#112)
 2026-10-03: the `## Citable refs` section opens with a line saying its ids are citable, not coverage items — both reviewers shown the unlabeled list covered its `spec:` ids and needed a validation retry

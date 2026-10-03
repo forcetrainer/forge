@@ -275,6 +275,75 @@ def final_citable_refs(plan_path, spec_path):
     return refs
 
 
+def _command_items(task_block, task_number):
+    commands = [
+        clause
+        for _, clause, check in forge_plan.parse_acceptance_field(task_block, task_number)
+        if check is not None
+    ]
+    return [
+        ChecklistItem(
+            id="t{}.c{}".format(task_number, i),
+            source="acceptance-command",
+            text=clause,
+        )
+        for i, clause in enumerate(commands, start=1)
+    ]
+
+
+def build_plan_promises(plan_path):
+    """Every promise id in the plan, in plan order: ``g<N>`` clauses, then per
+    task its ``t<N>.t<M>`` cases and its ``t<N>.a<M>`` / ``t<N>.c<M>`` clauses
+    in **Acceptance:** field order. ``t<N>.c<M>`` (command clauses) exists only
+    here — plan review's promise table; task and final reviews leave command
+    clauses to the acceptance runner."""
+    lines = eb.read_lines(plan_path)
+    _, gc_block = eb.extract_header(lines)
+    items = list(_global_constraint_items(gc_block))
+    for task in forge_plan.parse_plan_tasks(plan_path):
+        task_block = eb.extract_task_block(lines, task.number)
+        items.extend(_test_items(task_block, task.number))
+        prose_iter = iter(_acceptance_items(task_block, task.number))
+        command_iter = iter(_command_items(task_block, task.number))
+        for _, _, check in forge_plan.parse_acceptance_field(task_block, task.number):
+            items.append(next(prose_iter if check is None else command_iter))
+    return items
+
+
+@dataclass
+class SectionEntry:
+    heading: str
+    tasks: list
+
+
+def build_section_table(plan_path, spec_path):
+    """One entry per distinct resolved spec heading named on any task's
+    ``**Spec:**`` line, in first-named order, each with the ascending task
+    numbers naming it. Raises when no task names a section."""
+    lines = eb.read_lines(plan_path)
+    entries = {}
+    spec_lines = None
+    for task in forge_plan.parse_plan_tasks(plan_path):
+        task_block = eb.extract_task_block(lines, task.number)
+        spec_names = eb.parse_spec_names(task_block)
+        _require_spec_path(task.number, spec_names, spec_path)
+        if not spec_names:
+            continue
+        if spec_lines is None:
+            spec_lines = eb.read_lines(spec_path)
+        for item in _spec_items(spec_lines, spec_names):
+            heading = item.id[len("spec:"):]
+            tasks = entries.setdefault(heading, SectionEntry(heading, []))
+            if task.number not in tasks.tasks:
+                tasks.tasks.append(task.number)
+    if not entries:
+        raise RuntimeError(
+            "no task names a spec section — add **Spec:** lines naming the "
+            "sections the tasks implement, then re-run"
+        )
+    return [SectionEntry(e.heading, sorted(e.tasks)) for e in entries.values()]
+
+
 def reduce_checklist(items, findings):
     """The subset of ``items`` whose id appears as some finding's
     ``contract_ref`` — used for verification packets."""
