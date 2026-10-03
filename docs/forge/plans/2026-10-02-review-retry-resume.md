@@ -125,7 +125,7 @@
 **Depends on:** Task 2.
 
 ### Task 4: Orchestrator and spec-review skill text
-- [ ] Done
+- [x] Done — passed, 1 attempt (1 coverage retry, resumed)
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (Claude retry is a `SendMessage` to the reviewer that emitted the invalid verdict with the defect list only, fresh `Agent` with packet plus defects on failure; reviewer prompt carries the `## Citable refs` section from `forge_checklist.py --citable --format md`; `spec:<slug>` becomes `spec:<heading>`; violated entries name their backing finding)
