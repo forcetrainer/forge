@@ -6,11 +6,17 @@ Loaded the same way the other scripts/*.py suites load their module: scripts/
 is not a package, so it is put on sys.path.
 """
 import copy
+import json
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "scripts"
+DOCREVIEW = str(SCRIPTS_DIR / "forge_docreview.py")
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import forge_checklist  # noqa: E402
@@ -310,3 +316,251 @@ class DisposeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SPEC_FIXTURE = """# Spec
+
+## Alpha
+
+Alpha requires things.
+
+### Inner rules
+
+Detail requires more.
+
+## Beta
+
+Beta requires others.
+
+## Gamma
+
+Unnamed by any task.
+"""
+
+PLAN_FIXTURE = """# Plan
+
+**Goal:** goal text
+**Global Constraints:**
+- Stay stdlib only.
+
+### Task 1: One
+- [ ] Done
+
+**Files:**
+- Modify: `x.py`
+
+**Spec:** Alpha, Inner rules
+
+**Tests:**
+- the first case
+- the second case
+
+**Acceptance:**
+- `python3 -c "print(1)"` prints `1`
+- the prose clause holds
+
+**Tier:** standard
+
+### Task 2: Two
+- [ ] Done
+
+**Files:**
+- Modify: `y.py`
+
+**Spec:** Alpha
+
+**Tests:**
+- another case
+
+**Acceptance:**
+- `python3 -c "print(2)"` passes
+
+**Tier:** standard
+"""
+
+
+class PlanCliMixin:
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-planreview-cli-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.spec_path = self.write("spec.md", SPEC_FIXTURE)
+        self.plan_path = self.write("plan.md", PLAN_FIXTURE)
+
+    def write(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def run_cli(self, args):
+        return subprocess.run(
+            [sys.executable, DOCREVIEW] + args, capture_output=True, text=True,
+        )
+
+
+class BuildPacketTests(PlanCliMixin, unittest.TestCase):
+    def packet(self):
+        return p.build_packet(self.plan_path, self.spec_path)
+
+    def test_packet_names_both_paths_and_no_body_text(self):
+        packet = self.packet()
+        self.assertIn(self.plan_path, packet)
+        self.assertIn(self.spec_path, packet)
+        self.assertNotIn("Alpha requires things", packet)
+        self.assertNotIn("goal text", packet)
+        self.assertNotIn("Modify: `x.py`", packet)
+
+    def test_section_table_lists_each_heading_with_its_tasks(self):
+        packet = self.packet()
+        self.assertIn("- Alpha — tasks 1, 2", packet)
+        self.assertIn("- Inner rules — tasks 1", packet)
+        self.assertNotIn("Gamma", packet)
+
+    def test_promise_table_lists_every_id_with_text(self):
+        packet = self.packet()
+        for pid, text in [
+            ("g1", "Stay stdlib only."),
+            ("t1.t1", "the first case"),
+            ("t1.t2", "the second case"),
+            ("t1.c1", 'python3 -c "print(1)"'),
+            ("t1.a1", "the prose clause holds"),
+            ("t2.t1", "another case"),
+            ("t2.c1", 'python3 -c "print(2)"'),
+        ]:
+            self.assertRegex(packet, r"(?m)^- `{}` .*{}".format(
+                pid.replace(".", r"\."), __import__("re").escape(text)))
+
+    def test_packet_states_both_reviewer_questions(self):
+        packet = self.packet()
+        self.assertIn("Does any plan element contradict the spec", packet)
+        self.assertIn(
+            "Is each requirement in a named section covered by a promise", packet
+        )
+
+    def test_packet_states_only_promises_cover(self):
+        packet = self.packet()
+        self.assertIn(
+            "Only a test case, an acceptance clause or a global constraint "
+            "covers a requirement", packet,
+        )
+
+    def test_packet_lists_verdict_fields_kinds_and_na_rule(self):
+        packet = self.packet()
+        for token in ("verdict", "coverage", "requirements", "covered_by", "na",
+                      "findings", "proposed_amendment", "task"):
+            self.assertIn("`{}`".format(token), packet)
+        for kind in ("uncovered", "contradiction", "spec-defect"):
+            self.assertIn(kind, packet)
+        self.assertIn("`na` is a non-empty reason with an empty `covered_by`", packet)
+
+    def test_plan_naming_no_section_raises_naming_cause_and_fix(self):
+        plan = PLAN_FIXTURE.replace("**Spec:** Alpha, Inner rules\n\n", "")
+        plan = plan.replace("**Spec:** Alpha\n\n", "")
+        path = self.write("nospec.md", plan)
+        with self.assertRaises(RuntimeError) as ctx:
+            p.build_packet(path, self.spec_path)
+        self.assertIn("**Spec:**", str(ctx.exception))
+
+
+class PlanReviewCliTests(PlanCliMixin, unittest.TestCase):
+    def verdict_file(self, verdict, name="verdict.json"):
+        return self.write(name, json.dumps(verdict))
+
+    def pass_verdict(self):
+        reqs = lambda: [{"requirement": "r", "covered_by": ["t1.t1"], "na": None}]
+        return {"verdict": "pass", "findings": [], "coverage": [
+            {"section": "Alpha", "requirements": reqs()},
+            {"section": "Inner rules", "requirements": reqs()},
+        ]}
+
+    def test_plan_with_spec_and_out_writes_packet_and_exits_zero(self):
+        out = os.path.join(self.tmp, "packet.md")
+        result = self.run_cli(
+            ["--plan", self.plan_path, "--spec", self.spec_path, "--out", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            self.assertIn("t1.c1", f.read())
+
+    def test_plan_naming_no_section_exits_one_without_packet(self):
+        plan = PLAN_FIXTURE.replace("**Spec:** Alpha, Inner rules\n\n", "")
+        plan = plan.replace("**Spec:** Alpha\n\n", "")
+        path = self.write("nospec.md", plan)
+        out = os.path.join(self.tmp, "packet.md")
+        result = self.run_cli(["--plan", path, "--spec", self.spec_path, "--out", out])
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(os.path.exists(out))
+        self.assertIn("no task names a spec section", result.stderr)
+        self.assertIn("add **Spec:** lines naming the sections the tasks implement",
+                      result.stderr)
+
+    def test_unparseable_acceptance_clause_exits_one_naming_task_and_clause(self):
+        plan = PLAN_FIXTURE.replace("`python3 -c \"print(2)\"` passes",
+                                    "`python3 -c \"print(2)\"` works fine")
+        path = self.write("badacc.md", plan)
+        result = self.run_cli(["--plan", path, "--spec", self.spec_path])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("task 2", result.stderr)
+        self.assertIn("works fine", result.stderr)
+
+    def test_valid_pass_verdict_writes_empty_amend_and_surface(self):
+        out = os.path.join(self.tmp, "decision.json")
+        result = self.run_cli([
+            "--plan", self.plan_path, "--spec", self.spec_path,
+            "--verdict", self.verdict_file(self.pass_verdict()), "--out", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertEqual(decision, {
+            "valid": True, "defects": [], "amend": [], "surface": []})
+
+    def test_valid_findings_verdict_places_each_kind(self):
+        v = self.pass_verdict()
+        v["verdict"] = "findings"
+        v["coverage"][0]["requirements"].append(
+            {"requirement": "u", "covered_by": [], "na": None})
+        def finding(fid, kind, section, task):
+            return {"id": fid, "summary": "s", "kind": kind, "section": section,
+                    "task": task, "evidence": "e", "proposed_amendment": "pa"}
+        v["findings"] = [
+            finding("f1", "uncovered", "Alpha", 1),
+            finding("f2", "contradiction", "Beta", 2),
+            finding("f3", "spec-defect", "Gamma", None),
+        ]
+        out = os.path.join(self.tmp, "decision.json")
+        result = self.run_cli([
+            "--plan", self.plan_path, "--spec", self.spec_path,
+            "--verdict", self.verdict_file(v), "--out", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertEqual([x["id"] for x in decision["amend"]], ["f1", "f2"])
+        self.assertEqual([x["id"] for x in decision["surface"]], ["f3"])
+
+    def test_invalid_verdict_lists_every_defect_and_omits_dispositions(self):
+        v = self.pass_verdict()
+        v["coverage"][0]["requirements"][0]["covered_by"] = ["t9.t9"]
+        v["coverage"].pop()
+        out = os.path.join(self.tmp, "decision.json")
+        result = self.run_cli([
+            "--plan", self.plan_path, "--spec", self.spec_path,
+            "--verdict", self.verdict_file(v), "--out", out])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("t9.t9", result.stderr)
+        self.assertIn("Inner rules", result.stderr)
+        with open(out, encoding="utf-8") as f:
+            decision = json.load(f)
+        self.assertFalse(decision["valid"])
+        self.assertEqual(len(decision["defects"]), 2)
+        self.assertNotIn("amend", decision)
+        self.assertNotIn("surface", decision)
+
+    def test_verdict_file_not_an_object_exits_one_with_named_error(self):
+        path = self.write("list.json", "[1, 2]")
+        result = self.run_cli([
+            "--plan", self.plan_path, "--spec", self.spec_path, "--verdict", path])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not contain a JSON object", result.stderr)
+
+    def test_plan_without_spec_exits_nonzero(self):
+        result = self.run_cli(["--plan", self.plan_path])
+        self.assertNotEqual(result.returncode, 0)

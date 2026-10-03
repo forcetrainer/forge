@@ -8,9 +8,14 @@ packet's section table is answered and every answer is well-formed — not that 
 reviewer's requirement list is complete, nor that a cited promise really covers
 its requirement (spec: Known limit).
 """
+import json
+import sys
 from dataclasses import dataclass
 
-from forge_docreview import _is_blank
+import forge_checklist
+import forge_common
+import forge_plan
+from forge_docreview import _all_spec_section_names, _emit, _is_blank
 
 
 _FINDING_KINDS = ("uncovered", "contradiction", "spec-defect")
@@ -274,3 +279,150 @@ def dispose(findings):
         else:
             amend.append(finding)
     return PlanDisposition(amend=amend, surface=surface)
+
+
+# --- packet build (spec: `pipeline` "Plan review", Packet) -------------------
+
+
+def _render_section_table(section_table):
+    lines = []
+    for entry in section_table:
+        lines.append("- {} — tasks {}".format(
+            entry.heading, ", ".join(str(n) for n in entry.tasks)
+        ))
+    return "\n".join(lines) + "\n"
+
+
+def _render_promise_table(promises):
+    return "\n".join(
+        "- `{}` ({}) — {}".format(item.id, item.source, item.text) for item in promises
+    ) + "\n"
+
+
+def _verdict_fields_text():
+    return (
+        "- The verdict is a single JSON object, written to a file: "
+        "`verdict` — one of: {verdicts}. `pass` carries no `findings`; "
+        "`findings` carries at least one.\n"
+        "- `coverage` — an array with exactly one entry per section in the section table, "
+        "`section` copied verbatim; each entry's `requirements` is non-empty "
+        "and each requirement needs: `requirement`, `covered_by`, `na`. When a "
+        "section and its subsection are both in the table, list the "
+        "subsection's requirements under the subsection only.\n"
+        "- `covered_by` — promise ids copied verbatim from the promise table, "
+        "never derived or normalized.\n"
+        "- `na` is a non-empty reason with an empty `covered_by` when the plan "
+        "deliberately does not build the requirement, and `null` otherwise. A "
+        "requirement with an empty `covered_by` and a null `na` is uncovered.\n"
+        "- `findings` — an array; each entry needs: {fields}, and `task` (a task "
+        "number, or `null` for the plan header).\n"
+        "- finding `kind` — one of: {kinds}. An `uncovered` finding is "
+        "required for each uncovered requirement, names its section, and is "
+        "allowed only for one. `contradiction` and `spec-defect` `section` is "
+        "any spec heading by its exact text.\n"
+    ).format(
+        verdicts=", ".join(_VERDICT_VALUES),
+        fields=", ".join("`{}`".format(f) for f in _FINDING_REQUIRED_FIELDS),
+        kinds=", ".join(_FINDING_KINDS),
+    )
+
+
+def build_packet(plan_path, spec_path):
+    """Assemble the plan reviewer's packet as text. Carries both paths, never
+    their content. Raises ``RuntimeError`` when no task names a spec section
+    (an empty section table is never a pass) and propagates plan-parse errors
+    unchanged (constraint: `parsers-fail-loud`)."""
+    section_table = forge_checklist.build_section_table(plan_path, spec_path)
+    promises = forge_checklist.build_plan_promises(plan_path)
+
+    parts = []
+    parts.append("# Plan review\n\n")
+    parts.append("- Plan: {}\n- Spec: {}\n\n".format(plan_path, spec_path))
+    parts.append(
+        "Read both documents from those paths. This packet carries neither "
+        "body.\n\n"
+    )
+
+    parts.append("# Section table\n\n")
+    parts.append(_render_section_table(section_table))
+    parts.append("\n")
+
+    parts.append("# Promise table\n\n")
+    parts.append(_render_promise_table(promises))
+    parts.append("\n")
+
+    parts.append("# Questions\n\n")
+    parts.append(
+        "1. Does any plan element contradict the spec?\n"
+        "2. Is each requirement in a named section covered by a promise?\n\n"
+        "Only a test case, an acceptance clause or a global constraint covers "
+        "a requirement. A task naming the section, or declaring an "
+        "`**Interface:**`, covers nothing.\n\n"
+    )
+
+    parts.append("# Required verdict fields\n\n")
+    parts.append(_verdict_fields_text())
+    return "".join(parts)
+
+
+# --- CLI (delegated from forge_docreview.main on --plan) ---------------------
+
+
+def run(plan_path, spec_path, verdict_path, out_path):
+    """The ``--plan`` half of the ``forge_docreview.py`` CLI: emit the packet,
+    or validate and dispose ``verdict_path``. Returns the exit code."""
+    try:
+        packet = build_packet(plan_path, spec_path)
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+
+    if not verdict_path:
+        return 0 if _emit(packet, out_path) else 1
+
+    try:
+        with open(verdict_path, "r", encoding="utf-8") as f:
+            verdict = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            "error: cannot read verdict file {}: {}".format(verdict_path, e),
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(verdict, dict):
+        print(
+            "error: verdict file {} does not contain a JSON object "
+            "(found {}): {!r}".format(verdict_path, type(verdict).__name__, verdict),
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        section_table = forge_checklist.build_section_table(plan_path, spec_path)
+        promise_ids = [i.id for i in forge_checklist.build_plan_promises(plan_path)]
+        spec_headings = _all_spec_section_names(forge_common.eb.read_lines(spec_path))
+        task_numbers = [t.number for t in forge_plan.parse_plan_tasks(plan_path)]
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+
+    result = validate_verdict(
+        verdict, section_table, promise_ids, spec_headings, task_numbers
+    )
+    if not result.valid:
+        decision = {"valid": False, "defects": result.defects}
+        if not _emit(json.dumps(decision, indent=2), out_path):
+            return 1
+        print(
+            "error: invalid verdict: " + "; ".join(result.defects), file=sys.stderr
+        )
+        return 1
+
+    disposition = dispose(result.findings)
+    decision = {
+        "valid": True,
+        "defects": [],
+        "amend": disposition.amend,
+        "surface": disposition.surface,
+    }
+    return 0 if _emit(json.dumps(decision, indent=2), out_path) else 1

@@ -942,6 +942,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="forge_docreview.py")
     parser.add_argument("--spec", required=True)
     parser.add_argument(
+        "--plan",
+        help="path to a plan; when given, runs plan review (packet, or "
+             "verdict validation with --verdict) instead of spec review.",
+    )
+    parser.add_argument(
         "--verdict",
         help="path to the reviewer's verdict JSON; when given, validates "
              "and disposes instead of emitting a packet.",
@@ -949,6 +954,12 @@ def main(argv=None):
     parser.add_argument("--repo-root", default=REPO_ROOT)
     parser.add_argument("--out")
     args = parser.parse_args(argv)
+
+    if args.plan:
+        # Imported here: forge_planreview imports this module's helpers, so a
+        # top-level import would be circular.
+        import forge_planreview
+        return forge_planreview.run(args.plan, args.spec, args.verdict, args.out)
 
     try:
         packet = build_packet(args.spec)
