@@ -593,5 +593,164 @@ class PlanReviewCliTests(PlanCliMixin, unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+SPEC_A = """---
+system: alpha-sys
+---
+# Alpha spec
+
+## Alpha
+
+Alpha requires things.
+
+## Shared
+"""
+
+SPEC_B = """---
+system: beta-sys
+---
+# Beta spec
+
+## Beta
+
+Beta requires others.
+
+## Hidden
+"""
+
+
+def _header_plan(spec_files, spec_lines):
+    """A header plan: ``spec_files`` are repo-relative paths, ``spec_lines``
+    the **Spec:** line of each of its two tasks."""
+    return (
+        "# Plan\n\n**Goal:** goal text\n"
+        "**Spec files:**\n" + "".join("- `{}`\n".format(f) for f in spec_files) +
+        "**Global Constraints:**\n- Stay stdlib only.\n\n"
+        "### Task 1: One\n- [ ] Done\n\n**Files:**\n- Modify: `x.py`\n\n"
+        "**Spec:** " + spec_lines[0] + "\n\n**Tests:**\n- the first case\n\n"
+        "**Acceptance:**\n- the prose clause holds\n\n**Tier:** standard\n\n"
+        "### Task 2: Two\n- [ ] Done\n\n**Files:**\n- Modify: `y.py`\n\n"
+        "**Spec:** " + spec_lines[1] + "\n\n**Tests:**\n- another case\n\n"
+        "**Acceptance:**\n- the second prose clause holds\n\n**Tier:** standard\n"
+    )
+
+
+class MultiSpecPlanTests(PlanCliMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.tmp, ".git"))
+        os.makedirs(os.path.join(self.tmp, "docs"))
+        self.write("docs/a.md", SPEC_A)
+        self.write("docs/b.md", SPEC_B)
+        self.two = self.write("two.md", _header_plan(
+            ["docs/a.md", "docs/b.md"], ["[alpha-sys] Alpha", "[beta-sys] Beta"]))
+        self.one = self.write("one.md", _header_plan(
+            ["docs/a.md"], ["Alpha", "Alpha"]))
+        self.legacy = self.write("legacy.md", _header_plan(
+            ["docs/a.md"], ["Alpha", "Alpha"]).replace(
+            "**Spec files:**\n- `docs/a.md`\n", ""))
+
+    def verdict_file(self, verdict):
+        return self.write("verdict.json", json.dumps(verdict))
+
+    def two_spec_verdict(self, a="[alpha-sys] Alpha", b="[beta-sys] Beta"):
+        reqs = lambda pid: [{"requirement": "r", "covered_by": [pid], "na": None}]
+        return {"verdict": "pass", "findings": [], "coverage": [
+            {"section": a, "requirements": reqs("t1.t1")},
+            {"section": b, "requirements": reqs("t2.t1")},
+        ]}
+
+    def with_finding(self, section, kind="contradiction"):
+        v = self.two_spec_verdict()
+        v["verdict"] = "findings"
+        v["findings"] = [_finding(section=section, kind=kind, task=None)]
+        return v
+
+    def test_two_spec_packet_lists_both_paths_and_prefixed_sections(self):
+        packet = p.build_packet(self.two)
+        self.assertIn("docs/a.md", packet)
+        self.assertIn("docs/b.md", packet)
+        self.assertIn("- [alpha-sys] Alpha \u2014 tasks 1", packet)
+        self.assertIn("- [beta-sys] Beta \u2014 tasks 2", packet)
+
+    def test_prefixed_coverage_validates(self):
+        result = p.run(self.two, None, self.verdict_file(self.two_spec_verdict()),
+                       os.path.join(self.tmp, "d.json"))
+        self.assertEqual(result, 0)
+
+    def test_unprefixed_coverage_entry_is_a_defect(self):
+        v = self.two_spec_verdict(a="Alpha")
+        result = self.run_cli(
+            ["--plan", self.two, "--verdict", self.verdict_file(v)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("coverage entry names section 'Alpha'", result.stderr)
+
+    def test_contradiction_may_cite_any_heading_of_either_spec(self):
+        for section in ("[alpha-sys] Shared", "[alpha-sys] Alpha",
+                        "[beta-sys] Hidden", "[beta-sys] Beta"):
+            result = self.run_cli(["--plan", self.two, "--verdict",
+                                   self.verdict_file(self.with_finding(section))])
+            self.assertEqual(result.returncode, 0, (section, result.stderr))
+
+    def test_finding_under_the_wrong_spec_id_is_a_defect(self):
+        result = self.run_cli(["--plan", self.two, "--verdict", self.verdict_file(
+            self.with_finding("[beta-sys] Shared"))])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("matches no spec heading", result.stderr)
+
+    def test_one_spec_header_plan_equals_legacy_plan(self):
+        spec = os.path.join(self.tmp, "docs", "a.md")
+
+        def normalized(packet, plan):
+            return packet.replace(plan, "PLAN").replace(spec, "SPEC")
+
+        self.assertEqual(
+            normalized(p.build_packet(self.one), self.one),
+            normalized(p.build_packet(self.legacy, spec), self.legacy),
+        )
+        self.assertIn("- Alpha \u2014 tasks 1, 2", p.build_packet(self.one))
+        result = self.run_cli(["--plan", self.one, "--verdict", self.verdict_file(
+            {"verdict": "findings", "coverage": [{"section": "Alpha", "requirements": [
+                {"requirement": "r", "covered_by": ["t1.t1"], "na": None}]}],
+             "findings": [_finding(section="Shared", task=None)]})])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_legacy_packet_keeps_its_original_header_and_intro(self):
+        spec = os.path.join(self.tmp, "docs", "a.md")
+        for packet in (p.build_packet(self.legacy, spec), p.build_packet(self.one)):
+            self.assertIn("- Spec: {}\n\n".format(spec), packet)
+            self.assertIn(
+                "Read both documents from those paths. This packet carries "
+                "neither body.\n\n", packet)
+
+    def test_packet_states_a_pass_carries_an_empty_findings_list(self):
+        self.assertIn("`pass` verdict still carries an empty `findings` list",
+                      p.build_packet(self.two))
+
+    def test_header_plan_without_spec_emits_packet(self):
+        out = os.path.join(self.tmp, "packet.md")
+        result = self.run_cli(["--plan", self.two, "--out", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            self.assertIn("[beta-sys] Beta", f.read())
+
+    def test_header_plan_with_spec_exits_one_naming_both(self):
+        result = self.run_cli(["--plan", self.two, "--spec", self.spec_path])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("**Spec files:**", result.stderr)
+        self.assertIn("--spec", result.stderr)
+
+    def test_plan_with_no_spec_exits_one_naming_cause_and_writes_no_packet(self):
+        out = os.path.join(self.tmp, "packet.md")
+        result = self.run_cli(["--plan", self.legacy, "--out", out])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("has no spec", result.stderr)
+        self.assertFalse(os.path.exists(out))
+
+    def test_neither_plan_nor_spec_exits_nonzero(self):
+        result = self.run_cli([])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--spec", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

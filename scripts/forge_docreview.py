@@ -947,7 +947,11 @@ def _emit(text, out_path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="forge_docreview.py")
-    parser.add_argument("--spec", required=True)
+    parser.add_argument(
+        "--spec",
+        help="path to the spec under review; required without --plan, and "
+             "given with --plan only for a legacy plan.",
+    )
     parser.add_argument(
         "--plan",
         help="path to a plan; when given, runs plan review (packet, or "
@@ -961,6 +965,8 @@ def main(argv=None):
     parser.add_argument("--repo-root", default=REPO_ROOT)
     parser.add_argument("--out")
     args = parser.parse_args(argv)
+    if not args.plan and not args.spec:
+        parser.error("--spec is required unless --plan is given")
 
     if args.plan:
         # Imported here: forge_planreview imports this module's helpers, so a

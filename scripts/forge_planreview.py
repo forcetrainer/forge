@@ -305,7 +305,8 @@ def _verdict_fields_text():
     return (
         "- The verdict is a single JSON object, written to a file: "
         "`verdict` — one of: {verdicts}. `pass` carries no `findings`; "
-        "`findings` carries at least one.\n"
+        "`findings` carries at least one. A `pass` verdict still carries an "
+        "empty `findings` list.\n"
         "- `coverage` — an array with exactly one entry per section in the section table, "
         "`section` copied verbatim; each entry's `requirements` is non-empty "
         "and each requirement needs: `requirement`, `covered_by`, `na`. When a "
@@ -329,21 +330,55 @@ def _verdict_fields_text():
     )
 
 
-def build_packet(plan_path, spec_path):
-    """Assemble the plan reviewer's packet as text. Carries both paths, never
-    their content. Raises ``RuntimeError`` when no task names a spec section
-    (an empty section table is never a pass) and propagates plan-parse errors
-    unchanged (constraint: `parsers-fail-loud`)."""
+def _load_spec_set(plan_path, spec_path):
+    """The plan's spec set; raises ``RuntimeError`` naming the cause when the
+    plan has none (plan review has nothing to validate against)."""
+    spec_set = forge_common.eb.load_spec_set(plan_path, spec_path)
+    if not spec_set:
+        raise RuntimeError(
+            "{} has no spec — declare **Spec files:** in the plan header, or "
+            "pass --spec for a legacy plan; plan review needs a spec".format(plan_path)
+        )
+    return spec_set
+
+
+def _spec_headings(spec_set):
+    """Every heading of every declared spec, by the text a finding cites:
+    prefixed ``[<spec id>] `` when the plan declares more than one spec."""
+    multi = len(spec_set) > 1
+    headings = []
+    for spec in spec_set:
+        for name in _all_spec_section_names(forge_common.eb.read_lines(spec.path)):
+            headings.append("[{}] {}".format(spec.spec_id, name) if multi else name)
+    return headings
+
+
+def build_packet(plan_path, spec_path=None):
+    """Assemble the reviewer's packet as text. Carries the plan path and every
+    spec path, never their content. Raises ``RuntimeError`` when the plan has
+    no spec or no task names a spec section (an empty section table is never a
+    pass) and propagates plan-parse errors unchanged (constraint:
+    `parsers-fail-loud`)."""
+    spec_set = _load_spec_set(plan_path, spec_path)
     section_table = forge_checklist.build_section_table(plan_path, spec_path)
     promises = forge_checklist.build_plan_promises(plan_path)
 
     parts = []
     parts.append("# Plan review\n\n")
-    parts.append("- Plan: {}\n- Spec: {}\n\n".format(plan_path, spec_path))
-    parts.append(
-        "Read both documents from those paths. This packet carries neither "
-        "body.\n\n"
-    )
+    if len(spec_set) == 1:
+        parts.append("- Plan: {}\n- Spec: {}\n\n".format(plan_path, spec_set[0].path))
+        parts.append(
+            "Read both documents from those paths. This packet carries neither "
+            "body.\n\n"
+        )
+    else:
+        parts.append("- Plan: {}\n- Specs:\n".format(plan_path))
+        for spec in spec_set:
+            parts.append("  - [{}] {}\n".format(spec.spec_id, spec.path))
+        parts.append(
+            "\nRead every document from those paths. This packet carries no "
+            "body.\n\n"
+        )
 
     parts.append("# Section table\n\n")
     parts.append(_render_section_table(section_table))
@@ -400,9 +435,10 @@ def run(plan_path, spec_path, verdict_path, out_path):
         return 1
 
     try:
+        spec_set = _load_spec_set(plan_path, spec_path)
         section_table = forge_checklist.build_section_table(plan_path, spec_path)
         promise_ids = [i.id for i in forge_checklist.build_plan_promises(plan_path)]
-        spec_headings = _all_spec_section_names(forge_common.eb.read_lines(spec_path))
+        spec_headings = _spec_headings(spec_set)
         task_numbers = [t.number for t in forge_plan.parse_plan_tasks(plan_path)]
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
