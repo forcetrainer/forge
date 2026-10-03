@@ -893,6 +893,44 @@ class SpecSetTests(unittest.TestCase):
             extract_brief.load_spec_set(plan, None, self.root)
         self.assertIn("specs/missing.md", str(cm.exception))
 
+    def test_declared_path_escaping_the_repository_root_raises(self):
+        # A real spec outside the root, reached by `..` and by an absolute
+        # path: both must be refused before the file is opened.
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target = os.path.join(outside.name, "outside.md")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(SPEC_ALPHA)
+        rel = os.path.relpath(target, self.root)
+        self.assertTrue(rel.startswith(".."))
+        for declared in (rel, target):
+            plan = self._write(
+                "plan.md", "**Goal:** g\n**Spec files:** {}\n".format(declared)
+            )
+            with self.assertRaises(RuntimeError) as cm:
+                extract_brief.load_spec_set(plan, None, self.root)
+            self.assertIn("outside the repository root", str(cm.exception))
+            self.assertIn(declared, str(cm.exception))
+
+    def test_declared_symlink_pointing_outside_the_root_raises(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target = os.path.join(outside.name, "outside.md")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(SPEC_ALPHA)
+        os.symlink(target, os.path.join(self.root, "specs", "link.md"))
+        plan = self._write("plan.md", "**Goal:** g\n**Spec files:** specs/link.md\n")
+        with self.assertRaises(RuntimeError) as cm:
+            extract_brief.load_spec_set(plan, None, self.root)
+        self.assertIn("outside the repository root", str(cm.exception))
+
+    def test_declared_path_with_dotdot_that_stays_inside_the_root_resolves(self):
+        plan = self._write(
+            "plan.md", "**Goal:** g\n**Spec files:** specs/../specs/alpha.md\n"
+        )
+        spec_set = extract_brief.load_spec_set(plan, None, self.root)
+        self.assertEqual([s.spec_id for s in spec_set], ["alpha"])
+
     def test_two_files_with_one_id_raise_naming_both(self):
         self._write("specs/dup.md", SPEC_ALPHA)
         plan = self._write(

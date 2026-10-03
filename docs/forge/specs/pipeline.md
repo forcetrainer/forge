@@ -226,6 +226,8 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   is the single source of the plan's specs: every tool reads it from the plan, and no
   caller passes a spec path. A path is relative to the repository root and is written
   plain or inside one pair of backticks; both forms are legal and mean the same file. A
+  path that resolves outside the repository root — an absolute path elsewhere, a `..`
+  climb, a symlink — is an error naming the path, raised before the file is opened. A
   path naming no file, and a file that is not a living spec — one that fails any rule
   under Lint above — are lint errors naming the path. A file's **spec id** is its
   frontmatter `system` value; two declared files with one id are a lint error.
