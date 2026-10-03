@@ -225,7 +225,9 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   it.
 - **`**Spec:**`** is an optional line after `**Files:**` naming the spec sections this
   task's worker needs, by heading text (unique prefix acceptable, matched
-  case-insensitively at extraction). Omitted when the task needs no spec context. A
+  case-insensitively at extraction). In a plan written from a spec, every task names
+  the sections it implements; a task omits the line only when it implements no spec
+  section (setup, a pure refactor). The planning skill's self-review checks this. A
   single line of bare comma-separated heading names — no parentheticals, no `;`, no
   wrapping — and one spec file per task, since `--spec` takes one. Wrapped or
   parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
@@ -324,6 +326,74 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
 - **End-of-plan summary** leads with failures, deviations, and deferrals, not
   achievements, and reports review-cycle counts per task. Recurring "wouldn't have
   done it that way" review calls become written conventions.
+
+### Plan review
+
+A **cold** reviewer validates the plan against its spec after the planning skill's
+self-review and before execution is offered. Self-review stays and is **not** the gate.
+Every other control downstream checks work against the plan's promises; this one checks
+the promises against the spec.
+
+Applies to every plan written from a spec — one executed with `--spec`. A plan with no
+spec has nothing to validate against and skips it. A plan written from a spec whose
+tasks name no spec section is an **error** at packet build: an empty section table is
+never a pass, and there is no skip. The error names the cause and the fix — add
+`**Spec:**` lines naming the sections the tasks implement, then re-run. It is raised
+before any reviewer is dispatched.
+
+**Three checks, and three is the whole set:**
+
+1. **No plan element contradicts the spec** — reviewer.
+2. **Every changed or named spec section is covered** — the reviewer, for the
+   requirements inside each section some task's `**Spec:**` line names; Plan lint's
+   changed-section rule (`execution` spec: Plan lint), for a changed section no task
+   names. An unchanged section no task names is not examined: in a living spec it is
+   already built.
+3. **Plan lint**, its rules unchanged — before the packet is built, since the packet is
+   built by parsing the plan, and again on the plan as amended.
+
+**Covered means promised.** A requirement is covered only by a plan promise: a
+`**Tests:**` case, an `**Acceptance:**` clause of either kind, or a
+`**Global Constraints:**` clause. A task naming the section, or declaring an
+`**Interface:**`, covers nothing — per-task review enforces promises only, so anything
+else is unenforced downstream. A requirement the plan deliberately does not build is
+marked `n/a` with a reason and needs no promise — the same escape Plan lint's
+changed-section rule relies on.
+
+**Packet** — `scripts/forge_docreview.py --plan <plan> --spec <spec> [--out <path>]`.
+Carries the plan and spec paths, never their pasted content; a **section table**; a
+**promise table**; the two reviewer questions; the required verdict fields. `--plan`
+without `--spec` is a usage error.
+
+- **Section table** — each named spec section and the tasks naming it. A section is
+  identified by its resolved heading text, whitespace-collapsed: the text of its
+  `spec:<heading>` id. When a section and one of its subsections are both named, each is
+  its own entry and the subsection's requirements are listed under the subsection only.
+- **Promise table** — every promise id with its text, built by
+  `scripts/forge_checklist.py` (ids: `execution` spec, Contract checklist).
+
+**The reviewer owes a coverage entry on every section in the section table**, listing
+the section's requirements and the promise ids covering each. A missing section
+invalidates the verdict (schema: `execution` spec, Document review contract). Promise
+ids are copied verbatim from the promise table, never derived.
+
+**Verdict** — `scripts/forge_docreview.py --plan <plan> --spec <spec> --verdict <file>`
+validates and disposes. Non-zero exit is an invalid verdict.
+
+**Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
+re-review after a plan amendment is a verification lap in that constraint's sense and
+resumes the reviewer; a failed resume falls back to a fresh reviewer given the full
+packet. Unlike a task review's verification it is always whole-plan, for the reason
+Spec review is whole-document, and its verdict carries the full `coverage` array. A spec
+amended in response to a `spec-defect` finding re-enters Spec review; plan lint then
+re-runs against the amended spec, and plan review restarts cold.
+
+**The gate is skill text.** `skills/planning/SKILL.md` states that execution is not
+offered until plan review passes. No runner checks for a review receipt.
+
+**Out of scope:** a hunting list for the plan reviewer; feeding the coverage entries
+into per-task review; constructing a conforming-but-wrong implementation against a
+task's acceptance criteria.
 
 ## TDD skill contract
 
@@ -437,6 +507,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-03: plan review — a cold reviewer validates a plan against its spec before execution is offered: no plan element contradicts the spec, every requirement in a named section is covered by a plan promise, and plan lint runs before the packet and on the amended plan. Until now the only checks were the author's self-review and a lint rule satisfied by naming a section, so a spec obligation dropped at planning surfaced only at the final review (#97, #113)
 2026-10-03: TDD test scope — verify-GREEN runs the touched test files, the whole suite once at completion (plan close-out for a plan task); coverage is per behavior through a public interface, not per function; lowest level that proves it; the description-asserting anti-pattern covers a stand-in for an effect the harness cannot observe. Replaces "run the full suite" on every cycle and "every new function/method has a test", which drove repeated heavy-suite runs and tests coupled to internals in two downstream repos
 2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` `` over combined output) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)
 2026-09-09: amendment re-review is whole-document, never scoped — "scoped to the changed sections" never defined the baseline, and three incompatible readings each satisfied it while covering different things; scoping saved little because the whole-document contradiction question forces a full read regardless (#96 final review)
