@@ -38,8 +38,8 @@ A test that cannot fail for the reason stated is not a test.
 
 ## 5. Asserting on descriptions instead of effects
 
-**Trigger:** Something in the system can actually run, and you're about to assert on a label, comment, or description of what it does rather than triggering it and checking what happened.
+**Trigger:** Something in the system can actually run, and you're about to assert on a label, comment, or description of what it does rather than triggering it and checking what happened — or on a stand-in for an effect this harness cannot observe.
 
 **Gate:** Could you run this and observe the outcome instead? When something executable is available, asserting on its description instead is the failure — the opposite case from entry four, where nothing executable exists at all.
 
-**Instead:** Run it. Assert on the state it left behind, the value it returned, or the effect it had, not on text that claims those things happened.
+**Instead:** Run it. Assert on the state it left behind, the value it returned, or the effect it had, not on text that claims those things happened. Harness cannot observe the effect? Write no test here; verify where it is observable.

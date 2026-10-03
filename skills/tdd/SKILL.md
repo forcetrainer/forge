@@ -25,13 +25,13 @@ The gate governs where tests run, not whether code gets tested. Wherever a harne
 
 ## Red-Green-Refactor
 
-**RED.** Write one minimal test showing what should happen. One behavior per test. Clear, behavior-describing name. Shows the intended API. Real code over mocks unless unavoidable.
+**RED.** Write one minimal test showing what should happen. One behavior per test. Clear, behavior-describing name. Shows the intended API. Real code over mocks unless unavoidable. Lowest level that can prove it; a higher-level test must prove something a lower one cannot.
 
 **Verify RED. Mandatory, never skip.** Run the test. Confirm it fails, not errors, and fails for the expected reason — feature missing, not a typo. Passes immediately? You're testing existing behavior — fix the test. Errors instead of failing? Fix until it fails correctly.
 
 **GREEN.** Write the simplest code that passes the test. No extra features, no unrelated refactors, no improvements beyond the test.
 
-**Verify GREEN. Mandatory.** Run the full suite. Confirm the new test passes, other tests still pass, output is clean. Test still fails? Fix the code, not the test. Other tests now fail? Fix now, before moving on.
+**Verify GREEN. Mandatory.** Run the test files you touched — not the whole suite; that runs once, at completion. Confirm the new test passes, other tests still pass, output is clean. Test still fails? Fix the code, not the test. Other tests now fail? Fix now, before moving on.
 
 **REFACTOR.** Only after green. Remove duplication, improve names, extract helpers. Keep tests green. Don't add behavior.
 
@@ -44,11 +44,11 @@ Start with a failing test that reproduces the bug. Follow the same cycle. The te
 ## Verification Checklist
 
 Before marking work complete:
-- Every new function/method has a test.
+- Every new behavior reachable through a public interface has a test; helpers are covered through their callers.
 - Watched each test fail before implementing.
 - Each test failed for the expected reason.
 - Wrote minimal code to pass each test.
-- All tests pass, output pristine.
+- Whole suite passes, output pristine — run once, here. A plan task runs its acceptance commands instead; the whole suite runs at plan close-out.
 - Tests use real code; mocks only if unavoidable.
 - Edge cases and errors covered.
 

@@ -333,13 +333,25 @@ all three branches; RED → verify-RED → GREEN → verify-GREEN → REFACTOR w
 verifications mandatory and their failure rules (a test that passes immediately is
 testing existing behavior — fix the test; a test that errors is fixed until it fails
 correctly; other tests failing on GREEN are fixed now; fix code, not test); good-test
-qualities (minimal, one behavior, clear name, shows intent, real code over mocks); bug
+qualities (minimal, one behavior, clear name, shows intent, real code over mocks, lowest
+level that can prove it — a higher-level test proves something a lower one cannot); bug
 fix begins with a failing repro test; the final verification checklist, the final rule,
 and exceptions requiring human-partner permission; the on-demand pointer to
 `testing-anti-patterns.md`, fired on three named moments — reaching for a mock or
 fixture, testing something that cannot be executed, asserting on text. Excluded:
 diagrams, code-example blocks, rationale sections, worked examples, and any "when to
 use" list the trigger line already covers.
+
+Test scope, stated in the skill and binding on every repo:
+
+- **Run scope** — verify-GREEN runs the test files the cycle touched, never the whole
+  suite. The whole suite runs once at completion; for a plan task, completion is its
+  acceptance commands and the whole suite runs at plan close-out.
+- **Unit of coverage** — a test per new behavior reachable through a public interface,
+  not per function or method; helpers are covered through their callers.
+- Repo-specific testing policy — which levels exist, which command covers which
+  subsystem, how a change type is verified — is not skill content. It lives in the
+  repo's own constraints.
 
 `skills/tdd/testing-anti-patterns.md` is budgeted at ≤600 words (`wc -w`) and loads only
 on that pointer. Organizing principle: a test that cannot fail for the reason stated is
@@ -350,7 +362,9 @@ not a test. Five entries, each `trigger → gate → instead`:
 - doubles shaped by assumption rather than an observed instance
 - testing text instead of running it — prose artifacts take mechanical acceptance
   (grep, file-absent, exit code)
-- asserting on descriptions instead of effects
+- asserting on descriptions instead of effects — including a stand-in for an effect the
+  harness cannot observe, which takes no test there and is verified where it is
+  observable
 
 No code blocks, no language or framework names. The prose-artifact entry governs the
 document case: mechanical text checks on prose are not an instance of the
@@ -423,6 +437,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-03: TDD test scope — verify-GREEN runs the touched test files, the whole suite once at completion (plan close-out for a plan task); coverage is per behavior through a public interface, not per function; lowest level that proves it; the description-asserting anti-pattern covers a stand-in for an effect the harness cannot observe. Replaces "run the full suite" on every cycle and "every new function/method has a test", which drove repeated heavy-suite runs and tests coupled to internals in two downstream repos
 2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` `` over combined output) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)
 2026-09-09: amendment re-review is whole-document, never scoped — "scoped to the changed sections" never defined the baseline, and three incompatible readings each satisfied it while covering different things; scoping saved little because the whole-document contradiction question forces a full read regardless (#96 final review)
 
