@@ -193,6 +193,25 @@ class LoopSubprocessTests(unittest.TestCase):
         self.assertIn("first-out", text)
         self.assertNotIn("second-out", text)
 
+    def test_clause_that_can_never_meet_outcome_halts_stuck_at_attempt_2(self):
+        plan = self._plan(self._acc_plan("`echo actual-out` prints `never-said`"))
+        res = self._run(plan)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.run_dir, "task-1-attempt-3.json")))
+        rc = self._receipt(2)
+        self.assertEqual(rc["status"], "escalated")
+        self.assertEqual(rc["halt_reason"], "stuck")
+        text = "\n".join(rc["outstanding_findings"])
+        self.assertIn("echo actual-out", text)
+        self.assertIn("never-said", text)
+        self.assertIn("actual-out", text.split("Output tail:", 1)[1])
+
+    def test_stuck_worker_halt_cause_names_repeated_acceptance_failure(self):
+        cause = forge_run.HALT_CAUSE_FOR_WORKER["stuck"]
+        self.assertIn("acceptance", cause)
+        self.assertIn("same", cause)
+
     def test_malformed_plan_bad_heading_exits_one_naming_cause(self):
         plan = self._plan(PLAN_BAD_HEADING)
         res = self._run(plan)

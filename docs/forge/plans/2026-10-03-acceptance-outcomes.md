@@ -98,7 +98,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: A repeated first-failing acceptance clause halts stuck
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`ConvergenceState.prev_failed_acceptance`; `convergence_decision` and `advance_state` take `failed_acceptance`; CLI `--failed-acceptance` and its usage errors)

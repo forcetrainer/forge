@@ -686,8 +686,10 @@ HALT_CAUSE_FOR_WORKER = {
     "regression": "The run stopped on a `regression` halt: a finding the "
                   "runner had already recorded as resolved reappeared, or the "
                   "acceptance command went from green to red.",
-    "stuck": "The run stopped on a `stuck` halt: a rework lap resolved "
-             "nothing — the outstanding findings came back unchanged.",
+    "stuck": "The run stopped on a `stuck` halt: either a rework lap resolved "
+             "nothing — the outstanding findings came back unchanged — or "
+             "the same acceptance command failed first on two consecutive "
+             "attempts.",
     "backstop": "The run stopped on a `backstop` halt: the attempt count "
                 "reached the ceiling before the findings cleared.",
     "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
@@ -1076,6 +1078,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         coverage_skipped = None  # None: no review this attempt (unchanged)
         coverage_retry = False
         reviewer_resume_fallback = False
+        failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
         if worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
@@ -1089,6 +1092,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 "the task.".format(worker.exit_code))]
         elif not acc_ok:
             failed = next(r for r in acceptance if not r.passed)
+            failed_acceptance = failed.command
             cause = "acceptance failed: {}".format(failed.command)
             findings = [_execution_failure_finding(
                 "Acceptance command `{}` did not meet its stated outcome `{}` "
@@ -1224,9 +1228,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
 
         action, halt_reason = convergence_decision(
             findings, state, acc_ok, attempt, autofix_mode,
-            approved_ids=approved_ids,
+            approved_ids=approved_ids, failed_acceptance=failed_acceptance,
         )
-        advance_state(state, findings, acc_ok)
+        advance_state(state, findings, acc_ok, failed_acceptance)
 
         fix_findings = [f for f in findings if f.disposition == "fix"]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]

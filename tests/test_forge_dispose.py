@@ -532,6 +532,48 @@ class ForgeDisposeCLITests(unittest.TestCase):
         self.assertEqual(decision["action"], "halt")
         self.assertEqual(decision["halt_reason"], "backstop")
 
+    # --- acceptance-stuck: --failed-acceptance ---------------------------------
+
+    def test_failed_acceptance_without_execution_failure_is_usage_error(self):
+        v = self._write_json("vfa.json", {"verdict": "clean"})
+        result = self.run_dispose([
+            "--verdict", v, "--base", self.base, "--attempt", "1",
+            "--acceptance-ok", "false", "--autofix", "auto",
+            "--failed-acceptance", "make a",
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--failed-acceptance", result.stderr)
+        self.assertIn("--execution-failure", result.stderr)
+
+    def test_failed_acceptance_with_acceptance_ok_true_is_usage_error(self):
+        result = self.run_dispose([
+            "--base", self.base, "--attempt", "1", "--acceptance-ok", "true",
+            "--autofix", "auto", "--execution-failure",
+            "--failed-acceptance", "make a",
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--failed-acceptance", result.stderr)
+        self.assertIn("--acceptance-ok", result.stderr)
+
+    def test_same_failed_acceptance_chained_through_state_halts_stuck(self):
+        state_path = None
+        decisions = []
+        for i in (1, 2):
+            result = self.run_dispose([
+                "--base", self.base, "--attempt", str(i),
+                "--acceptance-ok", "false", "--autofix", "auto",
+                "--execution-failure", "--failed-acceptance", "make a",
+            ] + (["--state", state_path] if state_path else []))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            decision = json.loads(result.stdout)
+            decisions.append(decision)
+            state_path = self._write_json(
+                "fa-state{}.json".format(i), decision["state"])
+        self.assertEqual(decisions[0]["action"], "rework")
+        self.assertEqual(decisions[0]["state"]["prev_failed_acceptance"], "make a")
+        self.assertEqual(decisions[1]["action"], "halt")
+        self.assertEqual(decisions[1]["halt_reason"], "stuck")
+
     # --- malformed input fails loud --------------------------------------------
 
     def test_bad_git_ref_exits_nonzero(self):
