@@ -624,7 +624,10 @@ def resolve_entries(entries, spec_set, task_number):
             heading, content = find_spec_sections(read_lines(spec.path), [name])[0]
         except RuntimeError as e:
             raise RuntimeError(f"{where}: {e}")
-        label = f"[{spec.spec_id}] {heading}" if multi else heading
+        label = (
+            f"[{spec.spec_id}] {collapse_ws(strip_heading_text(heading))}"
+            if multi else heading
+        )
         resolved.append(
             ResolvedSection(spec, heading, content.splitlines(keepends=True), label)
         )

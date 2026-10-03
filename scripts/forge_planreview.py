@@ -304,9 +304,9 @@ def _render_promise_table(promises):
 def _verdict_fields_text():
     return (
         "- The verdict is a single JSON object, written to a file: "
-        "`verdict` — one of: {verdicts}. `pass` carries no `findings`; "
-        "`findings` carries at least one. A `pass` verdict still carries an "
-        "empty `findings` list.\n"
+        "`verdict` — one of: {verdicts}. A `pass` verdict "
+        "carries `\"findings\": []`, and a `findings` verdict carries at "
+        "least one finding.\n"
         "- `coverage` — an array with exactly one entry per section in the section table, "
         "`section` copied verbatim; each entry's `requirements` is non-empty "
         "and each requirement needs: `requirement`, `covered_by`, `na`. When a "

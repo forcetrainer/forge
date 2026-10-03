@@ -145,6 +145,8 @@ Choose the **execution mode first** — inline vs. dispatch is a task-shape deci
 
 `scripts/extract-brief.py` and `scripts/review-packet.py` live at the plugin root (`../../scripts/` from this skill's base directory — see "Base directory for this skill" in the loading message), not in this skill's directory. `extract-brief.py` and `forge_checklist.py` (briefs, checklists, citable refs, `--final` forms) read the plan's specs from its `**Spec files:**` header and are invoked without `--spec`; add `--spec <spec>` only for a legacy plan with no header.
 
+Brief command: `scripts/extract-brief.py <plan> <task-number> --out <dir>`, with `--spec <spec>` added only for a legacy plan.
+
 **File-referenced briefs:** worker prompts carry a brief-file path plus the exact file paths the worker needs — never pasted plan or spec content. Generate the brief with `scripts/extract-brief.py`; its instructions bound the worker's reading explicitly: "read these N files and spec §X, nothing else."
 
 **Thin orchestrator:** workers report back in one paragraph, not a transcript. On **Codex**, diffs and review packets travel reviewer-to-file via `scripts/review-packet.py` (Codex-path-only: a `codex exec` reviewer is a subprocess and cannot gather its own context, so the runner pre-assembles its input). On **Claude**, the reviewer subagent self-serves its own diff and spec directly (it can run `git diff` itself), and `scripts/forge_dispose.py` computes its own diff independently for verification — `review-packet.py` is not used on the Claude path, and the orchestrator never sees diff text either way, only file paths and `decision.json`. The orchestrator never pre-rates finding severity when handing review to a reviewer.

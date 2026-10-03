@@ -1034,7 +1034,33 @@ class MultiSpecTests(unittest.TestCase):
         path = self.plan([], "Alpha Only")
         with self.assertRaises(RuntimeError) as ctx:
             fc.build_task_checklist(path, None, 1)
-        self.assertIn("task 1", str(ctx.exception))
+        self.assertIn(
+            "task 1 declares **Spec:** but the plan has no spec", str(ctx.exception))
+
+    def _brief_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "extract_brief_for_label", os.path.join(
+                os.path.dirname(SCRIPT), "extract-brief.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_multi_spec_brief_label_equals_the_checklist_id_heading(self):
+        self.write("specs/beta.md", self.spec("beta", "2.  Beta   thing"))
+        path = self.plan(
+            ["specs/alpha.md", "specs/beta.md"], "[beta] Beta thing")
+        brief = self._brief_module().build_brief(path, 1)
+        ids = [i.id for i in fc.build_final_checklist(path, None)
+               if i.source == "spec"]
+        self.assertEqual(ids, ["spec:[beta] Beta thing"])
+        self.assertIn("\n\n# Spec: [beta] Beta thing\n\n", brief)
+
+    def test_legacy_brief_keeps_the_numbered_heading(self):
+        spec = self.write("specs/num.md", self.spec("num", "2. Beta thing"))
+        path = self.plan([], "Beta thing")
+        brief = self._brief_module().build_brief(path, 1, spec)
+        self.assertIn("\n\n# Spec: 2. Beta thing\n\n", brief)
 
     def test_cli_on_a_header_plan_without_spec_emits_the_checklist(self):
         path = self.two_spec_plan()

@@ -1058,7 +1058,7 @@ class SpecSetTests(unittest.TestCase):
     def test_two_spec_brief_labels_each_section(self):
         plan = self._write("plan.md", HEADER_PLAN_TWO)
         brief = extract_brief.build_brief(plan, 1)
-        self.assertIn("# Spec: [alpha] 1. Alpha Design", brief)
+        self.assertIn("# Spec: [alpha] Alpha Design", brief)
         self.assertIn("# Spec: [beta] Beta Design", brief)
 
     def test_one_spec_and_legacy_briefs_are_unlabeled(self):

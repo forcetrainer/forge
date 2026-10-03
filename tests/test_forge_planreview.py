@@ -723,8 +723,11 @@ class MultiSpecPlanTests(PlanCliMixin, unittest.TestCase):
                 "neither body.\n\n", packet)
 
     def test_packet_states_a_pass_carries_an_empty_findings_list(self):
-        self.assertIn("`pass` verdict still carries an empty `findings` list",
-                      p.build_packet(self.two))
+        packet = p.build_packet(self.two)
+        self.assertIn(
+            'A `pass` verdict carries `"findings": []`, and a `findings` '
+            "verdict carries at least one finding", packet)
+        self.assertNotIn("`pass` carries no `findings`", packet)
 
     def test_header_plan_without_spec_emits_packet(self):
         out = os.path.join(self.tmp, "packet.md")
@@ -748,8 +751,8 @@ class MultiSpecPlanTests(PlanCliMixin, unittest.TestCase):
 
     def test_neither_plan_nor_spec_exits_nonzero(self):
         result = self.run_cli([])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--spec", result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--spec is required unless --plan is given", result.stderr)
 
 
 if __name__ == "__main__":

@@ -1344,13 +1344,49 @@ class ForgeLintMultiSpecTests(unittest.TestCase):
     def test_unresolved_entry_is_reported_once_not_again_as_unclaimed(self):
         self._baseline()
         self._change("alpha", ("Alpha rule",))
-        errors = self._errors(
-            self._lint(_header_plan(_ONE_SPEC, "Alpha rule", "[alpha] Missing rule"))
-        )
-        mentioning = [d for d in errors if "Missing rule" in d.message]
-        self.assertEqual(len(mentioning), 1, errors)
-        self.assertEqual(mentioning[0].where, "task 2")
+        # Two unresolved entries on one task: the checklist step stops at the
+        # first, so only lint's own per-entry check reports the second.
+        errors = self._errors(self._lint(_header_plan(
+            _ONE_SPEC, "Alpha rule", "[alpha] Missing rule, [alpha] Absent rule")))
+        for name in ("Missing rule", "Absent rule"):
+            mentioning = [d for d in errors if name in d.message]
+            self.assertEqual(len(mentioning), 1, errors)
+            self.assertEqual(mentioning[0].where, "task 2")
         self.assertEqual([d for d in errors if d.where == "spec coverage"], [])
+
+    # --- repository root --------------------------------------------------
+
+    def test_plan_outside_repo_root_gets_no_spurious_checklist_error(self):
+        self._baseline()
+        elsewhere = tempfile.mkdtemp(prefix="forge-lint-plan-elsewhere-")
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        plan = os.path.join(elsewhere, "plan.md")
+        _write(plan, _header_plan(_ONE_SPEC, "Alpha rule"))
+        self.assertEqual(fl.lint_plan(plan, repo_root=self.repo), [])
+
+    def test_cli_without_repo_root_uses_the_git_root_above_the_plan(self):
+        self._baseline()
+        sub = os.path.join(self.repo, "docs", "deep")
+        os.makedirs(sub)
+        _write(self.plan_path, _header_plan(_ONE_SPEC, "Alpha rule"))
+        result = subprocess.run(
+            [sys.executable, SCRIPT, self.plan_path],
+            capture_output=True, text=True, cwd=sub,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_cli_explicit_repo_root_wins_over_the_plan_git_root(self):
+        self._baseline()
+        _write(self.plan_path, _header_plan(_ONE_SPEC, "Alpha rule"))
+        empty = tempfile.mkdtemp(prefix="forge-lint-empty-root-")
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        result = subprocess.run(
+            [sys.executable, SCRIPT, self.plan_path, "--repo-root", empty],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("names no file", result.stdout)
 
     # --- header checks ---------------------------------------------------
 
@@ -1358,7 +1394,10 @@ class ForgeLintMultiSpecTests(unittest.TestCase):
         self._baseline()
         header = "**Spec files:**\n- docs/forge/specs/alpha.md\n- docs/forge/specs/nope.md\n"
         errors = self._errors(self._lint(_header_plan(header, "[alpha] Alpha rule")))
-        named = [d for d in errors if "docs/forge/specs/nope.md" in d.message]
+        named = [
+            d for d in errors
+            if "docs/forge/specs/nope.md names no file" in d.message
+        ]
         self.assertEqual(len(named), 1, errors)
 
     def test_declared_path_outside_the_repository_root_is_refused_unopened(self):
@@ -1429,23 +1468,31 @@ class ForgeLintMultiSpecTests(unittest.TestCase):
 
     def test_entry_with_undeclared_id_names_task_entry_and_declared_ids(self):
         self._baseline()
-        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "[gamma] Alpha rule")))
-        found = [
-            d for d in errors
-            if d.where == "task 1" and "[gamma] Alpha rule" in d.message
-            and "alpha, beta" in d.message
-        ]
-        self.assertEqual(len(found), 1, errors)
+        # Two undeclared ids on one task: the checklist step stops at the
+        # first, so only lint's own per-entry check reports the second.
+        errors = self._errors(self._lint(
+            _header_plan(_TWO_SPECS, "[gamma] Alpha rule, [delta] Beta rule")))
+        for entry in ("[gamma] Alpha rule", "[delta] Beta rule"):
+            found = [
+                d for d in errors
+                if d.where == "task 1" and entry in d.message
+                and "alpha, beta" in d.message
+            ]
+            self.assertEqual(len(found), 1, errors)
 
     def test_bare_entry_in_two_spec_plan_names_task_and_entry(self):
         self._baseline()
-        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "Alpha rule")))
-        found = [
-            d for d in errors
-            if d.where == "task 1" and "'Alpha rule'" in d.message
-            and "alpha, beta" in d.message
-        ]
-        self.assertEqual(len(found), 1, errors)
+        # Two bare entries on one task: the checklist step stops at the
+        # first, so only lint's own per-entry check reports the second.
+        errors = self._errors(
+            self._lint(_header_plan(_TWO_SPECS, "Alpha rule, Beta rule")))
+        for entry in ("'Alpha rule'", "'Beta rule'"):
+            found = [
+                d for d in errors
+                if d.where == "task 1" and entry in d.message
+                and "alpha, beta" in d.message
+            ]
+            self.assertEqual(len(found), 1, errors)
 
     # --- undeclared changed spec ------------------------------------------
 

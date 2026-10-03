@@ -576,7 +576,7 @@ def _lint_depends(task_numbers, depends_map, canonical_depends):
 _TASK_SCOPED_MESSAGE_RE = re.compile(r"^task (\d+)\b")
 
 
-def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean):
+def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean, repo_root):
     """A checklist generates for every task and for ``--final``. An empty
     checklist is a legal plan (Phase 13 spec) — a warning, never an error.
 
@@ -595,7 +595,8 @@ def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean):
     defects = []
     for num in task_numbers:
         try:
-            forge_checklist.build_task_checklist(plan_path, spec_path, num)
+            forge_checklist.build_task_checklist(
+                plan_path, spec_path, num, repo_root=repo_root)
         except forge_plan.AcceptanceClauseError:
             continue  # reported once, with its plan line, by _field_clause_defects
         except RuntimeError as e:
@@ -605,7 +606,8 @@ def _lint_checklists(plan_path, spec_path, task_numbers, structural_clean):
 
     if task_numbers and structural_clean:
         try:
-            forge_checklist.build_final_checklist(plan_path, spec_path)
+            forge_checklist.build_final_checklist(
+                plan_path, spec_path, repo_root=repo_root)
         except forge_plan.AcceptanceClauseError:
             pass  # reported once, with its plan line, by _field_clause_defects
         except RuntimeError as e:
@@ -1087,7 +1089,8 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
     defects.extend(_lint_depends(task_numbers, depends_map, canonical_depends))
     if header_ok and (spec_set is not None or not declared):
         defects.extend(_lint_checklists(
-            plan_path, checklist_spec, task_numbers, structural_clean=not heading_defects,
+            plan_path, checklist_spec, task_numbers,
+            structural_clean=not heading_defects, repo_root=repo_root,
         ))
 
     if spec_set:
@@ -1115,13 +1118,31 @@ def main(argv):
     parser.add_argument(
         "--repo-root",
         help="repo root: both the tree whose managed project-memory files are checked and the git repository whose merge base is the spec-coverage baseline — pointing it outside a git repo disables that check "
-             "(default: cwd)",
+             "(default: the nearest directory holding .git above the plan; cwd with --specs)",
     )
     args = parser.parse_args(argv)
     # The CLI is an edge — a human is present — so it's the one place
-    # allowed to default repo_root to the process cwd; lint_plan itself
-    # never guesses.
-    repo_root = args.repo_root if args.repo_root is not None else os.getcwd()
+    # allowed to default repo_root; lint_plan itself never guesses. A plan
+    # defaults to the nearest .git above it, like extract-brief, the
+    # checklist and forge_docreview (the cwd when there is none); --specs
+    # has no plan and uses the cwd.
+    if args.repo_root is not None:
+        repo_root = args.repo_root
+    elif args.plan and not args.specs:
+        try:
+            repo_root = eb._find_repo_root(os.path.dirname(os.path.abspath(args.plan)))
+        except RuntimeError:
+            # No .git above the plan: the old default. Said aloud, since the
+            # cwd may be an unrelated repository.
+            repo_root = os.getcwd()
+            print(
+                "note: no repository found above {}; using the current "
+                "directory {} as the repository root (pass --repo-root to "
+                "set it)".format(args.plan, repo_root),
+                file=sys.stderr,
+            )
+    else:
+        repo_root = os.getcwd()
 
     if args.specs:
         try:

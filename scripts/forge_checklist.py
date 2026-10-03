@@ -126,7 +126,7 @@ def _acceptance_items(task_block, task_number):
     ]
 
 
-def build_task_checklist(plan_path, spec_path, task_number):
+def build_task_checklist(plan_path, spec_path, task_number, *, repo_root=None):
     """That task's own promises: plan **Global Constraints:** clauses + the
     task's **Tests:** cases + the task's **Acceptance:** prose clauses.
 
@@ -148,7 +148,10 @@ def build_task_checklist(plan_path, spec_path, task_number):
     # brief and review packet, so an unresolvable/ambiguous name is
     # still a defect to surface here — even though it contributes no
     # checklist item (spec: items are a final-review-only source).
-    _task_sections(task_block, task_number, eb.load_spec_set(plan_path, spec_path))
+    _task_sections(
+        task_block, task_number,
+        eb.load_spec_set(plan_path, spec_path, repo_root=repo_root),
+    )
 
     items = []
     items.extend(_global_constraint_items(gc_block))
@@ -196,10 +199,10 @@ def citable_refs(plan_path, spec_path, task_number):
     return refs
 
 
-def build_final_checklist(plan_path, spec_path):
+def build_final_checklist(plan_path, spec_path, *, repo_root=None):
     """Union of every task's **Spec:** sections + global constraints + every
     task's acceptance prose clauses + one t<N> integration item per task."""
-    items = _final_items(plan_path, spec_path)
+    items = _final_items(plan_path, spec_path, repo_root=repo_root)
     if not items:
         raise RuntimeError(
             "final checklist is empty — no spec sections, global constraints, "
@@ -208,7 +211,7 @@ def build_final_checklist(plan_path, spec_path):
     return items
 
 
-def _final_items(plan_path, spec_path):
+def _final_items(plan_path, spec_path, *, repo_root=None):
     """``build_final_checklist``'s items without its empty-checklist raise —
     shared with ``final_citable_refs``, which (like ``citable_refs``) must
     never raise on an empty set: a falsy citable set is "nothing to check
@@ -217,7 +220,7 @@ def _final_items(plan_path, spec_path):
     _, gc_block = eb.extract_header(lines)
     tasks = forge_plan.parse_plan_tasks(plan_path)
 
-    spec_set = eb.load_spec_set(plan_path, spec_path)
+    spec_set = eb.load_spec_set(plan_path, spec_path, repo_root=repo_root)
     items = list(_global_constraint_items(gc_block))
     seen_spec_ids = set()
 
