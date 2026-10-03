@@ -287,6 +287,9 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   - **Command clause** — begins with an inline-code span. Its whole text must be
     `` `<command>` <outcome> ``: one single-backtick span holding the command, one space,
     then exactly one outcome from the table below, nothing after it (no trailing period).
+    The command span is the clause's first span; the `` `<text>` `` span of a
+    `` prints `<text>` `` outcome is part of the outcome, never a command. A command
+    cannot contain a backtick — one that needs it goes in a script the clause runs.
   - **Prose clause** — begins with anything else. Never executed; inline code inside it
     is literal text (a path, a version string), never a command. It becomes a `t<N>.a<M>`
     checklist item for the reviewer.

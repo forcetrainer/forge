@@ -133,8 +133,8 @@ forge-run.py --status --run-dir DIR
    prompt = worker contract preamble + brief; the preamble is the corresponding
    `agents/*.md` body — single source shared with the Claude harness.
 3. Run each command clause directly and check its stated outcome (`pipeline` spec:
-   Acceptance clause grammar); prose clauses are never executed. Any clause missing its
-   outcome → rework iteration, whose finding names the first failing clause's command,
+   Acceptance clause grammar); prose clauses are never executed. Any clause whose command
+   does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via

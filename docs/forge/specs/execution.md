@@ -559,8 +559,8 @@ decision itself is not modified; a dropped finding never reaches it.
 Per task — standard and complex; trivial runs acceptance only, with no reviewer. Each
 attempt: worker → acceptance → reviewer → classify. Acceptance is green when every
 command clause meets its stated outcome; prose clauses are the reviewer's. An
-**execution failure** (worker crash, worker timeout, a command clause missing its
-outcome) preempts the reviewer and is treated as an
+**execution failure** (worker crash, worker timeout, a command clause not meeting
+its stated outcome) preempts the reviewer and is treated as an
 implicit `fix`-retry finding with no provenance and no impact: it never defers, never
 scope-halts, and never counts as a carried finding, but it is subject to the regression,
 acceptance-stuck and backstop rules. Then the decision is taken deterministically, in this precedence:
