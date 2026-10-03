@@ -157,8 +157,10 @@ verification), standard and complex tasks get a reviewer dispatched via
 `forge-run.py`'s `TIER_MAP`. Reviewer dispatch is at the **task's own tier**
 with fresh context, reading `TIER_MAP` directly — the reviewer's value is an
 independent pass, not a stronger model. The formerly-separate reviewer-model
-table is retired outright: there is no second table that could go silently
-stale against `TIER_MAP` on a model-churn edit.
+table is retired outright. The one other copy of these values is the Codex
+column of the routing table in `SKILL.md` and the command under Document
+reviews on Codex, below; a test fails if either differs from `TIER_MAP`, so
+neither can go silently stale on a model-churn edit.
 
 **Final review:** once every task passes, the runner dispatches one more
 `codex exec` call, at the model/effort for the **plan's highest task tier**
@@ -309,3 +311,25 @@ auto-deferral must not become a permanent issue.
 ad-hoc exploration, one-off review, anything that isn't dispatched by the
 runner. No forge machinery spawns them; the runner's `codex exec` calls are
 the only dispatch path a plan ever goes through.
+
+## Document reviews on Codex
+
+Spec review (brainstorming skill, step 8) and plan review (planning skill) each need a cold reviewer. `forge-run.py` does not start it — the session does, with this command. Use it as written; never pick a model from the Claude columns of the routing table.
+
+```bash
+codex exec -c agents.enabled=false --disable multi_agent_v2 --disable memories \
+  -m gpt-6.1-sol -c model_reasoning_effort=medium \
+  -c 'sandbox_mode="read-only"' \
+  --output-last-message <verdict-file> \
+  "Your review packet is the file <packet-path>. Read it and follow it exactly. Reply with the verdict JSON object and nothing else." \
+  < /dev/null
+```
+
+- **`< /dev/null` is required.** With a prompt argument and an open standard input, `codex exec` waits for more input and never starts; closing it is what lets the command run unattended.
+- **Model and effort** are the standard tier's, from the routing table in `SKILL.md`.
+- **The verdict** is the reviewer's last message: `--output-last-message` writes it to `<verdict-file>`, which is the file `forge_docreview.py --verdict` validates. The reviewer is read-only and writes no file itself.
+- **Scripts** live at the plugin root: `../../scripts/` from this skill directory. Do not search the working repo for them.
+- **An invalid verdict** gets one retry: run the command again, adding the defect list `forge_docreview.py` printed to the prompt after the packet path. A second invalid verdict is a contract error. Codex has no handle on the first reviewer to resume, so the retry is the fresh-reviewer form the skills name as the fallback.
+- **A re-review after an amendment** is the same command on the rebuilt packet.
+- **If the command fails to start a reviewer** — an unsupported model, a rejected flag, a non-zero exit with no verdict — stop and tell the user what failed. Do not retry with a different model, and never substitute a self-review: a first review is cold, or it has not happened.
+
