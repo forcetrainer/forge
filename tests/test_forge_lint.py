@@ -1220,6 +1220,287 @@ class ForgeLintChangedSpecCoverageTests(unittest.TestCase):
         self.assertEqual(self._coverage(_coverage_plan(None)), [])
 
 
+def _living_spec(system, sections=("Alpha rule",), body="Body."):
+    """A valid living spec: frontmatter, one ``## <section>`` per name, and a
+    well-formed changelog."""
+    parts = ["---\nsystem: {}\n---\n\n# Title\n".format(system)]
+    for name in sections:
+        parts.append("\n## {}\n\n{}\n".format(name, body))
+    parts.append("\n## Changelog\n\n2026-01-01: created.\n")
+    return "".join(parts)
+
+
+def _header_plan(spec_files, *spec_values):
+    """A plan whose header carries ``spec_files`` verbatim (``None`` omits
+    the field) and one task per given **Spec:** value."""
+    header = "# Plan header\n\n**Goal:** Ship the thing.\n"
+    if spec_files is not None:
+        header += spec_files + "\n"
+    blocks = []
+    for i, value in enumerate(spec_values, 1):
+        spec_line = "**Spec:** {}\n\n".format(value) if value else ""
+        blocks.append(
+            "# Task {n}\n\n### Task {n}: Thing {n}\n"
+            "- [ ] Done\n\n"
+            "**Files:**\n- Create: `f{n}.py`\n\n"
+            "{spec}"
+            "**Tests:**\n- it works\n\n"
+            "**Acceptance:** `python3 -m pytest -q` passes\n\n"
+            "**Tier:** `standard`\n\n"
+            "**Depends on:** nothing.\n".format(n=i, spec=spec_line)
+        )
+    return header + "\n" + "\n".join(blocks)
+
+
+_SPECS_DIR = "docs/forge/specs"
+_TWO_SPECS = (
+    "**Spec files:**\n- docs/forge/specs/alpha.md\n- docs/forge/specs/beta.md\n"
+)
+_ONE_SPEC = "**Spec files:** docs/forge/specs/alpha.md\n"
+
+
+class ForgeLintMultiSpecTests(unittest.TestCase):
+    """A plan declaring ``**Spec files:**``: header and entry checks, the
+    changed-section rule per declared spec, and the undeclared-changed-spec
+    warning (execution spec: Plan lint)."""
+
+    _git = ForgeLintChangedSpecCoverageTests._git
+    _init_repo = ForgeLintChangedSpecCoverageTests._init_repo
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="forge-lint-multispec-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.plan_path = os.path.join(self.repo, "plan.md")
+        os.makedirs(os.path.join(self.repo, _SPECS_DIR))
+
+    def _put(self, rel, text):
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _write(path, text)
+        return path
+
+    def _commit_all(self, message="c"):
+        self._git("add", "-A")
+        self._git("commit", "-qm", message)
+
+    def _baseline(self, *, alpha_sections=("Alpha rule",), beta_sections=("Beta rule",)):
+        """main holds both specs; the working branch starts from it."""
+        self._init_repo()
+        self._put(_SPECS_DIR + "/alpha.md", _living_spec("alpha", alpha_sections))
+        self._put(_SPECS_DIR + "/beta.md", _living_spec("beta", beta_sections))
+        self._commit_all("base")
+        self._git("checkout", "-q", "-b", "feature")
+
+    def _change(self, name, sections, body="Changed body."):
+        self._put(
+            "{}/{}.md".format(_SPECS_DIR, name), _living_spec(name, sections, body)
+        )
+        self._commit_all("change " + name)
+
+    def _lint(self, plan_text, spec_path=None):
+        _write(self.plan_path, plan_text)
+        return fl.lint_plan(self.plan_path, spec_path, repo_root=self.repo)
+
+    def _errors(self, defects):
+        return [d for d in defects if d.severity == "error"]
+
+    def _warnings(self, defects):
+        return [d for d in defects if d.severity == "warning"]
+
+    # --- coverage across declared specs ---------------------------------
+
+    def test_two_valid_specs_with_every_changed_section_named_lint_clean(self):
+        self._baseline()
+        self._change("alpha", ("Alpha rule",))
+        self._change("beta", ("Beta rule",))
+        defects = self._lint(
+            _header_plan(_TWO_SPECS, "[alpha] Alpha rule", "[beta] Beta rule")
+        )
+        self.assertEqual(defects, [])
+
+    def test_changed_section_in_second_spec_named_by_no_task_is_an_error(self):
+        self._baseline()
+        self._change("beta", ("Beta rule",))
+        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "[alpha] Alpha rule")))
+        coverage = [d for d in errors if d.where == "spec coverage"]
+        self.assertEqual(len(coverage), 1, errors)
+        self.assertIn("Beta rule", coverage[0].message)
+        self.assertIn("beta.md", coverage[0].message)
+        self.assertNotIn("alpha.md", coverage[0].message)
+
+    def test_entry_carrying_the_other_specs_id_does_not_claim_the_section(self):
+        self._baseline(alpha_sections=("Shared rule",), beta_sections=("Shared rule",))
+        self._change("beta", ("Shared rule",))
+        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "[alpha] Shared rule")))
+        coverage = [d for d in errors if d.where == "spec coverage"]
+        self.assertEqual(len(coverage), 1, errors)
+        self.assertIn("beta.md", coverage[0].message)
+
+    def test_bare_entry_in_one_spec_header_plan_claims_the_section(self):
+        self._baseline()
+        self._change("alpha", ("Alpha rule",))
+        self.assertEqual(self._lint(_header_plan(_ONE_SPEC, "Alpha rule")), [])
+
+    def test_unresolved_entry_is_reported_once_not_again_as_unclaimed(self):
+        self._baseline()
+        self._change("alpha", ("Alpha rule",))
+        errors = self._errors(
+            self._lint(_header_plan(_ONE_SPEC, "Alpha rule", "[alpha] Missing rule"))
+        )
+        mentioning = [d for d in errors if "Missing rule" in d.message]
+        self.assertEqual(len(mentioning), 1, errors)
+        self.assertEqual(mentioning[0].where, "task 2")
+        self.assertEqual([d for d in errors if d.where == "spec coverage"], [])
+
+    # --- header checks ---------------------------------------------------
+
+    def test_declared_path_naming_no_file_is_an_error_naming_the_path(self):
+        self._baseline()
+        header = "**Spec files:**\n- docs/forge/specs/alpha.md\n- docs/forge/specs/nope.md\n"
+        errors = self._errors(self._lint(_header_plan(header, "[alpha] Alpha rule")))
+        named = [d for d in errors if "docs/forge/specs/nope.md" in d.message]
+        self.assertEqual(len(named), 1, errors)
+
+    def test_declared_file_without_frontmatter_names_the_path_and_the_rule(self):
+        self._baseline()
+        self._put(_SPECS_DIR + "/gamma.md", "# Gamma\n\n## Gamma rule\n\nBody.\n")
+        header = "**Spec files:**\n- docs/forge/specs/alpha.md\n- docs/forge/specs/gamma.md\n"
+        errors = self._errors(self._lint(_header_plan(header, "[alpha] Alpha rule")))
+        named = [
+            d for d in errors
+            if "gamma.md" in d.message and "'system:'" in d.message
+        ]
+        self.assertEqual(len(named), 1, errors)
+
+    def test_two_declared_files_sharing_a_system_name_both_paths(self):
+        self._baseline()
+        self._put(_SPECS_DIR + "/alpha2.md", _living_spec("alpha"))
+        header = "**Spec files:**\n- docs/forge/specs/alpha.md\n- docs/forge/specs/alpha2.md\n"
+        errors = self._errors(self._lint(_header_plan(header, "[alpha] Alpha rule")))
+        shared = [
+            d for d in errors
+            if "alpha.md" in d.message and "alpha2.md" in d.message
+            and "spec id" in d.message
+        ]
+        self.assertEqual(len(shared), 1, errors)
+
+    def test_header_plan_linted_with_spec_path_is_an_error_naming_both(self):
+        self._baseline()
+        spec = os.path.join(self.repo, _SPECS_DIR, "alpha.md")
+        errors = self._errors(
+            self._lint(_header_plan(_ONE_SPEC, "Alpha rule"), spec_path=spec)
+        )
+        both = [
+            d for d in errors
+            if "**Spec files:**" in d.message and spec in d.message
+        ]
+        self.assertEqual(len(both), 1, errors)
+
+    def test_spec_files_marker_with_neither_bullet_nor_value_is_an_error(self):
+        self._baseline()
+        errors = self._errors(self._lint(_header_plan("**Spec files:**\n", None)))
+        marker = [d for d in errors if "Spec files" in d.message]
+        self.assertTrue(marker, errors)
+        self.assertTrue(all(d.where.startswith("line ") for d in marker), marker)
+
+    # --- entry checks ----------------------------------------------------
+
+    def test_entry_with_undeclared_id_names_task_entry_and_declared_ids(self):
+        self._baseline()
+        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "[gamma] Alpha rule")))
+        found = [
+            d for d in errors
+            if d.where == "task 1" and "[gamma] Alpha rule" in d.message
+            and "alpha, beta" in d.message
+        ]
+        self.assertEqual(len(found), 1, errors)
+
+    def test_bare_entry_in_two_spec_plan_names_task_and_entry(self):
+        self._baseline()
+        errors = self._errors(self._lint(_header_plan(_TWO_SPECS, "Alpha rule")))
+        found = [
+            d for d in errors
+            if d.where == "task 1" and "'Alpha rule'" in d.message
+            and "alpha, beta" in d.message
+        ]
+        self.assertEqual(len(found), 1, errors)
+
+    # --- undeclared changed spec ------------------------------------------
+
+    def _undeclared(self, plan_text=None):
+        defects = self._lint(plan_text or _header_plan(_ONE_SPEC, None))
+        return (
+            self._errors(defects),
+            [d for d in self._warnings(defects) if "beta.md" in d.message],
+        )
+
+    def test_modified_undeclared_spec_in_a_declared_directory_warns(self):
+        self._baseline()
+        self._change("beta", ("Beta rule",))
+        errors, warnings = self._undeclared()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertEqual(warnings[0].severity, "warning")
+
+    def test_added_undeclared_spec_in_a_declared_directory_warns(self):
+        self._baseline()
+        self._put(_SPECS_DIR + "/beta.md", _living_spec("beta"))  # unchanged
+        self._put(_SPECS_DIR + "/delta.md", _living_spec("delta", ("Delta rule",)))
+        self._commit_all("add delta")
+        defects = self._lint(_header_plan(_ONE_SPEC, None))
+        warnings = [d for d in self._warnings(defects) if "delta.md" in d.message]
+        self.assertEqual(len(warnings), 1, defects)
+        self.assertEqual(self._errors(defects), [])
+
+    def test_undeclared_spec_changed_only_in_its_changelog_does_not_warn(self):
+        self._baseline()
+        text = _living_spec("beta", ("Beta rule",)).replace(
+            "2026-01-01: created.", "2026-01-01: created.\n2026-01-02: amended."
+        )
+        self._put(_SPECS_DIR + "/beta.md", text)
+        self._commit_all("changelog only")
+        errors, warnings = self._undeclared()
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_undeclared_spec_deleted_since_the_merge_base_does_not_warn(self):
+        self._baseline()
+        self._git("rm", "-q", _SPECS_DIR + "/beta.md")
+        self._git("commit", "-qm", "delete beta")
+        errors, warnings = self._undeclared()
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_undeclared_changed_file_in_a_subdirectory_does_not_warn(self):
+        self._baseline()
+        self._put(_SPECS_DIR + "/sub/beta.md", _living_spec("beta"))
+        self._commit_all("nested")
+        errors, warnings = self._undeclared()
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_legacy_plan_produces_no_undeclared_spec_warning(self):
+        self._baseline()
+        self._change("beta", ("Beta rule",))
+        spec = os.path.join(self.repo, _SPECS_DIR, "alpha.md")
+        defects = self._lint(_header_plan(None, None), spec_path=spec)
+        self.assertEqual([d for d in defects if "beta.md" in d.message], [])
+
+    def test_no_resolvable_merge_base_produces_no_undeclared_warning(self):
+        self._init_repo(branch="trunk")  # no main/master: no default branch
+        self._put(_SPECS_DIR + "/alpha.md", _living_spec("alpha"))
+        self._put(_SPECS_DIR + "/beta.md", _living_spec("beta"))
+        self._commit_all("base")
+        self._put(_SPECS_DIR + "/beta.md", _living_spec("beta", body="Edited."))
+        errors, warnings = self._undeclared()
+        self.assertEqual((errors, warnings), ([], []))
+
+    # --- legacy ------------------------------------------------------------
+
+    def test_legacy_plan_with_spec_path_lints_as_before(self):
+        self._baseline()
+        spec = os.path.join(self.repo, _SPECS_DIR, "alpha.md")
+        defects = self._lint(_header_plan(None, "Alpha rule"), spec_path=spec)
+        self.assertEqual(defects, [])
+
+
 class PlanningSkillTemplateTests(unittest.TestCase):
     """The authoring front door: the task-structure template in
     `skills/planning/SKILL.md` is what plan authors copy, so every field form

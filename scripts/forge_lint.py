@@ -74,9 +74,9 @@ def _warning(where, message):
 # the parsing path on purpose, and the regex/scan below exist only to decide
 # whether to raise, never to produce clauses.
 #
-# ``**Global Constraints:**`` lives in the plan header only (a line with
-# that literal prefix inside a task block is task content, per
-# ``eb.extract_header``), so its scan is bounded to the header region;
+# ``**Global Constraints:**`` and ``**Spec files:**`` live in the plan header
+# only (a line with that literal prefix inside a task block is task content,
+# per ``eb.extract_header``), so their scan is bounded to the header region;
 # ``**Tests:**``/``**Acceptance:**`` are task content and need no such
 # boundary — ``eb.parse_field_clauses`` finds its own marker and stops at
 # the first blank line or next ``**Field:**``, wherever the scan starts it.
@@ -85,7 +85,9 @@ _FIELD_CLAUSE_PREFIXES = {
     "Tests": "**Tests:**",
     "Acceptance": "**Acceptance:**",
     "Global Constraints": "**Global Constraints:**",
+    "Spec files": "**Spec files:**",
 }
+_HEADER_ONLY_FIELDS = ("Global Constraints", "Spec files")
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+")
 
@@ -168,7 +170,7 @@ def _field_clause_defects(lines, mask):
         if mask[i]:
             continue
         for field_name, prefix in _FIELD_CLAUSE_PREFIXES.items():
-            if field_name == "Global Constraints" and i >= header_end:
+            if field_name in _HEADER_ONLY_FIELDS and i >= header_end:
                 continue
             if not line.startswith(prefix):
                 continue
@@ -488,7 +490,7 @@ def _parse_task_tier(block, where, num):
         os.remove(tmp_path)
 
 
-def _lint_task_fields(blocks, spec_lines):
+def _lint_task_fields(blocks, spec_set):
     """Per-task Tier, Acceptance-present, Tests, and Spec checks against
     every locatable block (canonical, duplicate, or wrong-level — see
     ``_lint_heading_structure``); also returns each canonical task's parsed
@@ -496,7 +498,9 @@ def _lint_task_fields(blocks, spec_lines):
     raises) for the cross-task check in ``_lint_depends``.
 
     Tests grammar reuses ``eb.parse_test_cases`` exactly like the Spec check
-    reuses ``eb.parse_spec_names``: a raise (inline joined cases, or a
+    reuses ``eb.parse_spec_entries``/``eb.resolve_entries`` (``spec_set`` is
+    ``None`` when entries cannot be resolved: no spec, or a declared set
+    already reported broken): a raise (inline joined cases, or a
     marker followed by neither bullets nor ``none``) becomes an ``error``
     defect naming the task, never a silent empty checklist. A task with no
     ``**Tests:**`` field returns ``[]`` from the parser and is legal."""
@@ -517,15 +521,16 @@ def _lint_task_fields(blocks, spec_lines):
             defects.append(_error(where, str(e)))
 
         try:
-            spec_names = eb.parse_spec_names(block)
+            entries = eb.parse_spec_entries(block)
         except RuntimeError as e:
             defects.append(_error(where, str(e)))
-            spec_names = []
-        if spec_names and spec_lines is not None:
-            try:
-                eb.find_spec_sections(spec_lines, spec_names)
-            except RuntimeError as e:
-                defects.append(_error(where, str(e)))
+            entries = []
+        if spec_set:
+            for entry in entries:
+                try:
+                    eb.resolve_entries([entry], spec_set, num)
+                except RuntimeError as e:
+                    defects.append(_error(where, str(e)))
 
         depends_map[(where, num)] = forge_plan._parse_depends(
             forge_plan._field_value(block_lines, block_mask, "Depends on") or ""
@@ -794,12 +799,7 @@ def _baseline_ref(repo_root):
     not wrong merely because lint cannot establish what the branch changed.
     That is deliberately a different outcome from ``_GIT_UNREADABLE``, which
     means git could not answer at all."""
-    default = _default_branch(repo_root)
-    if default:
-        base = _git(repo_root, "merge-base", "HEAD", default)
-        if _ok(base) and base.stdout.strip():
-            return base.stdout.decode("utf-8", "replace").strip()
-    return "HEAD"
+    return _merge_base(repo_root) or "HEAD"
 
 
 def _committed_spec_lines(spec_path, repo_root):
@@ -835,70 +835,175 @@ def _committed_spec_lines(spec_path, repo_root):
         return _GIT_UNREADABLE
 
 
-def _claimed_keys(blocks, spec_lines):
-    """Every section key claimed by some task's ``**Spec:**`` line, each
-    claimed name pulling in its whole subtree. A name that doesn't resolve
-    (or resolves ambiguously) is skipped here — ``_lint_task_fields``
-    already reports it, and swallowing the coverage check over it would let
-    one typo hide every gap."""
-    headings = _spec_headings(spec_lines)
+def _claimed_keys(blocks, spec_set):
+    """``{spec path: set of section keys}`` claimed by some task's
+    ``**Spec:**`` entry, each claimed name pulling in its whole subtree. A
+    spec's claimed set comes only from entries that resolve in that spec; an
+    entry that doesn't resolve (or resolves ambiguously) claims nothing here —
+    ``_lint_task_fields`` already reports it, and swallowing the coverage
+    check over it would let one typo hide every gap."""
+    headings = {}
     by_raw = {}
-    for n, (level, raw, _key, _start) in enumerate(headings):
-        by_raw.setdefault(raw, n)
+    for spec in spec_set:
+        headings[spec.path] = _spec_headings(eb.read_lines(spec.path))
+        index = by_raw[spec.path] = {}
+        for n, (_level, raw, _key, _start) in enumerate(headings[spec.path]):
+            index.setdefault(eb.collapse_ws(raw), n)
 
-    claimed = set()
-    for _where, _num, block in blocks:
+    claimed = {spec.path: set() for spec in spec_set}
+    for _where, num, block in blocks:
         try:
-            names = eb.parse_spec_names(block)
+            entries = eb.parse_spec_entries(block)
         except RuntimeError:
             continue
-        for name in names:
+        for entry in entries:
             try:
-                sections = eb.find_spec_sections(spec_lines, [name])
+                section = eb.resolve_entries([entry], spec_set, num)[0]
             except RuntimeError:
                 continue
-            n = by_raw.get(sections[0][0])
+            spec_headings = headings[section.spec.path]
+            n = by_raw[section.spec.path].get(section.heading)
             if n is None:
                 continue
-            level = headings[n][0]
-            claimed.add(headings[n][2])
-            for m in range(n + 1, len(headings)):
-                if headings[m][0] <= level:
+            level = spec_headings[n][0]
+            keys = claimed[section.spec.path]
+            keys.add(spec_headings[n][2])
+            for m in range(n + 1, len(spec_headings)):
+                if spec_headings[m][0] <= level:
                     break
-                claimed.add(headings[m][2])
+                keys.add(spec_headings[m][2])
     return claimed
 
 
-def _lint_spec_coverage(spec_path, spec_lines, blocks, repo_root):
-    """Every spec section changed since the branch's merge base with the
-    default branch is named by some task's ``**Spec:**`` line. ``##
-    Changelog`` and ``## Risks / constraints`` are exempt; a spec with no
-    committed version has every section changed; a git read that cannot
-    answer emits nothing. Every unclaimed section is reported, never the
-    first only."""
+def _changed_sections(spec_path, spec_lines, repo_root):
+    """``[(raw heading, key)]`` for every non-exempt section of the spec whose
+    own body differs from the baseline's, in document order; ``[]`` when git
+    cannot answer. A spec with no committed version has every section
+    changed."""
     committed = _committed_spec_lines(spec_path, repo_root)
     if committed is _GIT_UNREADABLE:
         return []
 
     old_bodies = {} if committed is None else _section_bodies(committed)
     new_bodies = _section_bodies(spec_lines)
-    claimed = _claimed_keys(blocks, spec_lines)
 
-    defects = []
+    changed = []
     seen = set()
     for _level, raw, key, _start in _spec_headings(spec_lines):
-        if key in seen or key in _EXEMPT_KEYS or key in claimed:
+        if key in seen or key in _EXEMPT_KEYS:
             continue
         body = new_bodies.get(key, "")
         if not body or body == old_bodies.get(key):
             continue
         seen.add(key)
-        defects.append(_error(
+        changed.append((raw, key))
+    return changed
+
+
+def _lint_spec_coverage(spec_path, spec_lines, claimed, repo_root, shown=None):
+    """Every spec section changed since the branch's merge base with the
+    default branch is in ``claimed`` — the section keys some task's
+    ``**Spec:**`` entry names. ``## Changelog`` and ``## Risks / constraints``
+    are exempt; a spec with no committed version has every section changed; a
+    git read that cannot answer emits nothing. Every unclaimed section is
+    reported, never the first only."""
+    return [
+        _error(
             "spec coverage",
             'changed spec section "{}" in {} is named by no task\'s '
-            "**Spec:** line".format(raw, spec_path),
-        ))
-    return defects
+            "**Spec:** line".format(raw, shown or spec_path),
+        )
+        for raw, key in _changed_sections(spec_path, spec_lines, repo_root)
+        if key not in claimed
+    ]
+
+
+def _merge_base(repo_root):
+    """The branch's merge base with the default branch, or ``None`` when none
+    resolves (the default branch's own unborn or detached HEAD, a repo with no
+    recognizable default branch)."""
+    default = _default_branch(repo_root)
+    if default:
+        base = _git(repo_root, "merge-base", "HEAD", default)
+        if _ok(base) and base.stdout.strip():
+            return base.stdout.decode("utf-8", "replace").strip()
+    return None
+
+
+def _lint_undeclared_specs(spec_set, repo_root):
+    """A warning for each ``.md`` file directly in a directory holding a
+    declared spec that is not itself declared and was added or modified since
+    the merge base in some non-exempt section (execution spec: Plan lint).
+    Deleted files are not on disk and never warn; subdirectories are not
+    searched. Inert when no merge base resolves."""
+    if _merge_base(repo_root) is None:
+        return []
+    declared = {os.path.abspath(spec.path) for spec in spec_set}
+    warnings = []
+    for directory in sorted({os.path.dirname(os.path.abspath(s.path)) for s in spec_set}):
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
+            if not name.endswith(".md") or not os.path.isfile(path) or path in declared:
+                continue
+            if _changed_sections(path, eb.read_lines(path), repo_root):
+                rel = os.path.relpath(path, repo_root).replace(os.sep, "/")
+                warnings.append(_warning(
+                    "undeclared spec",
+                    "{} changed since the merge base but the plan's **Spec "
+                    "files:** does not declare it — declare it, or record why "
+                    "it is not this plan's".format(rel),
+                ))
+    return warnings
+
+
+def _lint_declared_specs(declared, repo_root):
+    """``(defects, spec_set)`` for a plan's ``**Spec files:**`` paths: a path
+    naming no file, a file failing a living-spec rule, and two files sharing a
+    spec id are each reported, all in one pass. ``spec_set`` is the usable
+    ``SpecFile`` list, or ``None`` when any declared file is defective —
+    resolving entries against a partial set would misjudge ids and bare
+    entries."""
+    defects = []
+    spec_set = []
+    ids = {}
+    clean = True
+    for rel in declared:
+        path = os.path.join(repo_root, rel)
+        if not os.path.isfile(path):
+            defects.append(_error(
+                "plan header",
+                "**Spec files:** path {} names no file ({})".format(rel, path),
+            ))
+            clean = False
+            continue
+        try:
+            problems = lint_living_spec(path, repo_root=repo_root)
+            system = parse_frontmatter(eb.read_lines(path))[0].get("system")
+        except RuntimeError as e:
+            problems, system = [str(e)], None
+        for problem in problems:
+            defects.append(_error(
+                "plan header",
+                "**Spec files:** path {} is not a living spec — {}".format(rel, problem),
+            ))
+        if problems:
+            clean = False
+        if system:
+            if system in ids:
+                defects.append(_error(
+                    "plan header",
+                    "**Spec files:** {} and {} share the spec id {!r}".format(
+                        ids[system], rel, system),
+                ))
+                clean = False
+            else:
+                ids[system] = rel
+        spec_set.append(eb.SpecFile(path, system))
+    return defects, (spec_set if clean else None)
 
 
 def lint_plan(plan_path, spec_path=None, *, repo_root):
@@ -942,9 +1047,31 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
     except RuntimeError as e:
         defects.append(_error("plan header", str(e)))
 
-    spec_lines = eb.read_lines(spec_path) if spec_path else None
+    try:
+        declared = eb.parse_spec_files(lines)
+        header_ok = True
+    except RuntimeError:
+        declared, header_ok = [], False  # reported once, by _field_clause_defects
 
-    field_defects, depends_map = _lint_task_fields(blocks, spec_lines)
+    spec_set = None  # None: entries cannot be resolved against a spec set
+    checklist_spec = spec_path
+    if not header_ok:
+        pass
+    elif declared:
+        spec_defects, spec_set = _lint_declared_specs(declared, repo_root)
+        defects.extend(spec_defects)
+        if spec_path:
+            defects.append(_error(
+                "plan header",
+                "plan declares **Spec files:** and spec path {} was also given "
+                "— a plan with the header is linted without one".format(spec_path),
+            ))
+            checklist_spec = None
+    elif spec_path:
+        eb.read_lines(spec_path)  # a legacy plan's spec must exist
+        spec_set = [eb.SpecFile(spec_path, None, False)]
+
+    field_defects, depends_map = _lint_task_fields(blocks, spec_set)
     defects.extend(field_defects)
 
     canonical_depends = {
@@ -952,12 +1079,21 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
         if where == "task {}".format(num)
     }
     defects.extend(_lint_depends(task_numbers, depends_map, canonical_depends))
-    defects.extend(_lint_checklists(
-        plan_path, spec_path, task_numbers, structural_clean=not heading_defects,
-    ))
+    if header_ok and (spec_set is not None or not declared):
+        defects.extend(_lint_checklists(
+            plan_path, checklist_spec, task_numbers, structural_clean=not heading_defects,
+        ))
 
-    if spec_lines is not None:
-        defects.extend(_lint_spec_coverage(spec_path, spec_lines, blocks, repo_root))
+    if spec_set:
+        claimed = _claimed_keys(blocks, spec_set)
+        for spec in spec_set:
+            shown = os.path.relpath(spec.path, repo_root) if spec.declared else spec.path
+            defects.extend(_lint_spec_coverage(
+                spec.path, eb.read_lines(spec.path), claimed[spec.path], repo_root,
+                shown.replace(os.sep, "/"),
+            ))
+        if declared:
+            defects.extend(_lint_undeclared_specs(spec_set, repo_root))
 
     return _dedup(defects)
 
