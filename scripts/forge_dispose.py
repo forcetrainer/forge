@@ -363,7 +363,7 @@ def validate_finding_ids(verdict):
 def validate_contract_refs(verdict, citable):
     """Validate that every finding's non-null ``contract_ref`` names a
     citable ref for this review — a coverage item, or (per-task review only)
-    a ``spec:<slug>`` section the task declares (Contract checklist: covering
+    a ``spec:<heading>`` section the task declares (Contract checklist: covering
     and citing are different acts). Returns a list of human-readable defect
     strings — empty means valid — in the same shape as ``validate_coverage``/
     ``validate_locations``/``validate_finding_ids``, so it feeds the same
@@ -840,7 +840,7 @@ def main(argv=None):
         "--citable", default=None,
         help="path to a JSON array of citable ref id strings (forge_"
              "checklist.citable_refs output — coverage items plus declared "
-             "spec:<slug> sections); when given, a finding's non-null "
+             "spec:<heading> sections); when given, a finding's non-null "
              "contract_ref outside this set is a defect. Omitted: contract_ref "
              "membership is not enforced.",
     )

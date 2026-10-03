@@ -1154,8 +1154,10 @@ class RunnerCoverageWiringTests(unittest.TestCase):
         # A task's checklist is the task's own promises, not the spec's
         # assertions: spec: items are a final-review-only source (Contract
         # checklist spec). "Some Section" still reaches the packet as spec
-        # context, just not as a coverage item.
-        self.assertNotIn("spec:Some Section", packet)
+        # context, just not as a coverage item. It is citable, so it is
+        # printed under '## Citable refs' but never as a checklist line.
+        self.assertNotIn("- spec:Some Section \u2014", packet)
+        self.assertIn("- spec:Some Section\n", packet)
         self.assertIn("t1.a1", packet)
 
     def test_incomplete_coverage_triggers_one_retry_naming_missing_ids(self):

@@ -49,7 +49,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Every reviewer input prints its citable ids
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `scripts/forge_checklist.py` (`render_citable_section`; CLI accepts `--citable --format md`; `<slug>` docstrings become `<heading>`)

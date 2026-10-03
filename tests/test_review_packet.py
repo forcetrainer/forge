@@ -621,6 +621,35 @@ class BuildPacketSpecContextTests(unittest.TestCase):
         self.assertNotIn("## Spec context", content)
 
 
+class BuildCitableSectionTests(unittest.TestCase):
+    def test_identical_to_forge_checklist_render_citable_section(self):
+        import forge_checklist
+        ids = ["t1.t2", "spec:Alpha  section", "g1"]
+        self.assertEqual(
+            rp.build_citable_section(ids),
+            forge_checklist.render_citable_section(ids),
+        )
+
+    def test_build_packet_with_citable_contains_section_with_every_id(self):
+        packet = rp.build_packet(
+            "### Task 1: First task\n- [ ] Done\n", "HEAD", "",
+            citable={"t1.a1", "spec:Alpha section"},
+        )
+        self.assertIn("## Citable refs", packet)
+        self.assertIn("- t1.a1\n", packet)
+        self.assertIn("- spec:Alpha section\n", packet)
+
+    def test_build_packet_without_citable_is_unchanged(self):
+        base = rp.build_packet("### Task 1: First task\n- [ ] Done\n", "HEAD", "")
+        self.assertNotIn("Citable refs", base)
+        self.assertEqual(
+            base,
+            rp.build_packet(
+                "### Task 1: First task\n- [ ] Done\n", "HEAD", "", citable=None,
+            ),
+        )
+
+
 # --- forge_git._packet_for(spec_path=...) — Task 8 ---
 
 

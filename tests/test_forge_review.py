@@ -891,7 +891,8 @@ class ReviewVerdictInstructionTests(unittest.TestCase):
 
     def test_contract_ref_requires_a_citable_ref_from_this_review(self):
         instr = forge_common.REVIEW_VERDICT_INSTRUCTION
-        self.assertIn("a checklist id from this review's packet", instr)
+        self.assertIn("copied verbatim from the '## Citable refs' list", instr)
+        self.assertNotIn("slug", instr)
 
     def test_unverifiable_requires_reason_but_no_backing_finding(self):
         instr = forge_common.REVIEW_VERDICT_INSTRUCTION

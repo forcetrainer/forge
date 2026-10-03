@@ -1069,7 +1069,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 task.number,
             )
             # citable_refs is wider than checklist: this task's coverage
-            # items plus the spec:<slug> id of every section its **Spec:**
+            # items plus the spec:<heading> id of every section its **Spec:**
             # line names — a finding may cite a spec section it must never
             # be asked to render coverage on (Contract checklist: covering
             # and citing are different acts). Never raises "is empty" (no
@@ -1120,7 +1120,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     if checklist else checklist
                 )
                 packet_text = rp.build_verification_packet(
-                    prior_findings, delta_diff, checklist
+                    prior_findings, delta_diff, checklist, citable=citable
                 )
                 packet_path = os.path.join(
                     run_dir, "task-{}-review.md".format(task.number)
@@ -1131,7 +1131,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
-                    spec_path=spec_path,
+                    spec_path=spec_path, citable=citable,
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
@@ -1565,7 +1565,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     # same treatment the per-task path gives `citable_refs` (see execute_task).
     # It must not be re-derived from the packet's checklist: a verification
     # lap's packet carries the REDUCED checklist, so falling back to it would
-    # reject a legitimate whole-plan ref (a `spec:<slug>`, or a `t<N>`
+    # reject a legitimate whole-plan ref (a `spec:<heading>`, or a `t<N>`
     # integration item) no outstanding finding happened to name. It is also
     # wider than the final checklist by every task's `t<N>.t<M>` id, so a
     # seeded per-task finding replayed into the discovery packet can re-cite
@@ -1666,7 +1666,8 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                     if checklist else checklist
                 )
                 packet_text = rp.build_verification_packet(
-                    prior_findings, delta_diff, packet_checklist
+                    prior_findings, delta_diff, packet_checklist,
+                    citable=final_citable,
                 )
                 packet_path = os.path.join(run_dir, "final-review.md")
                 with open(packet_path, "w", encoding="utf-8") as f:
@@ -1676,6 +1677,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 packet_path = _final_packet(
                     spec_path, run_base, diff, run_dir,
                     prior_findings=prior_findings or None, checklist=checklist,
+                    citable=final_citable,
                 )
 
             review_resume_state = {

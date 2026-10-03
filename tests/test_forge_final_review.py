@@ -676,5 +676,38 @@ class FinalReviewCitableSetTests(unittest.TestCase):
         self.assertEqual(outcome.status, "passed")
 
 
+class FinalPacketCitableTests(unittest.TestCase):
+    def test_final_packet_contains_the_final_citable_set_including_task_test_ids(self):
+        import forge_git
+        d = tempfile.mkdtemp(prefix="forge-final-packet-citable-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        plan = os.path.join(d, "plan.md")
+        with open(plan, "w") as f:
+            f.write(PLAN_FINAL_WITH_TESTS)
+        citable = forge_checklist.final_citable_refs(plan, spec)
+        path = forge_git._final_packet(
+            spec, "HEAD", "", d, citable=citable,
+        )
+        with open(path) as f:
+            packet = f.read()
+        self.assertIn("## Citable refs", packet)
+        self.assertIn("- t1.t1\n", packet)
+        self.assertIn("- spec:Alpha section\n", packet)
+
+    def test_final_packet_without_citable_has_no_section(self):
+        import forge_git
+        d = tempfile.mkdtemp(prefix="forge-final-packet-nocitable-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        path = forge_git._final_packet(spec, "HEAD", "", d)
+        with open(path) as f:
+            self.assertNotIn("Citable refs", f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

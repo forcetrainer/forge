@@ -4,7 +4,7 @@ self-contained review packet for a reviewer.
 
 Usage:
     review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
-        [--prior-findings <path>] [--checklist <path>]
+        [--prior-findings <path>] [--checklist <path>] [--citable <path>]
 
 Never emits a silently thin packet: any failure to locate the task block or
 to run git exits nonzero with a message on stderr.
@@ -225,8 +225,19 @@ def build_prior_findings_section(prior_findings):
     )
 
 
+def build_citable_section(ids):
+    """Render a '## Citable refs' markdown section, one '- <id>' line per id,
+    sorted — byte-identical to forge_checklist.render_citable_section (kept
+    as a local copy for the same reason as build_checklist_section: this
+    module is loaded before forge_checklist can be imported)."""
+    lines = ["## Citable refs", ""]
+    lines.extend("- {}".format(i) for i in sorted(set(ids)))
+    return "\n".join(lines) + "\n"
+
+
 def build_packet(task_block, base, diff_output, prior_findings=None,
-                  checklist=None, review_kind=None, *, spec_sections=None):
+                  checklist=None, review_kind=None, *, spec_sections=None,
+                  citable=None):
     """``review_kind`` (None by default) opts into the '## Review kind'
     marker — the CLI (main(), below) never passes it, so its output stays
     byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
@@ -239,7 +250,11 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
     context' section right after the diff. Omitted or empty, no section is
     added and the packet is unchanged (Contract checklist spec: spec
     sections are context the reviewer reads, never a checklist item it must
-    return a verdict on)."""
+    return a verdict on).
+
+    ``citable`` (keyword-only, None by default) is the review's citable id set,
+    rendered as a '## Citable refs' section after the checklist; ``None``
+    omits it and leaves the packet unchanged."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -258,6 +273,8 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
         packet += "\n" + build_spec_context_section(spec_sections)
     if checklist is not None:
         packet += "\n" + build_checklist_section(checklist)
+    if citable is not None:
+        packet += "\n" + build_citable_section(citable)
     if prior_findings is not None:
         packet += "\n" + build_prior_findings_section(prior_findings)
     if review_kind is not None:
@@ -265,7 +282,8 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
     return packet
 
 
-def build_verification_packet(findings, delta_diff, checklist, review_kind="verification"):
+def build_verification_packet(findings, delta_diff, checklist, review_kind="verification",
+                              citable=None):
     """Delta-scoped verification packet for a resumed reviewer (Delta-scoped
     verification packets spec): the outstanding findings + the repair delta +
     the reduced checklist — never the task block, the full spec, or the
@@ -306,6 +324,8 @@ def build_verification_packet(findings, delta_diff, checklist, review_kind="veri
     packet = findings_section + "\n" + delta_section
     if checklist is not None:
         packet += "\n" + build_checklist_section(checklist)
+    if citable is not None:
+        packet += "\n" + build_citable_section(citable)
     if review_kind is not None:
         packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
@@ -331,7 +351,40 @@ def main(argv=None):
         help="JSON file of checklist items (forge_checklist.py --format json "
         "output); appends a '## Contract checklist' section to the packet",
     )
+    parser.add_argument(
+        "--citable",
+        default=None,
+        metavar="PATH",
+        help="JSON file of citable ids (forge_checklist.py --citable output); "
+        "appends a '## Citable refs' section to the packet",
+    )
     args = parser.parse_args(argv)
+
+    citable = None
+    if args.citable is not None:
+        try:
+            with open(args.citable, "r", encoding="utf-8") as f:
+                citable = json.load(f)
+        except OSError as e:
+            print(
+                "error: cannot read citable file {}: {}".format(args.citable, e),
+                file=sys.stderr,
+            )
+            return 1
+        except json.JSONDecodeError as e:
+            print(
+                "error: citable file {} is not valid JSON: {}".format(args.citable, e),
+                file=sys.stderr,
+            )
+            return 1
+        if not isinstance(citable, list) or not all(isinstance(i, str) for i in citable):
+            print(
+                "error: citable file {} must be a JSON array of id strings".format(
+                    args.citable
+                ),
+                file=sys.stderr,
+            )
+            return 1
 
     prior_findings = None
     if args.prior_findings is not None:
@@ -422,7 +475,8 @@ def main(argv=None):
         return 1
 
     packet = build_packet(
-        task_block, args.base, diff_output, prior_findings, checklist
+        task_block, args.base, diff_output, prior_findings, checklist,
+        citable=citable,
     )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()
