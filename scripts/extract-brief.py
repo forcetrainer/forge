@@ -505,6 +505,25 @@ def _find_repo_root(start):
         cur = parent
 
 
+def resolve_declared_path(repo_root, rel):
+    """A ``**Spec files:**`` path joined to the repository root, refused when
+    it resolves outside that root. Raised before the file is opened: a
+    declared spec's sections are pasted into briefs and packets, and lint
+    scans its directory, so an absolute path, a ``..`` climb or a symlink
+    must not reach outside the repository. The single gate — ``load_spec_set``
+    and ``forge_lint`` both resolve declared paths through it, so neither can
+    open a path the other refuses."""
+    path = os.path.join(repo_root, rel)
+    real_root = os.path.realpath(repo_root)
+    if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
+        raise RuntimeError(
+            f"**Spec files:** path {rel} resolves outside the repository "
+            f"root ({real_root}) — a declared spec path is relative to the "
+            "repository root and stays inside it"
+        )
+    return path
+
+
 def load_spec_set(plan_path, legacy_spec_path=None, repo_root=None):
     """The plan's spec set. A plan declaring ``**Spec files:**`` reads each
     path against the repository root; a legacy plan's set is its ``--spec``
@@ -526,19 +545,8 @@ def load_spec_set(plan_path, legacy_spec_path=None, repo_root=None):
         repo_root = _find_repo_root(os.path.dirname(os.path.abspath(plan_path)))
     spec_set = []
     seen = {}
-    real_root = os.path.realpath(repo_root)
     for rel in declared:
-        path = os.path.join(repo_root, rel)
-        # Refused before the file is opened: a declared path is repo-relative,
-        # and its sections are pasted into briefs and packets. An absolute
-        # path, a `..` climb or a symlink must not reach outside the root.
-        real = os.path.realpath(path)
-        if os.path.commonpath([real_root, real]) != real_root:
-            raise RuntimeError(
-                f"**Spec files:** path {rel} resolves outside the repository "
-                f"root ({real_root}) — a declared spec path is relative to the "
-                "repository root and stays inside it"
-            )
+        path = resolve_declared_path(repo_root, rel)
         if not os.path.isfile(path):
             raise RuntimeError(f"**Spec files:** path {rel} names no file ({path})")
         spec_id = _spec_id_of(path)

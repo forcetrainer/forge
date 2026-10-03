@@ -972,7 +972,13 @@ def _lint_declared_specs(declared, repo_root):
     ids = {}
     clean = True
     for rel in declared:
-        path = os.path.join(repo_root, rel)
+        try:
+            path = eb.resolve_declared_path(repo_root, rel)
+        except RuntimeError as e:
+            # Refused on the path alone, never opened (extract-brief's gate).
+            defects.append(_error("plan header", str(e)))
+            clean = False
+            continue
         if not os.path.isfile(path):
             defects.append(_error(
                 "plan header",

@@ -1361,6 +1361,28 @@ class ForgeLintMultiSpecTests(unittest.TestCase):
         named = [d for d in errors if "docs/forge/specs/nope.md" in d.message]
         self.assertEqual(len(named), 1, errors)
 
+    def test_declared_path_outside_the_repository_root_is_refused_unopened(self):
+        # A real, valid living spec outside the root, reached by `..`. Lint
+        # must refuse it on the path alone: opening it would also make lint
+        # scan and report on the files of a directory outside the repo.
+        self._baseline()
+        outside = tempfile.mkdtemp(prefix="forge-lint-outside-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        _write(os.path.join(outside, "omega.md"), _living_spec("omega", ("Omega rule",)))
+        _write(os.path.join(outside, "neighbour.md"), _living_spec("neighbour", ("N rule",)))
+        rel = os.path.relpath(os.path.join(outside, "omega.md"), self.repo)
+        header = "**Spec files:**\n- docs/forge/specs/alpha.md\n- {}\n".format(rel)
+        defects = self._lint(_header_plan(header, "[alpha] Alpha rule"))
+        refused = [
+            d for d in self._errors(defects)
+            if rel in d.message and "outside the repository root" in d.message
+        ]
+        self.assertEqual(len(refused), 1, defects)
+        self.assertFalse(
+            any("neighbour.md" in d.message for d in defects),
+            "lint reported on a file in a directory outside the repository",
+        )
+
     def test_declared_file_without_frontmatter_names_the_path_and_the_rule(self):
         self._baseline()
         self._put(_SPECS_DIR + "/gamma.md", "# Gamma\n\n## Gamma rule\n\nBody.\n")
