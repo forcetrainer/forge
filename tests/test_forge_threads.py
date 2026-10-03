@@ -280,7 +280,7 @@ class DispatchJsonArgvTests(unittest.TestCase):
         log = os.path.join(self.d, "fakelog")
         os.environ["FORGE_FAKE_LOG"] = log
         forge_run.dispatch_doc_sync(
-            self.spec, "deadbeef", "diff --git a b\n", self.run_dir, "standard",
+            [self.spec], "deadbeef", "diff --git a b\n", self.run_dir, "standard",
             self.fake, self.d,
         )
         argvs = _log_argvs(log)

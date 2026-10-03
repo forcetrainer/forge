@@ -80,7 +80,7 @@ class IsolationFlagsTests(unittest.TestCase):
             "fixer-resume": lambda: forge_run.dispatch_final_review_fix(
                 self.brief, self.fake, self.run_dir, "standard", 1, resume_thread="th-1"),
             "docsync-cold": lambda: forge_run.dispatch_doc_sync(
-                self.spec, "deadbeef", "diff --git a b\n", self.run_dir, "standard",
+                [self.spec], "deadbeef", "diff --git a b\n", self.run_dir, "standard",
                 self.fake, self.d),
         }
         out = {}

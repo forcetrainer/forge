@@ -57,6 +57,34 @@ def _read_base_commit(run_dir):
         return None
 
 
+def read_run_specs(run):
+    """The spec paths recorded in a loaded ``run.json`` dict: its ``specs``
+    list, or a one-element list from the single ``spec`` string a run
+    directory written before the spec set existed carries, or ``[]``."""
+    if not isinstance(run, dict):
+        return []
+    if "specs" in run:
+        return list(run["specs"])
+    if run.get("spec"):
+        return [run["spec"]]
+    return []
+
+
+def _read_specs(run_dir):
+    """The spec set recorded in an existing ``run.json``, or None when there is
+    no readable prior run or it recorded none (a fresh run has nothing to
+    match). A top-level that is not a JSON object reads as unreadable."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            run = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(run, dict) or ("specs" not in run and "spec" not in run):
+        return None
+    return read_run_specs(run)
+
+
 def _read_started_at(run_dir):
     """The ``started_at`` persisted in an existing ``run.json``, or None — so a
     resume keeps the original run start (and elapsed) rather than resetting it."""
@@ -144,12 +172,15 @@ def _read_halt(run_dir):
     return data.get("halt")
 
 
-def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit,
+def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
                    seeded_findings=None, halt=None):
-    """Write ``run.json``. The progress fields (``current_task``/``current_phase``/
+    """Write ``run.json``. ``spec_paths`` is the run's spec set (a list of
+    paths, possibly empty), recorded absolute under ``specs``; None records
+    nothing, for a caller that could not determine the set. The progress
+    fields (``current_task``/``current_phase``/
     ``started_at``/``updated_at``/``pid``) and the scope-autonomy fields
     (``deferrals``/``autofix_mode``/``doc_sync``/``seeded_findings``) are
     additive and optional — omitted when None, so an old run.json shape and a
@@ -182,11 +213,12 @@ def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_c
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
-        "spec": os.path.abspath(spec_path),
         "status": status,
         "base_commit": base_commit,
         "tasks": task_summaries,
     }
+    if spec_paths is not None:
+        data["specs"] = [os.path.abspath(p) for p in spec_paths]
     if contract_error is not None:
         data["contract_error"] = contract_error
     if threads is not None:

@@ -142,13 +142,17 @@ invocation stays, since a plan can be edited between review and dispatch.
 | every `### Task N:` heading at level 3, numbers unique | names the offending heading and line |
 | `**Tier:**` present, valid after normalization, justification present for complex/trivial | names the task and value |
 | `**Goal:**` present, a single non-empty line | names the defect |
-| `**Spec:**` single line, no parenthetical or `;`, every name resolving uniquely in the spec | names the unresolvable or ambiguous heading |
+| `**Spec:**` single line, no parenthetical or `;`, every entry resolving in its declared spec by the `pipeline` spec's resolution order (Plan documents) | names the unresolvable or ambiguous heading |
 | `**Depends on:**` references existing task numbers, no cycles | names the missing task or the cycle |
 | `**Acceptance:**` present per task | names the task |
 | every `**Acceptance:**` clause beginning with inline code parses as a command clause (`pipeline` spec: Acceptance clause grammar) | names the task and line, quotes the clause, lists the legal outcomes |
 | `**Tests:**` parses — bulleted form, or `none — <reason>` | names the task and quotes the offending line |
 | checklist generates for every task and for `--final` | names the task; an empty checklist is a **warning**, not an error |
-| every **changed** spec section is named by some task's `**Spec:**` line | names the unclaimed section |
+| every **changed** spec section, in every spec the plan declares, is named by some task's `**Spec:**` line | names the spec and the unclaimed section |
+| `**Spec files:**` parses; every path is a living spec; no two share a spec id | names the path and the defect |
+| `**Spec files:**` and `--spec` are not both given | names both |
+| every `**Spec:**` entry carries a declared `[<spec id>]` when the plan declares more than one spec file, and none carries an undeclared one | names the task and entry, lists the declared ids |
+| a spec changed since the merge base that the plan does not declare | a **warning**, not an error, naming the undeclared spec file |
 
 It **reports every defect in one run**, never the first only — the same
 anti-one-per-lap principle the reviewer's coverage requirement installs. Any error is
@@ -170,6 +174,23 @@ default branch itself, an unborn or detached HEAD — the baseline falls back to
 and the rule degrades to inert rather than failing loudly, since a plan is not wrong
 merely because lint cannot establish what the branch changed. A spec with no committed
 version — a genuinely new system — treats every section as changed.
+
+**The rule runs once per declared spec** (`pipeline` spec: Plan documents,
+`**Spec files:**`), so a plan amending three specs is checked against all three. A
+spec's claimed sections come only from `**Spec:**` entries that resolve in that spec: an
+entry carrying its id, or a bare entry in a plan declaring one spec. An entry that does
+not resolve claims nothing here and is reported once, by the entry row.
+
+**An undeclared changed spec is a warning.** A plan amending two specs and declaring
+one is checked against one and silent on the other — the gap `--spec` had, moved from
+the caller to the author. Lint therefore warns, naming the file, for each `.md` file
+that sits directly in a directory holding a declared spec, is not itself declared, and
+was added or modified between the merge base and the working tree in some section other
+than the two exempt ones. It is a warning, not an error, because the baseline is the
+whole branch: on a branch carrying several plans, a spec an earlier plan built is
+changed and rightly undeclared by a later one. The warning's owner is the plan's author
+(`pipeline` spec: Plan review). Deleted files do not warn. Like the changed-section
+rule, it is inert when no merge base resolves, and a legacy plan is exempt.
 
 **`## Changelog` and `## Risks / constraints` are exempt.** Both are structurally
 unbuildable: every other section states a requirement a task can deliver, while these
@@ -208,7 +229,7 @@ satisfy — no new authoring burden, no new plan fields.
 
 | id form | source |
 |---|---|
-| `spec:<heading>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections`; `<heading>` is the section's heading text, whitespace-collapsed — not a slug |
+| `spec:<heading>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections`; `<heading>` is the section's heading text, whitespace-collapsed — not a slug. When the plan declares more than one spec file the id is `spec:[<spec id>] <heading>` — `<spec id>` the frontmatter `system` value, one space after the bracket — so two specs' same-named sections never collide. The id is built from the **resolved** spec and heading, never from how the entry was written, so a bare entry and a bracketed one naming the same section yield one id |
 | `g<N>` | each clause of the plan header's `**Global Constraints:**` |
 | `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
 | `t<N>.a<M>` | each **prose clause** of task N's `**Acceptance:**` field (`pipeline` spec: Acceptance clause grammar) — command clauses are checked deterministically by the acceptance runner and would be dead checklist weight |
@@ -264,8 +285,9 @@ defect, never normalized to the id it resembles (`parsers-fail-loud`). Observed
 (`spec:verification`, `spec:python-inspector-contract`) — the instruction said
 `spec:<slug>` and no packet printed the real id.
 
-CLI: `forge_checklist.py <plan.md> --spec <spec.md> [--task N | --final] [--out
-<path>]` → JSON `[{"id", "source", "text"}]` plus a rendered `## Contract checklist`
+CLI: `forge_checklist.py <plan.md> [--spec <spec.md>] [--task N | --final] [--out
+<path>]` (`--spec` for a legacy plan only; otherwise the specs come from the plan's
+`**Spec files:**`) → JSON `[{"id", "source", "text"}]` plus a rendered `## Contract checklist`
 markdown section. Codex's `review-packet.py` imports the module; the Claude
 orchestrator invokes the CLI. An unresolvable `**Spec:**` name raises, reusing
 `find_spec_sections`' existing raise — never a silently thin checklist.
@@ -498,7 +520,8 @@ One JSON object:
 ```
 
 - `coverage` — exactly one entry per section in the packet's section table, `section`
-  copied verbatim (the resolved heading text). A missing section, a duplicate, or a
+  copied verbatim (the resolved heading text, prefixed `[<spec id>] ` when the plan
+  declares more than one spec file). A missing section, a duplicate, or a
   section not in the table invalidates the verdict. `requirements` is non-empty. When a
   section and its subsection are both in the table, the subsection's requirements are
   listed under the subsection only.
@@ -516,7 +539,8 @@ One JSON object:
   defaulted (#63).
 - Finding `id`s are unique within a verdict.
 - Finding `section` — for `uncovered`, a section in the section table; for
-  `contradiction` and `spec-defect`, any heading in the spec, by its exact text. A value
+  `contradiction` and `spec-defect`, any heading in a declared spec, by its exact text,
+  with the same `[<spec id>] ` prefix when the plan declares more than one. A value
   naming no such heading invalidates the verdict.
 - `task` — the task number a finding is raised against; `null` means the plan header.
   A number naming no task invalidates the verdict. On an `uncovered` finding, `task` is
@@ -859,9 +883,11 @@ State, the reviewer verdict and `decision.json` live in a scratch directory, nev
 orchestrator context. The diff never enters orchestrator context either — the reviewer
 holds it in its own, `forge_dispose` holds it in its process.
 
-**Reviewer input.** On **Codex** the reviewer is a subprocess and cannot gather its own
-context, so `scripts/review-packet.py` pre-assembles it; the packet is Codex-path-only
-machinery. On **Claude** the reviewer is an agent that self-serves its own
+**Reviewer input.** On **Codex** `scripts/review-packet.py` pre-assembles the reviewer's
+input, so the diff is computed once, by the runner, against the right base; the packet
+is Codex-path-only machinery. A per-task packet pastes the spec sections the task
+names, as context; the final-review packet lists spec paths instead, and the reviewer
+reads those files itself (`codex-runner` spec: Runner). On **Claude** the reviewer is an agent that self-serves its own
 `git diff <prior commit>` **plus every untracked file** (`git ls-files --others
 --exclude-standard`, each rendered via `git diff --no-index /dev/null <path>` — plain
 `git diff` never sees a new file, and a task's new files are only staged by the commit
@@ -1128,6 +1154,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 
 2026-10-02: acceptance is green when every command clause meets its stated outcome, not when every inline-code span exits 0; the checklist takes prose clauses, lint rejects an unparseable command clause; a repeated first-failing acceptance clause on consecutive attempts halts `stuck` (state `prev_failed_acceptance`, CLI `--failed-acceptance`) instead of looping to the backstop — 7 tasks looped on failed acceptance, 4 to the backstop, across 14 audited runs (#112)

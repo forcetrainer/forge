@@ -143,12 +143,14 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     section — omitted (None, the empty-checklist skip case) leaves the packet
     unchanged (Contract checklist spec).
 
-    ``spec_path`` (optional), when the task declares a ``**Spec:**`` line,
-    resolves that line's names via ``find_spec_sections`` and passes the
-    resulting ``(heading, body)`` pairs into ``build_packet`` as
-    ``spec_sections`` — context the reviewer reads for understanding, not a
-    checklist item (Contract checklist spec). A task declaring no
-    ``**Spec:**`` gets no spec-context section, ``spec_path`` or not."""
+    ``spec_path`` is the legacy ``--spec`` file (None for a plan declaring
+    ``**Spec:**`` files, which supplies its own set). When the task declares a
+    ``**Spec:**`` line, its entries resolve through the plan's spec set and
+    pass into ``build_packet`` as ``spec_sections`` — ``(label, body)`` pairs,
+    the label ``[<spec id>] <heading>`` when the plan declares more than one
+    spec file. Context the reviewer reads for understanding, not a checklist
+    item (Contract checklist spec). A task declaring no ``**Spec:**`` gets no
+    spec-context section."""
     with open(plan_path, "r", encoding="utf-8") as f:
         plan_text = f.read()
     block = rp.extract_task_block(plan_text, task.number)
@@ -165,11 +167,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     # structural guard (`discovery-review-is-cold`) and not a special case.
     # The worker's brief is untouched: the worker may know it was paused.
     block = strip_ledger_annotations(block)
-    spec_sections = None
-    spec_names = eb.parse_spec_names(block)
-    if spec_names:
-        spec_lines = eb.read_lines(spec_path)
-        spec_sections = eb.find_spec_sections(spec_lines, spec_names)
+    spec_sections = rp.task_spec_sections(plan_path, block, task.number, spec_path)
     diff = _git_diff(cwd, base)
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
@@ -182,10 +180,37 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     return path
 
 
-def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
-                   checklist=None, citable=None):
-    """Whole-plan final-review packet: the spec + the whole-plan ``git diff
-    <base>``, assembled by review-packet.py's fence-safe builder. On a re-review
+def named_spec_sections(plan_path, spec_path):
+    """Per spec, the section labels the plan's tasks name: a dict from each
+    spec's absolute path to its labels, in plan order without repeats. ``spec_path`` is
+    the legacy ``--spec`` file, or None. Feeds the spec listing in the
+    final-review packet and the doc-sync brief."""
+    spec_set = eb.load_spec_set(plan_path, spec_path)
+    named = {os.path.abspath(f.path): [] for f in spec_set}
+    plan_lines = eb.read_lines(plan_path)
+    for line in plan_lines:
+        m = eb.TASK_HEADING_RE.match(line)
+        if not m:
+            continue
+        block = eb.extract_task_block(plan_lines, int(m.group(1)))
+        if block is None:
+            continue
+        entries = eb.parse_spec_entries(block)
+        for r in eb.resolve_entries(entries, spec_set, int(m.group(1))):
+            key = os.path.abspath(r.spec.path)
+            if r.label not in named[key]:
+                named[key].append(r.label)
+    return named
+
+
+def _final_packet(spec_paths, base, diff, run_dir, prior_findings=None,
+                   checklist=None, citable=None, named_sections=None):
+    """Whole-plan final-review packet: the spec listing + the whole-plan ``git
+    diff <base>``, assembled by review-packet.py's fence-safe builder. The
+    listing names each spec path and the section labels the plan's tasks name
+    (``named_sections``, from ``named_spec_sections``) — never spec text; the
+    reviewer opens the files itself. ``spec_paths`` empty (a plan with no spec)
+    lists none. On a re-review
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
     attempt's outstanding fix findings into the packet so the fresh-context final
     reviewer labels each current finding resolved/carried/new against them —
@@ -194,10 +219,9 @@ def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
     None, the empty-checklist skip case), rendered after the diff and before
     the prior-findings section. ``citable`` is the final citable set, rendered
     as a '## Citable refs' section after the checklist (None omits it)."""
-    with open(spec_path, "r", encoding="utf-8") as f:
-        spec_text = f.read()
+    listing = rp.build_spec_files_section(spec_paths, named_sections)
     packet = rp.build_packet(
-        spec_text, base, diff, prior_findings=prior_findings, checklist=checklist,
+        listing, base, diff, prior_findings=prior_findings, checklist=checklist,
         review_kind="discovery", citable=citable,
     )
     path = os.path.join(run_dir, "final-review.md")

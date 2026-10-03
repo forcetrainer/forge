@@ -32,6 +32,8 @@ import os
 import re
 import sys
 import tempfile
+from dataclasses import dataclass
+from typing import List, Optional
 
 
 HEADING_RE = re.compile(r'^(#{1,6})\s+(.*)$')
@@ -365,18 +367,26 @@ def parse_test_cases(task_block):
     return parse_field_clauses(task_block, "Tests")
 
 
+def collapse_ws(text):
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def strip_heading_text(text):
-    """Drop a leading numbering token (e.g. '1.', '2.3') before prefix matching."""
-    return re.sub(r'^\d+(\.\d+)*\.?\s+', '', text).strip()
+    """Drop a leading numbering token (e.g. '1.', '2.3') before matching and
+    collapse whitespace."""
+    return collapse_ws(re.sub(r'^\d+(\.\d+)*\.?\s+', '', text.strip()))
 
 
 def match_heading_names(name, headings):
-    """Case-insensitive unique-prefix match of ``name`` against ``headings``
-    — ``(level, raw_text, stripped_text, start_index)`` tuples as extracted
-    by ``find_spec_sections``. Numbering is stripped only from the candidate
-    side (already baked into ``stripped_text`` by the time it reaches here),
-    never from ``name`` itself — a query that legitimately starts with a
-    digit must not have it silently eaten.
+    """Match ``name`` against ``headings`` — ``(level, raw_text,
+    stripped_text, start_index)`` tuples as extracted by
+    ``find_spec_sections``. Returns the headings whose text equals the name
+    when any do, else those the name prefixes. Both comparisons are
+    case-insensitive with whitespace collapsed on both sides. Numbering is
+    stripped only from the candidate side (already baked into
+    ``stripped_text`` by the time it reaches here), never from ``name``
+    itself — a query that legitimately starts with a digit must not have it
+    silently eaten.
 
     The single predicate ``find_spec_sections`` and
     ``forge_docreview._resolve_section`` (spec: Spec review, Structural
@@ -384,8 +394,11 @@ def match_heading_names(name, headings):
     counts as a match — `tests/test_forge_docreview.py`'s
     ``SectionMatcherParityTests`` is the tripwire that would catch it if
     they ever did."""
-    needle = name.lower()
-    return [h for h in headings if h[2].lower().startswith(needle)]
+    needle = collapse_ws(name).lower()
+    exact = [h for h in headings if collapse_ws(h[2]).lower() == needle]
+    if exact:
+        return exact
+    return [h for h in headings if collapse_ws(h[2]).lower().startswith(needle)]
 
 
 def find_spec_sections(spec_lines, names):
@@ -397,7 +410,7 @@ def find_spec_sections(spec_lines, names):
         m = HEADING_RE.match(line)
         if m:
             level = len(m.group(1))
-            raw_text = m.group(2).strip()
+            raw_text = collapse_ws(m.group(2))
             headings.append((level, raw_text, strip_heading_text(raw_text), i))
 
     sections = []
@@ -424,24 +437,220 @@ def find_spec_sections(spec_lines, names):
     return sections
 
 
-def build_brief(plan_path, task_number, spec_path):
+@dataclass
+class SpecFile:
+    path: str
+    spec_id: Optional[str]
+    # False for a legacy plan's ``--spec`` file: bracketed entries are not
+    # legal against it, whatever its ``system`` value.
+    declared: bool = True
+
+
+@dataclass
+class ResolvedSection:
+    spec: SpecFile
+    heading: str
+    lines: List[str]
+    label: str
+
+
+def parse_spec_files(plan_lines):
+    """The paths in the plan header's ``**Spec files:**`` field, in order,
+    one pair of wrapping backticks removed; ``[]`` when the field is absent.
+    Field clause grammar, read by ``parse_field_clauses``; the header ends at
+    the first task heading."""
+    mask = fence_mask(plan_lines)
+    header_end = len(plan_lines)
+    for i, line in enumerate(plan_lines):
+        if not mask[i] and ANY_LEVEL_TASK_HEADING_RE.match(line):
+            header_end = i
+            break
+    header = "".join(plan_lines[:header_end])
+    paths = []
+    for clause in parse_field_clauses(header, "Spec files"):
+        if len(clause) >= 2 and clause.startswith("`") and clause.endswith("`"):
+            clause = clause[1:-1].strip()
+        paths.append(clause)
+    return paths
+
+
+def _spec_id_of(path):
+    """The frontmatter ``system`` value of a spec file, or ``None`` when the
+    file has no frontmatter. A frontmatter block that is opened but never
+    closed raises."""
+    lines = read_lines(path)
+    if not lines or lines[0].rstrip("\n") != "---":
+        return None
+    system = None
+    for i in range(1, len(lines)):
+        raw = lines[i].rstrip("\n")
+        if raw == "---":
+            return system
+        m = re.match(r'^system:\s*(.*)$', raw)
+        if m:
+            system = m.group(1).strip() or None
+    raise RuntimeError(f"{path}: unterminated frontmatter block")
+
+
+def _find_repo_root(start):
+    cur = os.path.abspath(start)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            raise RuntimeError(
+                f"no repository root (a directory holding .git) found above {start}"
+            )
+        cur = parent
+
+
+def resolve_declared_path(repo_root, rel):
+    """A ``**Spec files:**`` path joined to the repository root, refused when
+    it resolves outside that root. Raised before the file is opened: a
+    declared spec's sections are pasted into briefs and packets, and lint
+    scans its directory, so an absolute path, a ``..`` climb or a symlink
+    must not reach outside the repository. The single gate — ``load_spec_set``
+    and ``forge_lint`` both resolve declared paths through it, so neither can
+    open a path the other refuses."""
+    path = os.path.join(repo_root, rel)
+    real_root = os.path.realpath(repo_root)
+    if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
+        raise RuntimeError(
+            f"**Spec files:** path {rel} resolves outside the repository "
+            f"root ({real_root}) — a declared spec path is relative to the "
+            "repository root and stays inside it"
+        )
+    return path
+
+
+def load_spec_set(plan_path, legacy_spec_path=None, repo_root=None):
+    """The plan's spec set. A plan declaring ``**Spec files:**`` reads each
+    path against the repository root; a legacy plan's set is its ``--spec``
+    file, or empty."""
+    declared = parse_spec_files(read_lines(plan_path))
+    if declared and legacy_spec_path:
+        raise RuntimeError(
+            f"{plan_path} declares **Spec files:** and --spec {legacy_spec_path} "
+            "was also given — a plan with the header is run without --spec"
+        )
+    if not declared:
+        if not legacy_spec_path:
+            return []
+        # Never opened here: a legacy spec is read only when an entry
+        # resolves against it, and it needs no id (bracketed ids are illegal
+        # in a legacy plan).
+        return [SpecFile(legacy_spec_path, None, False)]
+    if repo_root is None:
+        repo_root = _find_repo_root(os.path.dirname(os.path.abspath(plan_path)))
+    spec_set = []
+    seen = {}
+    for rel in declared:
+        path = resolve_declared_path(repo_root, rel)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"**Spec files:** path {rel} names no file ({path})")
+        spec_id = _spec_id_of(path)
+        if spec_id is None:
+            raise RuntimeError(
+                f"**Spec files:** path {rel} has no frontmatter 'system:' value "
+                "to serve as its spec id"
+            )
+        if spec_id in seen:
+            raise RuntimeError(
+                f"**Spec files:** {seen[spec_id]} and {rel} share the spec id "
+                f"{spec_id!r}"
+            )
+        seen[spec_id] = rel
+        spec_set.append(SpecFile(path, spec_id))
+    return spec_set
+
+
+def parse_spec_entries(task_block):
+    """Each ``**Spec:**`` entry as ``(spec id or None, heading name)``. An
+    entry is ``[<id>] <name>`` or a bare ``<name>``; it splits at its first
+    ``]`` and whitespace inside the brackets raises."""
+    entries = []
+    for entry in parse_spec_names(task_block):
+        if not entry.startswith("["):
+            entries.append((None, entry))
+            continue
+        close = entry.find("]")
+        if close < 0:
+            raise RuntimeError(f"**Spec:** entry {entry!r} has no closing ']'")
+        spec_id = entry[1:close]
+        name = entry[close + 1:].strip()
+        if not spec_id or re.search(r'\s', spec_id):
+            raise RuntimeError(
+                f"**Spec:** entry {entry!r}: the spec id inside the brackets "
+                "must be non-empty with no whitespace"
+            )
+        if not name:
+            raise RuntimeError(f"**Spec:** entry {entry!r} names no heading")
+        entries.append((spec_id, name))
+    return entries
+
+
+def resolve_entries(entries, spec_set, task_number):
+    """Resolve each entry to its section within the spec file it names."""
+    multi = len(spec_set) > 1
+    declared_ids = ", ".join(str(f.spec_id) for f in spec_set)
+    resolved = []
+    for spec_id, name in entries:
+        shown = f"[{spec_id}] {name}" if spec_id is not None else name
+        where = f"task {task_number} **Spec:** entry {shown!r}"
+        if not spec_set:
+            raise RuntimeError(f"{where}: the plan has no spec")
+        if spec_id is None:
+            if multi:
+                raise RuntimeError(
+                    f"{where}: a plan declaring more than one spec file needs "
+                    f"[<spec id>] on every entry; declared ids: {declared_ids}"
+                )
+            spec = spec_set[0]
+        else:
+            if not spec_set[0].declared:
+                raise RuntimeError(
+                    f"{where}: a legacy plan (no **Spec files:**) takes bare "
+                    "entries only"
+                )
+            spec = next((f for f in spec_set if f.spec_id == spec_id), None)
+            if spec is None:
+                raise RuntimeError(
+                    f"{where}: id {spec_id!r} names no declared spec "
+                    f"(matched exactly, case-sensitively); declared ids: "
+                    f"{declared_ids}"
+                )
+        try:
+            heading, content = find_spec_sections(read_lines(spec.path), [name])[0]
+        except RuntimeError as e:
+            raise RuntimeError(f"{where}: {e}")
+        label = (
+            f"[{spec.spec_id}] {collapse_ws(strip_heading_text(heading))}"
+            if multi else heading
+        )
+        resolved.append(
+            ResolvedSection(spec, heading, content.splitlines(keepends=True), label)
+        )
+    return resolved
+
+
+def build_brief(plan_path, task_number, spec_path=None):
     lines = read_lines(plan_path)
     task_block = extract_task_block(lines, task_number)
     if task_block is None:
         raise RuntimeError(diagnose_missing_task(lines, task_number, plan_path))
 
     goal_line, gc_block = extract_header(lines)
-    spec_names = parse_spec_names(task_block)
+    entries = parse_spec_entries(task_block)
+    spec_set = load_spec_set(plan_path, spec_path)
 
-    if spec_names and not spec_path:
+    if entries and not spec_set:
         raise RuntimeError(
-            f"task {task_number} declares **Spec:** but --spec was not given"
+            f"task {task_number} declares **Spec:** but the plan has no spec "
+            "(no **Spec files:** header and --spec was not given)"
         )
 
-    sections = []
-    if spec_names:
-        spec_lines = read_lines(spec_path)
-        sections = find_spec_sections(spec_lines, spec_names)
+    sections = resolve_entries(entries, spec_set, task_number)
 
     parts = ["# Plan header\n\n"]
     if goal_line:
@@ -451,9 +660,9 @@ def build_brief(plan_path, task_number, spec_path):
     parts.append("\n")
     parts.append(f"# Task {task_number}\n\n")
     parts.append(task_block + "\n")
-    for heading_text, content in sections:
-        parts.append(f"\n\n# Spec: {heading_text}\n\n")
-        parts.append(content + "\n")
+    for section in sections:
+        parts.append(f"\n\n# Spec: {section.label}\n\n")
+        parts.append("".join(section.lines).rstrip("\n") + "\n")
     return "".join(parts)
 
 

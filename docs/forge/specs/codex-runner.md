@@ -77,13 +77,29 @@ ad-hoc review. No forge machinery uses them.
 `review-packet.py` — plan/spec parsing contracts unchanged, no duplicated parsing.
 
 ```
-forge-run.py <plan.md> --spec <spec.md> [--effort N=LEVEL ...] [--timeout SECONDS]
+forge-run.py <plan.md> [--spec <spec.md>] [--effort N=LEVEL ...] [--timeout SECONDS]
              [--autofix auto|gate] [--run-dir DIR] [--codex-bin PATH]
 forge-run.py --status --run-dir DIR
 ```
 
 - Run in the **foreground** by the conversational Codex orchestrator, after the
   execution approval gate. See Session awareness.
+- The plan's specs come from its `**Spec files:**` header (`pipeline` spec: Plan
+  documents), and every brief, checklist, packet and lint call the runner makes uses
+  that set. `--spec` is for a legacy plan with no header; given alongside a header it is
+  the Plan lint error of that name (`execution` spec), reported as any other lint
+  failure: a contract error, exit 1, before any run dir is created. It is never
+  argparse's exit 2, which is the escalation code.
+- **Whole specs are read by path, not pasted.** The final-review packet and the doc-sync
+  brief list each declared spec's path and the sections the plan's tasks name; neither
+  carries spec text. A per-task review packet is unchanged: it still pastes the sections
+  that task's `**Spec:**` line names, as context, each labeled `[<spec id>] <heading>`
+  when the plan declares more than one spec file. A reviewer or doc-sync dispatch opens the files itself — reviewers
+  run read-only and can. The diff is still assembled into the packet. This holds for a
+  one-spec plan too, and keeps packet size independent of how many specs a plan
+  declares.
+- A plan with no spec — no header and no `--spec` — runs: its final-review packet lists
+  no spec, and the doc-sync stage reconciles documentation against the diff alone.
 - `--effort N=LEVEL` (repeatable; LEVEL in `low`/`medium`/`high`/`xhigh`/`max`)
   overrides task N's worker reasoning effort only — never the model, never the
   reviewer's. `ultra` and unknown task numbers are rejected loudly.
@@ -137,8 +153,9 @@ forge-run.py --status --run-dir DIR
    stated outcome, exit code and output tail.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
-   `codex exec` at the task's own tier. The packet exists because a `codex exec`
-   reviewer is a subprocess and cannot gather its own context.
+   `codex exec` at the task's own tier. The packet exists so the diff is assembled
+   once, by the runner, against the right base; it also pastes the spec sections the
+   task names, as context (Runner).
 5. Capture the verdict: the reviewer's final message is one JSON object, read from the
    `--output-last-message` file. That file, not the live log, is the verdict's channel.
    An unparseable verdict is a loud runner failure naming the cause — never guessed at,
@@ -225,7 +242,7 @@ setup.
                                     // | escalated-final-review | escalated-doc-sync
                                     // | contract-error
   "base_commit": "9f0aa21",         // whole-plan final-review diff base
-  "plan": "...", "spec": "...",
+  "plan": "...", "specs": ["..."],          // declared spec paths, [] for a plan with none
   "started_at": "2026-07-15T09:11:42Z",   // run start (UTC ISO-8601)
   "updated_at": "2026-07-15T09:17:03Z",   // heartbeat, rewritten every phase transition
   "pid": 48213,                            // runner pid (liveness hint, same host)
@@ -266,6 +283,13 @@ setup.
 
 ## Resume
 
+- `run.json` records the run's spec paths as `specs`. On re-invocation the plan's
+  current spec set — its `**Spec files:**`, or the `--spec` of a legacy plan — must
+  equal the recorded one; a difference is a contract error naming the added and removed
+  paths. `specs` holds absolute paths. The comparison is between **sets** of paths, each
+  resolved to an absolute real path first, so declaration order and a different spelling
+  of the same file never differ. A run directory written before this field existed carries a single `"spec"`
+  string, which readers accept as a one-element set.
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
   escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
   fields (`deferrals`, `seeded_findings`, `halt`) are the resume state.
@@ -514,6 +538,16 @@ staleness is never an exit condition.
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
   resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
   carry `sandbox_mode="read-only"`; the five writer shapes do not.
+- Spec sets: a plan declaring two spec files runs with no `--spec`, and every brief,
+  checklist, packet and lint call receives both; `--spec` alongside a header is a
+  contract error (exit 1) with no run dir; a legacy plan with `--spec` runs as before;
+  a plan with no spec runs and skips nothing but spec content; `run.json` lists both
+  paths under `specs`; a resumed run whose spec set differs from the recorded one is a
+  contract error naming the difference; a legacy `run.json` with `"spec"` is read as a
+  one-element set; the final-review packet and doc-sync brief contain spec paths and
+  named sections and no spec text.
+- A read-only reviewer opening a spec file by path is deferred verification on a Codex
+  install, like stream texture below.
 - Live `codex exec` stream texture is deferred verification on a Codex install, not a
   unit test; the format contract is the phase headers plus verbatim passthrough, which
   is texture-independent.
@@ -558,6 +592,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-03: amended by [pipeline] — `--spec` is optional: the runner reads a plan's specs from its `**Spec files:**` header and passes that set to every brief, checklist, packet and lint call; `--spec` remains for legacy plans. The final-review packet and doc-sync brief carry spec paths, not spec text; `run.json` records `specs` as a list and a resumed run's spec set must match it (#62)
 2026-10-03: the Claude marketplace drops the `forge-beta` channel — it had tracked stable since 0.13.0; `forge` is the single sha-pinned entry
 2026-10-02: acceptance runs command clauses and checks each stated outcome, never prose clauses; receipts record the outcome and pass flag. `--timeout` drops "recommend ~900" for the 3600 default — two turns died at ~900s mid-build and later builds ran 30 minutes (#112)
 2026-10-02: standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. gpt-6.1-sol is OpenAI's listed upgrade of GPT-6 Sol for Codex (learn.chatgpt.com/docs/models). Each tier's model·effort verified with `codex exec -m` on codex-cli 0.154.0

@@ -11,6 +11,8 @@ import re
 import shlex
 import time
 
+from forge_receipts import read_run_specs
+
 _ATTEMPT_RE = re.compile(r"^task-(\d+)-attempt-(\d+)\.json$")
 _FINDING_MAX = 100
 
@@ -47,9 +49,11 @@ def is_terminal(status):
 def _load_run_json(run_dir):
     try:
         with open(os.path.join(run_dir, "run.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
+            run = json.load(f)
     except (OSError, ValueError):
         return None
+    # A top-level that is not an object is as unreadable as bad JSON.
+    return run if isinstance(run, dict) else None
 
 
 def _latest_receipts(run_dir):
@@ -256,6 +260,9 @@ def read_run_state(run_dir, now=None):
         # a freeze. Absent (None) on every run that did not halt on one, and
         # on old run.json shapes.
         "halt": run.get("halt") if run else None,
+        # The run's recorded spec set; a pre-`specs` run.json's single `spec`
+        # string reads as a one-element set.
+        "specs": read_run_specs(run) if run else [],
     }
 
 

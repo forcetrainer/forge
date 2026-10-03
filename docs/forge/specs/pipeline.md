@@ -201,7 +201,7 @@ reference is legal and is adjudicated by the reviewer, not by lint.
 4. `## Changelog` is present, and every entry matches `YYYY-MM-DD: <text>`.
 5. Every bracketed id in a cross-spec `amended by` entry names a system that exists.
 
-Applied to the spec named by a plan at run start, plus a corpus mode —
+Applied to each spec a plan declares at run start, plus a corpus mode —
 `forge_lint.py --specs` — that lints every file in `docs/forge/specs/`. Frontmatter is
 parsed without a YAML library: the two keys are a fixed grammar, and `stdlib-only`
 binds. A dated spec under `archive/` is never linted — the archive is frozen and its
@@ -221,6 +221,20 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   `**Global Constraints:**` block — version floors, dependency limits, naming rules —
   omitted entirely when the plan has none. No empty block. Its clauses follow the field
   clause grammar below; each becomes a `g<N>` checklist item.
+- **`**Spec files:**`** is an optional header field listing the spec files the plan
+  implements, one repo-relative path per clause, by the field clause grammar below. It
+  is the single source of the plan's specs: every tool reads it from the plan, and no
+  caller passes a spec path. A path is relative to the repository root and is written
+  plain or inside one pair of backticks; both forms are legal and mean the same file. A
+  path that resolves outside the repository root — an absolute path elsewhere, a `..`
+  climb, a symlink — is an error naming the path, raised before the file is opened. A
+  path naming no file, and a file that is not a living spec — one that fails any rule
+  under Lint above — are lint errors naming the path. A file's **spec id** is its
+  frontmatter `system` value; two declared files with one id are a lint error.
+  A plan carrying the field is run without `--spec`; passing both is a Plan lint error
+  (`execution` spec).
+  A plan without the field is a **legacy plan**: `--spec <file>` supplies its one spec,
+  and with neither it has no spec. Completed plans are not migrated.
 - **Task heading** is `### Task N:` — three `#`, colon. The extraction scripts require
   it.
 - **`**Spec:**`** is an optional line after `**Files:**` naming the spec sections this
@@ -228,9 +242,26 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   case-insensitively at extraction). In a plan written from a spec, every task names
   the sections it implements; a task omits the line only when it implements no spec
   section (setup, a pure refactor). The planning skill's self-review checks this. A
-  single line of bare comma-separated heading names — no parentheticals, no `;`, no
-  wrapping — and one spec file per task, since `--spec` takes one. Wrapped or
-  parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
+  single line of comma-separated entries — no parentheticals, no `;`, no wrapping.
+  Wrapped or parenthetical `**Spec:**`/`**Goal:**` lines fail brief generation.
+
+  An entry is `[<spec id>] <heading name>`, or a bare `<heading name>`. The bracketed
+  id names one of the plan's declared spec files and says which file the section is in:
+  `**Spec:** [execution] Plan lint, [pipeline] Plan review`. It is **required** on every
+  entry when the plan declares more than one spec file, optional when it declares one,
+  and never present in a legacy plan. An id that names no declared spec, and a bare
+  entry in a plan declaring more than one, are errors listing the declared ids — a name
+  is never searched for across files. The id is matched **exactly and
+  case-sensitively** against the declared spec ids, with no whitespace inside the
+  brackets; the entry splits at its first `]`, and what follows, with surrounding
+  whitespace trimmed, is the heading name.
+
+  Within its file a name resolves in this order: a heading whose text equals the name
+  is the match, even when other headings begin with it; otherwise a unique prefix;
+  otherwise an error naming the candidates. Both comparisons are case-insensitive, with
+  whitespace collapsed on both sides and leading numbering (`2.`, `2.3`) stripped from
+  the **heading only** — never from the name, which may legitimately begin with a digit.
+  Two headings with identical text are ambiguous by either rule.
 - **`**Tests:**`** lists the task's test cases by behavior, descriptions not code
   ("rejects empty email", "retries 3 times then throws"). It follows the field clause
   grammar below; `**Tests:** none — <reason>` on a single line is the legal empty form.
@@ -264,7 +295,7 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   denylist of two literal names, and an acceptance command that could never pass because
   its word was the file's own vocabulary.
 - **Field clause grammar** governs every machine-read multi-clause field —
-  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`. Exactly two forms are legal:
+  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`, `**Spec files:**`. Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
   at the first blank line, next `**Field:**`, or any heading line (`#` through `######` at
   column 0), whichever comes first; or the **marker with a value** on the same
@@ -334,7 +365,8 @@ self-review and before execution is offered. Self-review stays and is **not** th
 Every other control downstream checks work against the plan's promises; this one checks
 the promises against the spec.
 
-Applies to every plan written from a spec — one executed with `--spec`. A plan with no
+Applies to every plan written from a spec — one declaring `**Spec files:**`, or a
+legacy plan executed with `--spec`. It covers every declared spec in one review. A plan with no
 spec has nothing to validate against and skips it. A plan written from a spec whose
 tasks name no spec section is an **error** at packet build: an empty section table is
 never a pass, and there is no skip. The error names the cause and the fix — add
@@ -349,7 +381,7 @@ before any reviewer is dispatched.
    changed-section rule (`execution` spec: Plan lint), for a changed section no task
    names. An unchanged section no task names is not examined: in a living spec it is
    already built.
-3. **Plan lint**, its rules unchanged — before the packet is built, since the packet is
+3. **Plan lint**, with no rule added for plan review — before the packet is built, since the packet is
    built by parsing the plan, and again on the plan as amended.
 
 **Covered means promised.** A requirement is covered only by a plan promise: a
@@ -360,14 +392,15 @@ else is unenforced downstream. A requirement the plan deliberately does not buil
 marked `n/a` with a reason and needs no promise — the same escape Plan lint's
 changed-section rule relies on.
 
-**Packet** — `scripts/forge_docreview.py --plan <plan> --spec <spec> [--out <path>]`.
-Carries the plan and spec paths, never their pasted content; a **section table**; a
-**promise table**; the two reviewer questions; the required verdict fields. `--plan`
-without `--spec` is a usage error.
+**Packet** — `scripts/forge_docreview.py --plan <plan> [--spec <spec>] [--out <path>]`.
+Carries the plan path and every spec path, never their pasted content; a **section
+table**; a **promise table**; the two reviewer questions; the required verdict fields.
+`--spec` is given only for a legacy plan. `--plan` on a plan with no spec — no
+`**Spec files:**` and no `--spec` — is a usage error.
 
 - **Section table** — each named spec section and the tasks naming it. A section is
-  identified by its resolved heading text, whitespace-collapsed: the text of its
-  `spec:<heading>` id. When a section and one of its subsections are both named, each is
+  identified by its resolved heading text, whitespace-collapsed, prefixed `[<spec id>] `
+  when the plan declares more than one spec file: the text of its `spec:` id. When a section and one of its subsections are both named, each is
   its own entry and the subsection's requirements are listed under the subsection only.
 - **Promise table** — every promise id with its text, built by
   `scripts/forge_checklist.py` (ids: `execution` spec, Contract checklist).
@@ -377,7 +410,7 @@ the section's requirements and the promise ids covering each. A missing section
 invalidates the verdict (schema: `execution` spec, Document review contract). Promise
 ids are copied verbatim from the promise table, never derived.
 
-**Verdict** — `scripts/forge_docreview.py --plan <plan> --spec <spec> --verdict <file>`
+**Verdict** — `scripts/forge_docreview.py --plan <plan> [--spec <spec>] --verdict <file>`
 validates and disposes. Non-zero exit is an invalid verdict.
 
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
@@ -387,6 +420,12 @@ packet. Unlike a task review's verification it is always whole-plan, for the rea
 Spec review is whole-document, and its verdict carries the full `coverage` array. A spec
 amended in response to a `spec-defect` finding re-enters Spec review; plan lint then
 re-runs against the amended spec, and plan review restarts cold.
+
+**An undeclared changed spec is settled before the offer.** Plan lint warns when a spec
+changed on the branch and the plan does not declare it (`execution` spec: Plan lint). A
+warning does not fail lint, so the skill gives it an owner: the plan's author either
+declares the spec or records why it is not this plan's, and the execution offer lists
+every such warning with its reason.
 
 **The gate is skill text.** `skills/planning/SKILL.md` states that execution is not
 offered until plan review passes. No runner checks for a review receipt.
@@ -453,23 +492,32 @@ extract-brief.py <plan.md> <task-number> [--spec <spec.md>] [--out <dir>]
 
 - Output `<out>/task-<N>-brief.md`; prints the path to stdout.
 - Contents: plan header contracts (Goal, Global Constraints), the full Task N block,
-  and the spec sections named on the task's `**Spec:**` line (case-insensitive
-  heading-prefix match against `--spec` headings; an ambiguous prefix is an error).
-- Missing task number, missing `--spec` when the task declares `**Spec:**`, or an
-  unmatched section heading → nonzero exit, message on stderr. Never emit a silently
-  thin brief.
+  and the spec sections named on the task's `**Spec:**` line, each taken from the file
+  its entry resolves in (resolution: Plan documents) and, when the plan declares more
+  than one spec file, labeled `[<spec id>] <heading>`. The
+  specs come from the plan's `**Spec files:**`; `--spec` is for a legacy plan only.
+- Missing task number, a task declaring `**Spec:**` in a plan with no spec, or an
+  unmatched or ambiguous section name → nonzero exit, message on stderr. Never emit a
+  silently thin brief.
 
 ### `scripts/review-packet.py`
 
 ```
-review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
+review-packet.py <plan.md> <task-number> --base <git-ref> [--spec <spec.md>] [--out <dir>]
 ```
 
 - Output `<out>/task-<N>-review.md`; prints the path to stdout.
-- Contents: the Task N block (interface, tests, acceptance) plus `git diff <base>` in a
+- The specs come from the plan's `**Spec files:**`; `--spec` is for a legacy plan only.
+- Contents: the Task N block (interface, tests, acceptance); the spec sections the
+  task's `**Spec:**` line names, pasted as context and labeled `[<spec id>] <heading>`
+  when the plan declares more than one spec file; and `git diff <base>` in a
   fenced `diff` block; fence length exceeds the longest backtick run in the diff body,
   minimum 3.
-- Missing task number or a failed git invocation → nonzero exit, message on stderr.
+- Missing task number, a task declaring `**Spec:**` in a plan with no spec, an
+  unmatched or ambiguous section name, a spec set that fails to load (`--spec` given
+  alongside `**Spec files:**`, a declared path naming no file or resolving outside the
+  repository root, an undeclared `[<spec id>]`), or a failed git invocation → nonzero
+  exit, message on stderr.
 
 ### Shared behavior
 
@@ -482,8 +530,11 @@ review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
   nothing else."
 - Diff text never passes through orchestrating context: the orchestrator hands file
   paths, and a worker reports back in one paragraph, not a transcript. On Codex, the
-  runner pre-assembles the reviewer's input with `review-packet.py`, since a
-  `codex exec` reviewer is a subprocess and cannot gather its own context; on Claude
+  runner pre-assembles the reviewer's input with `review-packet.py`, so the diff is
+  computed once against the right base. A per-task packet carries that diff and the
+  task's named spec sections as pasted context; the final-review packet and the doc-sync
+  brief list spec paths instead, and the reviewer reads those files itself
+  (`codex-runner` spec: Runner). On Claude
   the reviewer subagent self-serves its own diff and spec, and `review-packet.py` is
   not used.
 
@@ -507,6 +558,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-03: a plan declares its spec files in a `**Spec files:**` header and its tasks name sections as `[<spec id>] <heading>`, so one plan implements any number of specs and every tool reads them from the plan; `--spec` remains for legacy plans only. An exact heading match now wins over a prefix match. Until now a run took one `--spec`, and a plan amending two specs got coverage checking on one and silence on the other (#62)
 2026-10-03: plan review — a cold reviewer validates a plan against its spec before execution is offered: no plan element contradicts the spec, every requirement in a named section is covered by a plan promise, and plan lint runs before the packet and on the amended plan. Until now the only checks were the author's self-review and a lint rule satisfied by naming a section, so a spec obligation dropped at planning surfaced only at the final review (#97, #113)
 2026-10-03: TDD test scope — verify-GREEN runs the touched test files, the whole suite once at completion (plan close-out for a plan task); coverage is per behavior through a public interface, not per function; lowest level that proves it; the description-asserting anti-pattern covers a stand-in for an effect the harness cannot observe. Replaces "run the full suite" on every cycle and "every new function/method has a test", which drove repeated heavy-suite runs and tests coupled to internals in two downstream repos
 2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` `` over combined output) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)

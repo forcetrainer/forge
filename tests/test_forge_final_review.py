@@ -337,7 +337,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -370,7 +370,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -406,7 +406,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -441,7 +441,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -472,7 +472,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -503,7 +503,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -529,7 +529,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -572,7 +572,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             forge_run, "write_final_review_receipt", side_effect=spy,
         ):
             outcome = forge_run.run_final_review_loop(
-                self.spec, run_base, self.run_dir, self.fake, self.d,
+                [self.spec], run_base, self.run_dir, self.fake, self.d,
                 "standard", "auto", threads, plan_path=plan,
             )
         self.assertEqual(outcome.status, "passed")
@@ -596,7 +596,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         ])
         threads = {}
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", threads, plan_path=plan,
         )
         self.assertEqual(outcome.status, "escalated")
@@ -711,7 +711,7 @@ class FinalReviewCitableSetTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                      # verification
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan, seeded_findings=seeded,
         )
         self.assertEqual(outcome.status, "passed")
@@ -737,7 +737,7 @@ class FinalReviewCitableSetTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                      # verification
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
@@ -756,7 +756,7 @@ class FinalPacketCitableTests(unittest.TestCase):
             f.write(PLAN_FINAL_WITH_TESTS)
         citable = forge_checklist.final_citable_refs(plan, spec)
         path = forge_git._final_packet(
-            spec, "HEAD", "", d, citable=citable,
+            [spec], "HEAD", "", d, citable=citable,
         )
         with open(path) as f:
             packet = f.read()
@@ -771,7 +771,7 @@ class FinalPacketCitableTests(unittest.TestCase):
         spec = os.path.join(d, "spec.md")
         with open(spec, "w") as f:
             f.write(SPEC_WITH_ALPHA)
-        path = forge_git._final_packet(spec, "HEAD", "", d)
+        path = forge_git._final_packet([spec], "HEAD", "", d)
         with open(path) as f:
             self.assertNotIn("Citable refs", f.read())
 

@@ -3,8 +3,8 @@
 self-contained review packet for a reviewer.
 
 Usage:
-    review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
-        [--prior-findings <path>] [--checklist <path>] [--citable <path>]
+    review-packet.py <plan.md> <task-number> --base <git-ref> [--spec <spec.md>]
+        [--out <dir>] [--prior-findings <path>] [--checklist <path>] [--citable <path>]
 
 Never emits a silently thin packet: any failure to locate the task block or
 to run git exits nonzero with a message on stderr.
@@ -209,6 +209,54 @@ def build_spec_context_section(spec_sections):
     return "\n".join(parts).rstrip("\n") + "\n"
 
 
+def task_spec_sections(plan_path, task_block, task_number, legacy_spec_path=None):
+    """The ``(label, body)`` pairs for the sections ``task_block``'s
+    ``**Spec:**`` line names, resolved through the plan's spec set — the one
+    implementation behind both this command line and forge_git._packet_for.
+    The label is ``[<spec id>] <heading>`` when the plan declares more than one
+    spec file. ``None`` when the task declares no ``**Spec:**``. Raises
+    RuntimeError naming the cause on a malformed entry or spec set.
+    extract-brief.py is loaded here, not at import: forge_common loads this
+    module before it loads extract-brief."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "review_packet_extract_brief",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "extract-brief.py"),
+    )
+    eb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eb)
+    entries = eb.parse_spec_entries(task_block)
+    if not entries:
+        return None
+    resolved = eb.resolve_entries(
+        entries, eb.load_spec_set(plan_path, legacy_spec_path), task_number
+    )
+    return [(r.label, "".join(r.lines)) for r in resolved]
+
+
+def build_spec_files_section(spec_paths, named_sections=None):
+    """Render the '## Specs' section the final-review packet and the doc-sync
+    brief carry in place of spec text: one '- <path>' line per spec, each
+    followed by the section labels the plan's tasks name in it
+    (``named_sections`` maps a spec path to its labels), and an instruction to
+    open the files. An empty ``spec_paths`` (a plan with no spec) renders
+    'This plan has no spec.'. Never reads a spec file."""
+    if not spec_paths:
+        return "## Specs\n\nThis plan has no spec.\n"
+    named_sections = named_sections or {}
+    lines = [
+        "## Specs",
+        "",
+        "Read these files yourself; their text is not in this packet.",
+        "",
+    ]
+    for path in spec_paths:
+        lines.append("- {}".format(path))
+        for label in named_sections.get(path, []):
+            lines.append("  - section: {}".format(label))
+    return "\n".join(lines) + "\n"
+
+
 def build_prior_findings_section(prior_findings):
     """Render the prior attempt's findings (as loaded from --prior-findings)
     into a packet section instructing the reviewer to label each current
@@ -344,6 +392,13 @@ def main(argv=None):
     parser.add_argument("--base", required=True)
     parser.add_argument("--out", default=None)
     parser.add_argument(
+        "--spec",
+        default=None,
+        metavar="PATH",
+        help="spec file for a legacy plan with no **Spec files:** header; "
+        "pastes the sections the task's **Spec:** line names",
+    )
+    parser.add_argument(
         "--prior-findings",
         default=None,
         metavar="PATH",
@@ -472,6 +527,14 @@ def main(argv=None):
         )
         return 1
 
+    try:
+        spec_sections = task_spec_sections(
+            args.plan, task_block, args.task_number, args.spec
+        )
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+
     plan_dir = os.path.dirname(os.path.abspath(args.plan)) or "."
 
     try:
@@ -482,7 +545,7 @@ def main(argv=None):
 
     packet = build_packet(
         task_block, args.base, diff_output, prior_findings, checklist,
-        citable=citable,
+        citable=citable, spec_sections=spec_sections,
     )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()

@@ -381,7 +381,7 @@ class FinalReviewSeedPacketTests(_GitFixtureCase):
                  rp, "build_verification_packet", side_effect=_spy_verification
              ):
             outcome = forge_run.run_final_review_loop(
-                self.spec, run_base, run_dir, self.fake, self.d, "standard",
+                [self.spec], run_base, run_dir, self.fake, self.d, "standard",
                 "auto", {}, seeded_findings=seeded,
             )
 
