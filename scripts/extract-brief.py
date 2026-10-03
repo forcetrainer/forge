@@ -46,10 +46,9 @@ ANY_LEVEL_TASK_HEADING_RE = re.compile(r'^(#{1,6})\s+Task\s+(\d+):')
 FIELD_LINE_RE = re.compile(r'^\*\*.*:\*\*')
 FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
 # A heading line terminating a field clause block: '#' through '######' at
-# column 0 (spec: Plan documents, Field clause grammar) — any heading level,
-# matching `forge_plan._field_text`'s task-field boundary. Anchored to the
-# start of the line, so a '#' inside inline code or mid-line prose never
-# matches.
+# column 0 (spec: Plan documents, Field clause grammar) — any heading level.
+# Anchored to the start of the line, so a '#' inside inline code or mid-line
+# prose never matches.
 CLAUSE_BLOCK_HEADING_RE = re.compile(r'^#{1,6}\s')
 
 
