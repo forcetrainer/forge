@@ -250,7 +250,11 @@ sections are coverage items there.
 packet and the Claude reviewer prompt alike; task and final, discovery and verification
 — carries a `## Citable refs` section listing that review's
 citable set, one id per line, and the verdict instruction tells the reviewer to copy a
-`contract_ref` verbatim from it. Validation stays exact membership: a near-miss id is a
+`contract_ref` verbatim from it. The section opens with one line stating its role:
+these are ids a finding's `contract_ref` may cite, not coverage items — `coverage`
+answers the `## Contract checklist` only. Unlabeled, the list read as more items to
+cover: observed 2026-10-03, both reviewers shown it covered its `spec:` ids and failed
+validation on unknown checklist ids. Validation stays exact membership: a near-miss id is a
 defect, never normalized to the id it resembles (`parsers-fail-loud`). Observed
 2026-10-02: 6 of 16 validation retries across one repo's runs cited invented slugs
 (`spec:verification`, `spec:python-inspector-contract`) — the instruction said
@@ -1040,6 +1044,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-03: the `## Citable refs` section opens with a line saying its ids are citable, not coverage items — both reviewers shown the unlabeled list covered its `spec:` ids and needed a validation retry
 2026-10-02: the verdict-validation retry resumes the reviewer that emitted the invalid verdict (cold only as a failed-resume fallback); every review packet prints its citable ids, and `spec:` ids are the heading text, not a slug; a `violated` coverage entry names its backing finding via `finding`, replacing the contract_ref-equals-id rule — together the cause of 16 of 16 observed retries and of retries replacing findings (1→6, 3→2)
 2026-10-02: Codex standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. Standard and complex still share one model and differ by effort. Verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-23: Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high. GPT-6 shipped no mid-tier model, so standard and complex share Sol and complex takes high effort, the one deliberate departure from provider defaults. Supersedes the opus·high-against-sol·medium asymmetry note. Model ids verified with `codex exec` on codex-cli 0.154.0
