@@ -549,6 +549,48 @@ class FinalCitableRefsTests(unittest.TestCase):
         )
 
 
+class RenderCitableSectionTests(unittest.TestCase):
+    ROLE = ("Ids a finding's contract_ref may cite. Not coverage items "
+            "\u2014 coverage answers the Contract checklist only.")
+
+    def test_role_line_sits_between_heading_and_first_id(self):
+        out = fc.render_citable_section(["t1.t1", "g1"])
+        self.assertTrue(
+            out.startswith("## Citable refs\n\n" + self.ROLE + "\n\n- g1\n"),
+            out,
+        )
+
+    def test_role_line_contains_no_heading_marker(self):
+        line = fc.render_citable_section(["g1"]).split("\n")[2]
+        self.assertNotIn("##", line)
+
+    def test_role_line_names_contract_ref_and_denies_coverage_items(self):
+        line = fc.render_citable_section(["g1"]).split("\n")[2]
+        self.assertIn("contract_ref", line)
+        self.assertIn("Not coverage items", line)
+
+    def test_lists_every_id_once_sorted_under_the_heading(self):
+        out = fc.render_citable_section(["t1.t2", "g1", "t1.t1", "g1"])
+        self.assertEqual(
+            out, "## Citable refs\n\n" + self.ROLE
+            + "\n\n- g1\n- t1.t1\n- t1.t2\n",
+        )
+
+    def test_spec_id_renders_as_collapsed_heading_text_citable_refs_produces(self):
+        tmp = tempfile.mkdtemp(prefix="forge-checklist-render-citable-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plan_path = os.path.join(tmp, "plan.md")
+        spec_path = os.path.join(tmp, "spec.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(PLAN_MD)
+        with open(spec_path, "w", encoding="utf-8") as f:
+            f.write(SPEC_MD)
+        refs = fc.citable_refs(plan_path, spec_path, 1)
+        self.assertIn("spec:Alpha section", refs)
+        out = fc.render_citable_section(refs)
+        self.assertIn("\n- spec:Alpha section\n", out)
+
+
 class CitableCLITests(unittest.TestCase):
     """--citable composes with the existing scope flags: --task N --citable
     emits that task's citable set, --final --citable the whole plan's, both
@@ -607,12 +649,40 @@ class CitableCLITests(unittest.TestCase):
         self.assertIn("t1.t1", loaded)
         self.assertIn("spec:Alpha section", loaded)
 
-    def test_citable_with_format_md_is_rejected(self):
+    def test_citable_with_format_md_prints_the_rendered_section(self):
+        # Replaces test_citable_with_format_md_is_rejected: the old rejection
+        # is gone; --citable --format md is the Claude orchestrator's way to
+        # get the same section the Codex packet carries.
         result = self.run_cli([
             self.plan_path, "--spec", self.spec_path, "--task", "1",
             "--citable", "--format", "md",
         ])
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.rstrip("\n"),
+            fc.render_citable_section(
+                fc.citable_refs(self.plan_path, self.spec_path, 1)
+            ).rstrip("\n"),
+        )
+        self.assertIn("## Citable refs", result.stdout)
+        self.assertIn(RenderCitableSectionTests.ROLE, result.stdout)
+
+    def test_final_citable_with_format_md_prints_the_rendered_section(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--final", "--citable",
+            "--format", "md",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("## Citable refs", result.stdout)
+        self.assertIn("- t1.t1", result.stdout)
+
+    def test_citable_without_format_md_still_emits_the_json_array(self):
+        result = self.run_cli([
+            self.plan_path, "--spec", self.spec_path, "--task", "1",
+            "--citable",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsInstance(json.loads(result.stdout), list)
 
     def test_citable_still_requires_a_scope_flag(self):
         result = self.run_cli([

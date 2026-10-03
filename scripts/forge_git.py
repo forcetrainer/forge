@@ -131,7 +131,7 @@ def _git_diff(cwd, base):
 
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
-                 checklist=None, spec_path=None):
+                 checklist=None, spec_path=None, citable=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -174,6 +174,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
         review_kind="discovery", spec_sections=spec_sections,
+        citable=citable,
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:
@@ -182,7 +183,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
 
 
 def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
-                   checklist=None):
+                   checklist=None, citable=None):
     """Whole-plan final-review packet: the spec + the whole-plan ``git diff
     <base>``, assembled by review-packet.py's fence-safe builder. On a re-review
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -191,12 +192,13 @@ def _final_packet(spec_path, base, diff, run_dir, prior_findings=None,
     identical to the per-task path (Final review spec: "the same loop").
     ``checklist`` mirrors ``_packet_for``'s: the final contract checklist (or
     None, the empty-checklist skip case), rendered after the diff and before
-    the prior-findings section."""
+    the prior-findings section. ``citable`` is the final citable set, rendered
+    as a '## Citable refs' section after the checklist (None omits it)."""
     with open(spec_path, "r", encoding="utf-8") as f:
         spec_text = f.read()
     packet = rp.build_packet(
         spec_text, base, diff, prior_findings=prior_findings, checklist=checklist,
-        review_kind="discovery",
+        review_kind="discovery", citable=citable,
     )
     path = os.path.join(run_dir, "final-review.md")
     with open(path, "w", encoding="utf-8") as f:

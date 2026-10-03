@@ -891,7 +891,8 @@ class ReviewVerdictInstructionTests(unittest.TestCase):
 
     def test_contract_ref_requires_a_citable_ref_from_this_review(self):
         instr = forge_common.REVIEW_VERDICT_INSTRUCTION
-        self.assertIn("a checklist id from this review's packet", instr)
+        self.assertIn("copied verbatim from the '## Citable refs' list", instr)
+        self.assertNotIn("slug", instr)
 
     def test_unverifiable_requires_reason_but_no_backing_finding(self):
         instr = forge_common.REVIEW_VERDICT_INSTRUCTION
@@ -930,3 +931,182 @@ class ReviewVerdictInstructionTests(unittest.TestCase):
             "carries no repair_task",
             instr,
         )
+
+
+# --- validation retry resumes its reviewer (Session continuity) -------------
+
+
+def _thread_stream(thread_id):
+    events = [
+        {"type": "thread.started", "thread_id": thread_id},
+        {"type": "turn.started"},
+        {"type": "turn.completed"},
+    ]
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+# A contract-breaking finding whose location has no line range: a location
+# defect, so the verdict is invalid and drives the one validation retry.
+_INVALID_LOCATION_MSG = json.dumps({
+    "verdict": "findings",
+    "findings": [{
+        "id": "f1", "summary": "BADLOC", "location": {"file": "f1.txt"},
+        "provenance": "in-diff", "impact": "contract-breaking",
+        "contract_ref": "Acceptance: `true`", "convergence": None,
+        "carried_from": None, "repair_task": None,
+    }],
+})
+
+
+class TaskReviewRetryResumeTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-review-retry-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir)
+        self.log = os.path.join(self.d, "fakelog")
+        self.plog = self.log + ".prompts"
+        self._old_env = {
+            k: os.environ.get(k) for k in (
+                "FORGE_FAKE_LOG", "FORGE_FAKE_RESPONSES", "FORGE_FAKE_PROMPT_LOG")
+        }
+        self.addCleanup(self._restore_env)
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
+        for args in (["init"], ["config", "user.email", "t@example.com"],
+                     ["config", "user.name", "Test"], ["add", "-A"],
+                     ["commit", "-m", "base"]):
+            subprocess.run(["git", *args], cwd=self.d, check=True,
+                           capture_output=True, text=True)
+
+    def _restore_env(self):
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _execute(self, responses):
+        plan = os.path.join(self.d, "plan.md")
+        with open(plan, "w") as f:
+            f.write(PLAN_STD_TRACKED)
+        path = os.path.join(self.d, "responses.json")
+        with open(path, "w") as f:
+            json.dump(responses, f)
+        os.environ["FORGE_FAKE_RESPONSES"] = path
+        os.environ["FORGE_FAKE_LOG"] = self.log
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = self.plog
+        task = forge_run.order_tasks(forge_run.parse_plan_tasks(plan))[0]
+        threads = {}
+        outcome = forge_run.execute_task(
+            task, plan, self.spec, self.run_dir, self.fake, self.d, threads,
+        )
+        return outcome, threads
+
+    def _review_calls(self):
+        pairs = []
+        for a, pr in zip(_log_argvs(self.log), _log_prompts(self.plog)):
+            if ("--output-last-message" in a
+                    and "task-1-review-last" in a[a.index("--output-last-message") + 1]):
+                pairs.append((a, pr))
+        return pairs
+
+    def test_invalid_discovery_verdict_retries_by_resuming_recorded_thread(self):
+        outcome, threads = self._execute([
+            {"exit": 0, "msg": ""},                                   # worker
+            {"exit": 0, "msg": _INVALID_LOCATION_MSG,
+             "stdout": _thread_stream("th-rev1")},                    # review (invalid)
+            {"exit": 0, "msg": _pass_msg()},                          # retry
+        ])
+        self.assertEqual(outcome.status, "passed")
+        calls = self._review_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("resume", calls[0][0])
+        self.assertIn("resume", calls[1][0])
+        self.assertIn("th-rev1", calls[1][0])
+
+    def test_resumed_retry_prompt_has_defects_and_instruction_but_no_diff(self):
+        self._execute([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _INVALID_LOCATION_MSG,
+             "stdout": _thread_stream("th-rev1")},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        calls = self._review_calls()
+        first, retry = calls[0][1], calls[1][1]
+        self.assertIn("NEEDFIX", first)  # the discovery packet did carry the diff
+        self.assertIn("f1", retry)
+        self.assertIn("resubmit", retry.lower())
+        self.assertNotIn("NEEDFIX", retry)
+        self.assertNotIn("diff --git", retry)
+
+    def test_failed_retry_resume_dispatches_cold_with_packet_and_defects(self):
+        outcome, threads = self._execute([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _INVALID_LOCATION_MSG,
+             "stdout": _thread_stream("th-rev1")},
+            {"exit": 1, "msg": ""},                                   # retry resume fails
+            {"exit": 0, "msg": _pass_msg()},                          # cold fallback
+        ])
+        self.assertEqual(outcome.status, "passed")
+        calls = self._review_calls()
+        self.assertEqual(len(calls), 3)
+        self.assertIn("resume", calls[1][0])
+        self.assertNotIn("resume", calls[2][0])
+        self.assertIn("NEEDFIX", calls[2][1])           # the full packet
+        self.assertIn("f1", calls[2][1])                 # plus the defect list
+        self.assertIn("no location.lines", calls[2][1])
+        with open(os.path.join(self.run_dir, "task-1-attempt-1.json")) as f:
+            receipt = json.load(f)
+        self.assertTrue(receipt["resume_fallback"])
+
+    def test_missing_recorded_thread_retries_cold_with_packet_and_flags_fallback(self):
+        outcome, _ = self._execute([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _INVALID_LOCATION_MSG},   # no thread.started event
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(outcome.status, "passed")
+        calls = self._review_calls()
+        self.assertNotIn("resume", calls[1][0])
+        self.assertIn("NEEDFIX", calls[1][1])
+        with open(os.path.join(self.run_dir, "task-1-attempt-1.json")) as f:
+            self.assertTrue(json.load(f)["resume_fallback"])
+
+    # Deliberate no-change guards: these hold before and after the retry resumes.
+    def test_retry_does_not_advance_attempt_counter(self):
+        self._execute([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _INVALID_LOCATION_MSG,
+             "stdout": _thread_stream("th-rev1")},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertTrue(os.path.exists(
+            os.path.join(self.run_dir, "task-1-attempt-1.json")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.run_dir, "task-1-attempt-2.json")))
+
+    def test_second_invalid_verdict_is_still_a_contract_error(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._execute([
+                {"exit": 0, "msg": ""},
+                {"exit": 0, "msg": _INVALID_LOCATION_MSG,
+                 "stdout": _thread_stream("th-rev1")},
+                {"exit": 0, "msg": _INVALID_LOCATION_MSG},
+            ])
+        self.assertIn("still invalid after one retry", str(ctx.exception))
+
+    def test_valid_first_verdict_dispatches_exactly_once(self):
+        self._execute([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg(), "stdout": _thread_stream("th-rev1")},
+        ])
+        self.assertEqual(len(self._review_calls()), 1)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.run_dir, "task-1-retry-defects.md")))

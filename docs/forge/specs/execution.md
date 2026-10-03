@@ -205,7 +205,7 @@ satisfy — no new authoring burden, no new plan fields.
 
 | id form | source |
 |---|---|
-| `spec:<slug>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections` |
+| `spec:<heading>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections`; `<heading>` is the section's heading text, whitespace-collapsed — not a slug |
 | `g<N>` | each clause of the plan header's `**Global Constraints:**` |
 | `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
 | `t<N>.a<M>` | each `;`-separated clause of task N's `**Acceptance:**` line **whose content is not solely an inline-code command** — those are already executed deterministically by the acceptance runner and would be dead checklist weight |
@@ -233,7 +233,7 @@ Two sets exist per review:
 | set | what it is | what it governs |
 |---|---|---|
 | **coverage items** | the task's own promises (`t<N>.t<M>`, `t<N>.a<M>`, `g<N>`) | every id the reviewer must return a `coverage` verdict on |
-| **citable refs** | the coverage items **plus** the `spec:<slug>` id of every section the task's `**Spec:**` line names | every id a finding's `contract_ref` may cite |
+| **citable refs** | the coverage items **plus** the `spec:<heading>` id of every section the task's `**Spec:**` line names | every id a finding's `contract_ref` may cite |
 
 The coverage set is what a reviewer is *obliged to answer for*, and posing a whole spec
 section there is what manufactured findings. The citable set is what a finding may
@@ -245,6 +245,20 @@ instead of halting. Observed 2026-09-06 — a reviewer correctly identified a
 `contract_ref: null`, and the finding dispositioned to `defer` rather than reaching the
 human gate it was written for. In the final review the two sets coincide, since spec
 sections are coverage items there.
+
+**Citable ids are printed, never derived.** Every reviewer input — the Codex review
+packet and the Claude reviewer prompt alike; task and final, discovery and verification
+— carries a `## Citable refs` section listing that review's
+citable set, one id per line, and the verdict instruction tells the reviewer to copy a
+`contract_ref` verbatim from it. The section opens with one line stating its role:
+these are ids a finding's `contract_ref` may cite, not coverage items — `coverage`
+answers the `## Contract checklist` only. Unlabeled, the list read as more items to
+cover: observed 2026-10-03, both reviewers shown it covered its `spec:` ids and failed
+validation on unknown checklist ids. Validation stays exact membership: a near-miss id is a
+defect, never normalized to the id it resembles (`parsers-fail-loud`). Observed
+2026-10-02: 6 of 16 validation retries across one repo's runs cited invented slugs
+(`spec:verification`, `spec:python-inspector-contract`) — the instruction said
+`spec:<slug>` and no packet printed the real id.
 
 CLI: `forge_checklist.py <plan.md> --spec <spec.md> [--task N | --final] [--out
 <path>]` → JSON `[{"id", "source", "text"}]` plus a rendered `## Contract checklist`
@@ -281,7 +295,7 @@ identical contract.
 {
   "verdict": "pass" | "findings",
   "coverage": [
-    {"id": "t3.a1", "status": "satisfied" | "violated" | "n/a" | "unverifiable", "evidence": "file:line, hunk, or why n/a / why unverifiable"}
+    {"id": "t3.a1", "status": "satisfied" | "violated" | "n/a" | "unverifiable", "evidence": "file:line, hunk, or why n/a / why unverifiable", "finding": "f1"}
   ],
   "findings": [
     {
@@ -290,7 +304,7 @@ identical contract.
       "location": {"file": "path", "lines": "12-20"},
       "provenance": "in-diff" | "pre-existing",
       "impact": "contract-breaking" | "improvement" | "unverifiable",
-      "contract_ref": "a checklist id from this review's packet" | null,
+      "contract_ref": "an id copied verbatim from the packet's ## Citable refs" | null,
       "convergence": "resolved" | "carried" | "new" | null,
       "carried_from": "f1" | null,
       "repair_task": {"title": "…", "files": ["…"], "spec": "…", "tests": ["…"], "acceptance": ["…"], "tier": "standard"} | null
@@ -312,8 +326,8 @@ identical contract.
   itself, and omitted it from the verdict; it survived only because a human read the
   chat transcript (#63).
 - `impact` is `contract-breaking` only when `contract_ref` names **a citable ref for
-  this review** — a coverage item, or a `spec:<slug>` section the task declares (Contract
-  checklist, above). A null `contract_ref`, or one naming anything outside that set,
+  this review** — a coverage item, or a `spec:<heading>` section the task declares, as
+  listed in the packet's `## Citable refs` (Contract checklist, above). A null `contract_ref`, or one naming anything outside that set,
   downgrades the finding to `improvement` regardless of the reviewer's label — the
   named-evidence rule, mirroring the tier-policy floor. Membership, not non-nullness, is
   the test: a bare presence check costs the reviewer one arbitrary string, which makes
@@ -371,12 +385,25 @@ proposes, the runner decides:
 
 - every checklist id appears exactly once; a missing, unknown or duplicated id is a
   defect;
-- every `violated` id is named by the `contract_ref` of at least one finding in the same
-  verdict; a `violated` with no backing finding is a defect;
-- every finding's non-null `contract_ref` is a citable ref for this review — a coverage
-  item or a declared `spec:<slug>` section; one naming anything else is a defect. Together with the `violated` rule above this closes
-  the loop in both directions — a violated item must have a finding, and a finding must
-  cite a real item;
+- every `violated` entry carries `finding`, naming a finding in the same verdict that is
+  **effectively** contract-breaking — `impact: "contract-breaking"` **and** a non-null
+  `contract_ref` that is a citable ref for this review, i.e. a finding the named-evidence
+  rule does not downgrade. A missing `finding`, one naming no finding in the verdict, one
+  naming a finding of any other impact, or one naming a finding whose `contract_ref` is
+  null or not citable is a defect; otherwise a violated item could be backed by a
+  finding that dispositions to `defer` and is never fixed or halted. Several entries may
+  name the same finding — one defect commonly breaks several items, and the backing
+  link runs from the coverage entry to the finding, so the finding's single
+  `contract_ref` must be citable but never has to equal each violated id. That equality was the previous
+  rule and is **replaced, not kept as an alternative**: it forced a reviewer to split
+  one defect into a finding per violated item or under-report what it breaks. Observed
+  2026-10-02: 12 of 16 validation retries across one repo's runs were unbacked
+  `violated` ids, one of them naming six items at once;
+- `finding` on an entry whose status is not `violated` is a defect;
+- every finding's non-null `contract_ref` is a citable ref for this review — an id
+  listed in the packet's `## Citable refs`; one naming anything else is a defect.
+  Together with the `violated` rule above this closes the loop in both directions — a
+  violated item must have a finding, and a finding must cite a real item;
 - `evidence` is non-empty on every entry. `n/a` requires a reason in `evidence` — it is
   the honest escape for a checklist item the diff cannot touch, and it is what keeps the
   requirement from degrading into rubber-stamping.
@@ -385,11 +412,18 @@ proposes, the runner decides:
   correct for a known break and coercive for an unsettled one, and a reviewer with no
   truthful status left reaches for the one that manufactures work.
 
-On invalid: **one retry**, re-dispatching with the specific defect named. That retry
-never advances the attempt counter or the convergence state — it is not a rework lap. A
-second invalid verdict is a contract error, consistent with the unparseable-verdict
-behavior. Location validation (below) runs on both review kinds and feeds the same
-retry mechanism.
+On invalid: **one retry**, which **resumes the reviewer that emitted the invalid
+verdict** — on discovery too, since by then that reviewer's session exists. The prompt
+is the defect list and the instruction to resubmit the full verdict, changing only what
+the defects require; no packet, since the resumed reviewer holds it. A failed resume
+falls back to a cold spawn with the full packet plus the defect list, recorded as
+`resume_fallback` (Session continuity). The retry corrects one verdict; it is not a
+second review. A cold retry was: it re-read the packet blind, its findings replaced the
+original's, and both differed — observed 2026-10-02, a final review's 1 finding became
+6 and a task review's 3 became 2. That retry never advances the attempt counter or the
+convergence state — it is not a rework lap. A second invalid verdict is a contract
+error, consistent with the unparseable-verdict behavior. Location validation (below)
+runs on both review kinds and feeds the same retry mechanism.
 
 ## Document review contract
 
@@ -438,7 +472,10 @@ auto-amend path by labelling it a fact.
   Nothing in these kinds is auto-applied: a spec defect is often a decision, not a repair.
 
 **Invalid verdict:** one retry naming the specific defect, then a contract error —
-identical to the reviewer verdict contract's behavior, and for the same reason.
+identical to the reviewer verdict contract's behavior, and for the same reason. The
+retry resumes the reviewer that emitted the invalid verdict (on Claude, `SendMessage`
+to it), with the defect list as its prompt; a failed resume falls back to a fresh
+reviewer given the packet plus the defect list.
 
 ## The disposition matrix
 
@@ -778,6 +815,7 @@ write, and a fresh reviewer re-reads the full packet.
 | final reviewer, discovery | **cold — deliberately** |
 | final reviewer, verification | **resume** — repair delta only |
 | final-review fixer | **cold once, then resume**; the brief carries findings and affected paths only |
+| any reviewer, verdict-validation retry | **resume** the reviewer that emitted the invalid verdict — prompt is the defect list alone |
 
 **Discovery review stays cold.** An independent first read is the entire justification
 for a separate reviewer, and resuming it for discovery would hand the review to an agent
@@ -786,7 +824,9 @@ Verification is a narrower ask — "are f1–f4 resolved, did the repair break w
 touched" — where the residual bias risk is under-flagging *new* issues, which is
 precisely what the coverage requirement on the discovery pass guards. This is a
 deliberate qualification of the fresh-context rule, not an exception to it: **fresh for
-discovery, resumed for verification.**
+discovery, resumed for verification.** The verdict-validation retry resumes a discovery
+reviewer too, and costs it no independence: the session it resumes is the reviewer's
+own, holding its own first read and nothing of the worker's.
 
 **Scope and failure.** Resume is scoped to **one invocation**. After a halt a human may
 hand-edit code, so a persisted session's context is stale and misleading and
@@ -806,9 +846,9 @@ contract, different mechanism; no thread-id plumbing on the Claude path.
 
 ### Delta-scoped verification packets
 
-- A verification packet is the outstanding findings, the **repair delta** and the reduced
-  checklist. Not the whole-plan diff, not the full spec — the resumed reviewer already
-  holds both in session.
+- A verification packet is the outstanding findings, the **repair delta**, the reduced
+  checklist and the `## Citable refs` section. Not the whole-plan diff, not the full
+  spec — the resumed reviewer already holds both in session.
 - The repair delta is `git diff <pre-repair tree>`, where the pre-repair tree is
   snapshotted with `git stash create` (or `git write-tree`) before the repair dispatch —
   no working-tree mutation, no interference with the single `fix: final-review` commit
@@ -1004,6 +1044,8 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-03: the `## Citable refs` section opens with a line saying its ids are citable, not coverage items — both reviewers shown the unlabeled list covered its `spec:` ids and needed a validation retry
+2026-10-02: the verdict-validation retry resumes the reviewer that emitted the invalid verdict (cold only as a failed-resume fallback); every review packet prints its citable ids, and `spec:` ids are the heading text, not a slug; a `violated` coverage entry names its backing finding via `finding`, replacing the contract_ref-equals-id rule — together the cause of 16 of 16 observed retries and of retries replacing findings (1→6, 3→2)
 2026-10-02: Codex standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. Standard and complex still share one model and differ by effort. Verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-23: Codex routing moves to GPT-6 — trivial gpt-6-luna·low, standard gpt-6-sol·medium, complex gpt-6-sol·high. GPT-6 shipped no mid-tier model, so standard and complex share Sol and complex takes high effort, the one deliberate departure from provider defaults. Supersedes the opus·high-against-sol·medium asymmetry note. Model ids verified with `codex exec` on codex-cli 0.154.0
 

@@ -14,7 +14,7 @@
 **Because:** Silent deferral of a spec'd requirement ships an incomplete feature that looks complete. Non-spec polish is the only thing an agent may judge out of scope on its own.
 **Source:** docs/forge/archive/DECISIONS.md 2026-06-10
 ## discovery-review-is-cold
-**Rule:** A task's discovery review runs on a fresh agent; only verification laps may resume it.
+**Rule:** A task's discovery review runs on a fresh agent; only verification laps and the single verdict-validation retry may resume it.
 **Scope:** repo
 **Because:** Independence is the entire justification for a separate reviewer — a resumed discovery review inherits the worker's framing and stops being a second opinion. Verification re-checks named findings, so continuity costs nothing there.
 **Source:** docs/forge/specs/execution.md

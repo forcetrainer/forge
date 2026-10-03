@@ -99,7 +99,8 @@ class ValidateCoverageTests(unittest.TestCase):
             findings=findings or [],
             coverage=[
                 forge_common.CoverageEntry(
-                    id=e["id"], status=e["status"], evidence=e.get("evidence", "")
+                    id=e["id"], status=e["status"],
+                    evidence=e.get("evidence", ""), finding=e.get("finding"),
                 )
                 for e in coverage
             ],
@@ -165,18 +166,142 @@ class ValidateCoverageTests(unittest.TestCase):
         self.assertIn("spec:A", defects[0])
         self.assertIn("violated", defects[0])
 
-    def test_violated_backed_by_finding_is_valid(self):
-        checklist = _checklist(["spec:A"])
-        finding = forge_common.Finding(
+    def _bf(self, **kw):
+        base = dict(
             id="f1", summary="bug", file="foo.py", lines="2-2",
             provenance="in-diff", impact="contract-breaking",
             contract_ref="spec:A",
         )
-        verdict = self._verdict(
-            [{"id": "spec:A", "status": "violated", "evidence": "see f1"}],
-            findings=[finding],
+        base.update(kw)
+        return forge_common.Finding(**base)
+
+    def _violated(self, entries, findings, citable=None):
+        checklist = _checklist([e["id"] for e in entries])
+        cov = [dict(e, status="violated", evidence="see f") for e in entries]
+        return forge_dispose.validate_coverage(
+            self._verdict(cov, findings=findings), checklist, citable
         )
-        self.assertEqual(forge_dispose.validate_coverage(verdict, checklist), [])
+
+    def test_violated_backed_by_finding_is_valid(self):
+        self.assertEqual(
+            self._violated(
+                [{"id": "spec:A", "finding": "f1"}], [self._bf()],
+                citable={"spec:A"},
+            ), [],
+        )
+
+    def test_several_violated_entries_naming_one_finding_are_valid(self):
+        entries = [
+            {"id": "spec:A", "finding": "f1"},
+            {"id": "spec:B", "finding": "f1"},
+            {"id": "spec:C", "finding": "f1"},
+        ]
+        self.assertEqual(
+            self._violated(
+                entries, [self._bf(contract_ref="spec:A")],
+                citable={"spec:A", "spec:B", "spec:C"},
+            ), [],
+        )
+
+    def test_violated_with_no_finding_names_entry_id(self):
+        defects = self._violated([{"id": "spec:A"}], [self._bf()])
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+        self.assertIn("violated", defects[0])
+
+    def test_violated_finding_naming_no_finding_is_defect(self):
+        defects = self._violated(
+            [{"id": "spec:A", "finding": "f9"}], [self._bf()]
+        )
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+        self.assertIn("f9", defects[0])
+
+    def test_violated_backing_improvement_or_unverifiable_is_defect(self):
+        for impact in ("improvement", "unverifiable"):
+            defects = self._violated(
+                [{"id": "spec:A", "finding": "f1"}],
+                [self._bf(impact=impact)],
+            )
+            self.assertEqual(len(defects), 1, impact)
+            self.assertIn("spec:A", defects[0])
+            self.assertIn(impact, defects[0])
+
+    def test_violated_backing_null_contract_ref_is_defect(self):
+        defects = self._violated(
+            [{"id": "spec:A", "finding": "f1"}],
+            [self._bf(contract_ref=None)],
+        )
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+        self.assertIn("contract_ref", defects[0])
+
+    def test_violated_backing_ref_outside_citable_is_defect(self):
+        defects = self._violated(
+            [{"id": "spec:A", "finding": "f1"}],
+            [self._bf(contract_ref="spec:BOGUS")],
+            citable={"spec:A"},
+        )
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+        self.assertIn("spec:BOGUS", defects[0])
+
+    def test_no_citable_set_accepts_any_non_null_contract_ref(self):
+        self.assertEqual(
+            self._violated(
+                [{"id": "spec:A", "finding": "f1"}],
+                [self._bf(contract_ref="spec:BOGUS")],
+            ), [],
+        )
+
+    def test_finding_on_non_violated_entry_is_defect(self):
+        for status in ("satisfied", "n/a", "unverifiable"):
+            checklist = _checklist(["spec:A"])
+            verdict = self._verdict(
+                [{"id": "spec:A", "status": status, "evidence": "why",
+                  "finding": "f1"}],
+                findings=[self._bf()],
+            )
+            defects = forge_dispose.validate_coverage(verdict, checklist)
+            self.assertEqual(len(defects), 1, status)
+            self.assertIn("spec:A", defects[0])
+            self.assertIn(status, defects[0])
+
+    def test_violated_id_equal_to_contract_ref_without_finding_is_defect(self):
+        # Old rule: contract_ref == violated id backed it. Removed.
+        defects = self._violated([{"id": "spec:A"}], [self._bf()])
+        self.assertEqual(len(defects), 1)
+        self.assertIn("spec:A", defects[0])
+
+    def test_non_string_finding_fails_parsing_naming_entry(self):
+        msg = json.dumps({
+            "verdict": "pass",
+            "coverage": [
+                {"id": "spec:A", "status": "violated", "evidence": "e",
+                 "finding": 7},
+            ],
+        })
+        with self.assertRaises(RuntimeError) as cm:
+            forge_dispose.parse_verdict(msg)
+        self.assertIn("spec:A", str(cm.exception))
+        self.assertIn("finding", str(cm.exception))
+
+    def test_parse_populates_finding_and_null_finding(self):
+        msg = json.dumps({
+            "verdict": "pass",
+            "coverage": [
+                {"id": "a", "status": "violated", "evidence": "e",
+                 "finding": "f1"},
+                {"id": "b", "status": "satisfied", "evidence": "e",
+                 "finding": None},
+                {"id": "c", "status": "satisfied", "evidence": "e"},
+            ],
+        })
+        v = forge_dispose.parse_verdict(msg)
+        self.assertEqual([e.finding for e in v.coverage], ["f1", None, None])
+
+    def test_instruction_documents_finding_field(self):
+        self.assertIn('"finding"', forge_common.REVIEW_VERDICT_INSTRUCTION)
 
     def test_coverage_required_on_pass_verdict_absent_is_defect(self):
         checklist = _checklist(["spec:A"])
@@ -788,7 +913,7 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
         )
 
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
-                    autofix="auto", checklist_path=None):
+                    autofix="auto", checklist_path=None, citable_path=None):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
@@ -798,6 +923,8 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
         ]
         if checklist_path:
             args += ["--checklist", checklist_path]
+        if citable_path:
+            args += ["--citable", citable_path]
         return args
 
     def test_checklist_absent_omits_coverage_fields_byte_identical(self):
@@ -865,6 +992,34 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
         self.assertFalse(d_with["coverage_valid"])
         self.assertEqual(len(d_with["coverage_defects"]), 1)
         self.assertIn("spec:A", d_with["coverage_defects"][0])
+
+    def test_cli_reports_backing_defects_with_citable(self):
+        v = self._write_json("v4.json", {
+            "verdict": "findings",
+            "coverage": [
+                {"id": "spec:A", "status": "violated", "evidence": "e",
+                 "finding": "f1"},
+                {"id": "spec:B", "status": "violated", "evidence": "e"},
+            ],
+            "findings": [
+                {"id": "f1", "summary": "bug",
+                 "location": {"file": "src.txt", "lines": "2-2"},
+                 "impact": "improvement", "contract_ref": "spec:A"},
+            ],
+        })
+        checklist = self._write_json(
+            "checklist4.json", _checklist(["spec:A", "spec:B"])
+        )
+        citable = self._write_json("citable4.json", ["spec:A", "spec:B"])
+        result = self.run_dispose(self._base_args(
+            v, checklist_path=checklist, citable_path=citable
+        ))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        self.assertFalse(d["coverage_valid"])
+        joined = " | ".join(d["coverage_defects"])
+        self.assertIn("improvement", joined)
+        self.assertIn("'spec:B' names no backing finding", joined)
 
 
 SPEC_WITH_SECTION = "# Spec\n\n## Some Section\n\nDetails.\n"
@@ -999,8 +1154,10 @@ class RunnerCoverageWiringTests(unittest.TestCase):
         # A task's checklist is the task's own promises, not the spec's
         # assertions: spec: items are a final-review-only source (Contract
         # checklist spec). "Some Section" still reaches the packet as spec
-        # context, just not as a coverage item.
-        self.assertNotIn("spec:Some Section", packet)
+        # context, just not as a coverage item. It is citable, so it is
+        # printed under '## Citable refs' but never as a checklist line.
+        self.assertNotIn("- spec:Some Section \u2014", packet)
+        self.assertIn("- spec:Some Section\n", packet)
         self.assertIn("t1.a1", packet)
 
     def test_incomplete_coverage_triggers_one_retry_naming_missing_ids(self):

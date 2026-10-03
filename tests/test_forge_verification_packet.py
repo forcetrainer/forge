@@ -226,6 +226,23 @@ class BuildVerificationPacketTests(unittest.TestCase):
         )
         self.assertNotIn("## Spec context", packet)
 
+    def test_citable_section_sits_alongside_the_reduced_checklist(self):
+        packet = rp.build_verification_packet(
+            self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n",
+            self._checklist()[:1], citable={"t1.a1", "g1", "spec:Alpha section"},
+        )
+        self.assertIn("## Contract checklist", packet)
+        self.assertIn("## Citable refs", packet)
+        self.assertIn("- g1\n", packet)
+        self.assertIn("- spec:Alpha section\n", packet)
+
+    def test_citable_none_has_no_citable_section(self):
+        packet = rp.build_verification_packet(
+            self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n",
+            self._checklist()[:1],
+        )
+        self.assertNotIn("Citable refs", packet)
+
     def test_checklist_none_omits_section(self):
         packet = rp.build_verification_packet(
             self._findings(), "diff --git a/f1.txt b/f1.txt\n+x\n", None
@@ -405,8 +422,45 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         self.assertNotIn("SPECMARKERUNIQUE", packet)
         # The reduced checklist (referenced by contract_ref="t1.a1") is present.
         self.assertIn("t1.a1", packet)
+        # The citable section rides on the verification packet too.
+        self.assertIn("## Citable refs", packet)
         # Outstanding finding text carried into the packet.
         self.assertIn("still missing the marker", packet)
+
+    def test_task_discovery_packet_carries_citable_section_and_reviewer_prompt_does(self):
+        plan = self._plan(PLAN_STD_CHECKLIST.replace(
+            "**Acceptance:**", "**Spec:** Alpha section\n\n**Acceptance:**"))
+        with open(self.spec, "w") as f:
+            f.write("# Spec\n\n## Alpha section\n\nALPHA body.\n")
+        self._init_repo()
+        plog = os.path.join(self.d, "prompts.log")
+        old = os.environ.get("FORGE_FAKE_PROMPT_LOG")
+        os.environ["FORGE_FAKE_PROMPT_LOG"] = plog
+        self.addCleanup(
+            lambda: os.environ.__setitem__("FORGE_FAKE_PROMPT_LOG", old)
+            if old is not None else os.environ.pop("FORGE_FAKE_PROMPT_LOG", None)
+        )
+        self._set_responses([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        task = self._task1(plan)
+        outcome = forge_run.execute_task(
+            task, plan, self.spec, self.run_dir, self.fake, self.d, {},
+        )
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        self.assertIn("## Citable refs", packet)
+        self.assertIn("- t1.a1\n", packet)
+        self.assertIn("- spec:Alpha section\n", packet)
+        with open(plog) as f:
+            prompts = [json.loads(line) for line in f]
+        self.assertTrue(
+            any("## Citable refs" in p and "- spec:Alpha section" in p
+                for p in prompts),
+            "no recorded reviewer prompt carried the citable section",
+        )
 
     def test_discovery_packet_still_full_task_and_diff(self):
         # Sanity: attempt 1 (discovery) is unaffected — full task block +
@@ -461,7 +515,10 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         with open(packet_path) as f:
             packet = f.read()
         self.assertIn("t1.a2", packet)
-        self.assertNotIn("t1.a1", packet)
+        # t1.a1 is citable (printed under '## Citable refs') but not a
+        # coverage item: the '## Contract checklist' section stays reduced.
+        self.assertNotIn("- t1.a1 \u2014", packet)
+        self.assertIn("- t1.a1\n", packet)
 
         with open(os.path.join(self.run_dir, "task-1-attempt-2.json")) as f:
             receipt = json.load(f)

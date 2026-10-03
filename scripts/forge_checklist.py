@@ -19,7 +19,7 @@ invokes the CLI.
 
 The *citable* set a review's findings may name as ``contract_ref`` is
 wider than the checklist it must render coverage on: ``citable_refs`` adds a
-task's declared ``spec:<slug>`` sections, and ``final_citable_refs`` adds
+task's declared ``spec:<heading>`` sections, and ``final_citable_refs`` adds
 every task's ``t<N>.t<M>`` ids to the final checklist. Both are emitted by
 the CLI's ``--citable`` modifier as the JSON id array ``forge_dispose.py
 --citable`` consumes.
@@ -164,7 +164,7 @@ def citable_refs(plan_path, spec_path, task_number):
     """The set of ids a per-task review's findings may cite as
     ``contract_ref``: this task's own coverage item ids (``build_task_
     checklist``'s ``g<N>``/``t<N>.t<M>``/``t<N>.a<M>``) plus the
-    ``spec:<slug>`` id of every section this task's ``**Spec:**`` line names
+    ``spec:<heading>`` id of every section this task's ``**Spec:**`` line names
     (Contract checklist: covering and citing are different acts). Coverage
     items are what the reviewer must render a verdict on; the citable set is
     deliberately wider, so a finding against code that contradicts the spec
@@ -294,6 +294,21 @@ def render_section(items):
     return "\n".join(lines) + "\n"
 
 
+CITABLE_ROLE_LINE = (
+    "Ids a finding's contract_ref may cite. Not coverage items "
+    "\u2014 coverage answers the Contract checklist only."
+)
+
+
+def render_citable_section(ids):
+    """A '## Citable refs' markdown section: one '- <id>' line per id, sorted.
+    The reviewer copies a finding's ``contract_ref`` verbatim from it —
+    citable ids are printed, never derived."""
+    lines = ["## Citable refs", "", CITABLE_ROLE_LINE, ""]
+    lines.extend("- {}".format(i) for i in sorted(set(ids)))
+    return "\n".join(lines) + "\n"
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="forge_checklist.py")
     parser.add_argument("plan")
@@ -308,14 +323,11 @@ def main(argv):
     # scoped exactly the same way (a task's own, or the whole plan's). A
     # separate --citable-task/--citable-final pair would restate that choice,
     # and a bare --citable would have no scope to compute against. It emits
-    # the JSON array of id strings `forge_dispose.py --citable` reads, so
-    # --format md is meaningless with it and is rejected rather than ignored
-    # (parsers fail loud).
+    # the JSON array of id strings `forge_dispose.py --citable` reads, or,
+    # with --format md, the rendered `## Citable refs` section the Claude
+    # reviewer prompt embeds.
     parser.add_argument("--citable", action="store_true")
     args = parser.parse_args(argv)
-
-    if args.citable and args.format == "md":
-        parser.error("--citable emits a JSON id array; --format md is not valid with it")
 
     try:
         if args.citable:
@@ -331,7 +343,9 @@ def main(argv):
         print(str(e), file=sys.stderr)
         return 1
 
-    if args.citable:
+    if args.citable and args.format == "md":
+        output = render_citable_section(refs)
+    elif args.citable:
         output = json.dumps(sorted(refs), indent=2)
     elif args.format == "json":
         output = json.dumps([asdict(it) for it in items], indent=2)

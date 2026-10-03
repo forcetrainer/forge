@@ -353,6 +353,73 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self.assertIn("th-rev1", review_calls[1])
         self.assertEqual(threads.get("final-reviewer"), "th-rev1")
 
+    def test_invalid_final_verdict_retries_by_resuming_final_reviewer_thread(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        bad = json.dumps({"verdict": "findings", "findings": [{
+            "id": "f1", "summary": "BADLOC", "location": {"file": "f1.txt"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "spec:Alpha section", "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }]})
+        self._responses([
+            {"exit": 0, "msg": bad, "stdout": _stream("th-fin1")},   # review (invalid)
+            {"exit": 0, "msg": json.dumps({"verdict": "pass", "coverage": [
+                {"id": cid, "status": "satisfied", "evidence": "stub"}
+                for cid in ("spec:Alpha section", "t1")]})},  # retry (resumed)
+        ])
+        threads = {}
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", threads, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "passed")
+        calls = [
+            (a, pr) for a, pr in zip(_log_argvs(self.log), _log_prompts(self.plog))
+            if "--output-last-message" in a
+            and "final-review-last" in a[a.index("--output-last-message") + 1]
+        ]
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("resume", calls[0][0])
+        self.assertIn("resume", calls[1][0])
+        self.assertIn("th-fin1", calls[1][0])
+        self.assertNotIn("diff --git", calls[1][1])
+
+    def test_verification_lap_retry_resumes_same_thread_as_verification_dispatch(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        f1 = os.path.join(self.d, "f1.txt")
+        bad = json.dumps({"verdict": "findings", "findings": [{
+            "id": "f2", "summary": "BADLOC", "location": {"file": "f1.txt"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "spec:Alpha section", "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }]})
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "issue", contract_ref="spec:Alpha section",
+            ), "stdout": _stream("th-rev1")},                        # a1 review
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "FIXED\n",
+             "stdout": _stream("th-fix1")},                          # a2 fix
+            {"exit": 0, "msg": bad, "stdout": _stream("th-rev1")},   # a2 verification (invalid)
+            {"exit": 0, "msg": _pass_msg()},                         # a2 retry
+        ])
+        threads = {}
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", threads, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "passed")
+        calls = [
+            a for a in _log_argvs(self.log)
+            if "--output-last-message" in a
+            and "final-review-last" in a[a.index("--output-last-message") + 1]
+        ]
+        self.assertEqual(len(calls), 3)
+        self.assertIn("th-rev1", calls[1])   # verification resumed
+        self.assertIn("resume", calls[2])
+        self.assertIn("th-rev1", calls[2])   # the retry: the same thread
+
     def test_verification_packet_has_no_whole_plan_diff_or_full_spec(self):
         # Demonstrates the cost claim directly: the packet the resumed
         # reviewer sees on a verification lap carries the repair delta and
@@ -674,6 +741,39 @@ class FinalReviewCitableSetTests(unittest.TestCase):
             "standard", "auto", {}, plan_path=plan,
         )
         self.assertEqual(outcome.status, "passed")
+
+
+class FinalPacketCitableTests(unittest.TestCase):
+    def test_final_packet_contains_the_final_citable_set_including_task_test_ids(self):
+        import forge_git
+        d = tempfile.mkdtemp(prefix="forge-final-packet-citable-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        plan = os.path.join(d, "plan.md")
+        with open(plan, "w") as f:
+            f.write(PLAN_FINAL_WITH_TESTS)
+        citable = forge_checklist.final_citable_refs(plan, spec)
+        path = forge_git._final_packet(
+            spec, "HEAD", "", d, citable=citable,
+        )
+        with open(path) as f:
+            packet = f.read()
+        self.assertIn("## Citable refs", packet)
+        self.assertIn("- t1.t1\n", packet)
+        self.assertIn("- spec:Alpha section\n", packet)
+
+    def test_final_packet_without_citable_has_no_section(self):
+        import forge_git
+        d = tempfile.mkdtemp(prefix="forge-final-packet-nocitable-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        path = forge_git._final_packet(spec, "HEAD", "", d)
+        with open(path) as f:
+            self.assertNotIn("Citable refs", f.read())
 
 
 if __name__ == "__main__":

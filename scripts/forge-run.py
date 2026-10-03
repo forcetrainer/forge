@@ -518,6 +518,24 @@ def _coverage_retry_packet_path(packet_path, defects, run_dir, label):
     return path
 
 
+def _retry_defects_path(defects, run_dir, label):
+    """The resumed-retry prompt: the defect list and the instruction to
+    resubmit the full verdict — no packet, since the resumed reviewer already
+    holds it (Coverage validation spec)."""
+    lines = [
+        "## Verdict retry — your prior verdict was invalid",
+        "",
+        "Fix these defects and resubmit your full verdict, changing only what "
+        "the defects require:",
+        "",
+    ]
+    lines.extend("- {}".format(d) for d in defects)
+    path = os.path.join(run_dir, "{}-retry-defects.md".format(label))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return path
+
+
 def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
@@ -555,7 +573,7 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     empty-checklist skip, so calling it unconditionally here is safe on a
     checklist-less task too."""
     defects = (
-        list(forge_dispose.validate_coverage(verdict, checklist))
+        list(forge_dispose.validate_coverage(verdict, checklist, citable))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)
@@ -567,7 +585,8 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
 
 
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
-                           review_kind="discovery", citable=None):
+                           review_kind="discovery", citable=None,
+                           arm_retry_resume=None):
     """Dispatch a review and validate its verdict against ``checklist``
     (coverage, discovery only), its findings' locations (both kinds), and its
     findings' ``contract_ref`` membership against ``citable`` (both kinds;
@@ -577,13 +596,27 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
     second invalid verdict is a contract error (raised, uncaught — same class
     as an unparseable verdict, never a halt). This is not a rework attempt:
     the caller must not advance the convergence attempt counter or touch
-    ConvergenceState for the retry. Returns ``(verdict, retried)``."""
+    ConvergenceState for the retry. When ``arm_retry_resume`` is given, the
+    retry **resumes the reviewer that emitted the invalid verdict** (Session
+    continuity spec): it is called to point the dispatch closure at the thread
+    the first dispatch recorded, and the retry prompt is the defect list alone
+    (``<label>-retry-defects.md``); the full packet plus defects
+    (``<label>-coverage-retry.md``) is passed as ``fallback_path`` and is sent
+    only if that resume fails and the closure falls back to a cold spawn.
+    Without it, the retry is a cold dispatch of the coverage-retry packet.
+    Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
     defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
-    verdict = dispatch_call(retry_path)
+    if arm_retry_resume is None:
+        verdict = dispatch_call(retry_path)
+    else:
+        arm_retry_resume()
+        verdict = dispatch_call(
+            _retry_defects_path(defects, run_dir, label), fallback_path=retry_path
+        )
     defects = _verdict_defects(verdict, checklist, review_kind, citable)
     if defects:
         raise RuntimeError(
@@ -1069,7 +1102,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 task.number,
             )
             # citable_refs is wider than checklist: this task's coverage
-            # items plus the spec:<slug> id of every section its **Spec:**
+            # items plus the spec:<heading> id of every section its **Spec:**
             # line names — a finding may cite a spec section it must never
             # be asked to render coverage on (Contract checklist: covering
             # and citing are different acts). Never raises "is empty" (no
@@ -1120,7 +1153,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     if checklist else checklist
                 )
                 packet_text = rp.build_verification_packet(
-                    prior_findings, delta_diff, checklist
+                    prior_findings, delta_diff, checklist, citable=citable
                 )
                 packet_path = os.path.join(
                     run_dir, "task-{}-review.md".format(task.number)
@@ -1131,14 +1164,17 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
-                    spec_path=spec_path,
+                    spec_path=spec_path, citable=citable,
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
             }
             reviewer_resume_fallback = is_verification and review_resume_state["thread"] is None
 
-            def _reviewer_dispatch_call(p):
+            def _arm_reviewer_retry_resume():
+                review_resume_state["thread"] = threads.get(reviewer_role)
+
+            def _reviewer_dispatch_call(p, fallback_path=None):
                 nonlocal reviewer_resume_fallback
                 resume_thread = review_resume_state["thread"]
                 if resume_thread:
@@ -1151,14 +1187,18 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         reviewer_resume_fallback = True
                         threads.pop(reviewer_role, None)
                         review_resume_state["thread"] = None
+                if fallback_path:
+                    reviewer_resume_fallback = True
                 return dispatch_reviewer(
-                    task, p, codex_bin, run_dir, threads, timeout=timeout,
+                    task, fallback_path or p, codex_bin, run_dir, threads,
+                    timeout=timeout,
                 )
 
             verdict, coverage_retry = _review_with_coverage(
                 _reviewer_dispatch_call,
                 packet_path, checklist, run_dir, "task-{}".format(task.number),
                 review_kind=packet_review_kind, citable=citable,
+                arm_retry_resume=_arm_reviewer_retry_resume,
             )
             review_attempts += 1
             run_diff_text = _git_diff(cwd, run_base) if run_base else None
@@ -1565,7 +1605,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     # same treatment the per-task path gives `citable_refs` (see execute_task).
     # It must not be re-derived from the packet's checklist: a verification
     # lap's packet carries the REDUCED checklist, so falling back to it would
-    # reject a legitimate whole-plan ref (a `spec:<slug>`, or a `t<N>`
+    # reject a legitimate whole-plan ref (a `spec:<heading>`, or a `t<N>`
     # integration item) no outstanding finding happened to name. It is also
     # wider than the final checklist by every task's `t<N>.t<M>` id, so a
     # seeded per-task finding replayed into the discovery packet can re-cite
@@ -1666,7 +1706,8 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                     if checklist else checklist
                 )
                 packet_text = rp.build_verification_packet(
-                    prior_findings, delta_diff, packet_checklist
+                    prior_findings, delta_diff, packet_checklist,
+                    citable=final_citable,
                 )
                 packet_path = os.path.join(run_dir, "final-review.md")
                 with open(packet_path, "w", encoding="utf-8") as f:
@@ -1676,6 +1717,7 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 packet_path = _final_packet(
                     spec_path, run_base, diff, run_dir,
                     prior_findings=prior_findings or None, checklist=checklist,
+                    citable=final_citable,
                 )
 
             review_resume_state = {
@@ -1685,7 +1727,10 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                 is_verification and review_resume_state["thread"] is None
             )
 
-            def _final_reviewer_dispatch_call(p):
+            def _arm_final_reviewer_retry_resume():
+                review_resume_state["thread"] = threads.get(reviewer_role)
+
+            def _final_reviewer_dispatch_call(p, fallback_path=None):
                 nonlocal reviewer_resume_fallback
                 resume_thread = review_resume_state["thread"]
                 if resume_thread:
@@ -1698,14 +1743,18 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                         reviewer_resume_fallback = True
                         threads.pop(reviewer_role, None)
                         review_resume_state["thread"] = None
+                if fallback_path:
+                    reviewer_resume_fallback = True
                 return dispatch_final_review(
-                    p, codex_bin, run_dir, tier, threads, timeout=timeout,
+                    fallback_path or p, codex_bin, run_dir, tier, threads,
+                    timeout=timeout,
                 )
 
             verdict, coverage_retry = _review_with_coverage(
                 _final_reviewer_dispatch_call,
                 packet_path, packet_checklist, run_dir, "final",
                 review_kind=packet_review_kind, citable=final_citable,
+                arm_retry_resume=_arm_final_reviewer_retry_resume,
             )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run
