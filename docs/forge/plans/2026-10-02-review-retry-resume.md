@@ -164,3 +164,30 @@
 **Tier:** trivial — one existing constraint's rule text replaced with given text through the store's own command, no logic
 
 **Depends on:** nothing.
+
+### Task 6: The Citable refs section states its role
+- [ ] Done
+
+**Files:**
+- Modify: `scripts/forge_checklist.py` (`render_citable_section` emits the role line)
+- Modify: `scripts/review-packet.py` (`build_citable_section` stays byte-identical to `render_citable_section`)
+- Test: `tests/test_forge_checklist.py`
+- Test: `tests/test_review_packet.py`
+
+**Spec:** Contract checklist
+
+**Interface:**
+- Rendered section: the `## Citable refs` heading, a blank line, the role line `Ids a finding's contract_ref may cite. Not coverage items — coverage answers the ## Contract checklist only.`, a blank line, then one `- <id>` line per id, sorted
+
+**Tests:**
+- `render_citable_section` output has the role line between the heading and the first id
+- the role line names `contract_ref` and states the ids are not coverage items
+- `build_citable_section` and `render_citable_section` still produce identical text for the same ids
+- `forge_checklist.py --task N --citable --format md` prints the role line
+
+**Acceptance:**
+- `python3 -m pytest -q tests/test_forge_checklist.py tests/test_review_packet.py tests/test_forge_verification_packet.py tests/test_forge_final_review.py` passes
+
+**Tier:** standard
+
+**Depends on:** Task 2.
