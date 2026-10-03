@@ -124,6 +124,7 @@ from forge_git import (  # noqa: F401
 )
 from forge_plan import (  # noqa: F401
     order_tasks,
+    outcome_met,
     parse_effort_overrides,
     parse_plan_tasks,
 )
@@ -305,10 +306,12 @@ def run_acceptance(task, cwd, live_path=None):
     and an output tail. Output is tee'd to ``live_path`` (the task's live log) so
     the monitor sees acceptance output scroll; ``live_path=None`` (unit calls)
     tees to os.devnull, preserving the returned tail either way. A timed-out
-    command is a non-zero (failed) acceptance."""
+    command meets no outcome. ``passed`` is whether the clause's stated outcome
+    was met (``forge_plan.outcome_met``) against the full output."""
     lp = live_path or os.devnull
     results = []
-    for cmd in task.acceptance_commands:
+    for check in task.acceptance_checks:
+        cmd = check.command
         header = "── acceptance ──\n$ {}".format(cmd)
         result = run_teed(
             cmd, shell=True, cwd=cwd, timeout=DEFAULT_TIMEOUT, live_path=lp, header=header
@@ -316,8 +319,12 @@ def run_acceptance(task, cwd, live_path=None):
         results.append(
             AcceptanceResult(
                 command=cmd,
+                outcome=check.stated,
                 exit_code=result.exit_code if not result.timed_out else -1,
                 output_tail=result.tail,
+                passed=outcome_met(
+                    check, result.exit_code, result.output, result.timed_out
+                ),
             )
         )
     return results
@@ -679,8 +686,10 @@ HALT_CAUSE_FOR_WORKER = {
     "regression": "The run stopped on a `regression` halt: a finding the "
                   "runner had already recorded as resolved reappeared, or the "
                   "acceptance command went from green to red.",
-    "stuck": "The run stopped on a `stuck` halt: a rework lap resolved "
-             "nothing — the outstanding findings came back unchanged.",
+    "stuck": "The run stopped on a `stuck` halt: either a rework lap resolved "
+             "nothing — the outstanding findings came back unchanged — or "
+             "the same acceptance command failed first on two consecutive "
+             "attempts.",
     "backstop": "The run stopped on a `backstop` halt: the attempt count "
                 "reached the ceiling before the findings cleared.",
     "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
@@ -1061,7 +1070,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         acceptance = run_acceptance(task, cwd, live_path)
 
         worker_ok = worker.exit_code == 0 and not worker.timed_out
-        acc_ok = all(r.exit_code == 0 for r in acceptance)
+        acc_ok = all(r.passed for r in acceptance)
 
         review_verdict = None
         findings = []       # classified Finding objects for this attempt
@@ -1069,6 +1078,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         coverage_skipped = None  # None: no review this attempt (unchanged)
         coverage_retry = False
         reviewer_resume_fallback = False
+        failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
         if worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
@@ -1081,11 +1091,14 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 "Prior worker attempt exited {} with no usable result — reattempt "
                 "the task.".format(worker.exit_code))]
         elif not acc_ok:
-            failed = next(r for r in acceptance if r.exit_code != 0)
+            failed = next(r for r in acceptance if not r.passed)
+            failed_acceptance = failed.command
             cause = "acceptance failed: {}".format(failed.command)
             findings = [_execution_failure_finding(
-                "Acceptance command `{}` failed (exit {}). Output tail:\n{}".format(
-                    failed.command, failed.exit_code, failed.output_tail))]
+                "Acceptance command `{}` did not meet its stated outcome `{}` "
+                "(exit {}). Output tail:\n{}".format(
+                    failed.command, failed.outcome, failed.exit_code,
+                    failed.output_tail))]
         elif task.tier != "trivial":
             # Trivial tier: acceptance is the whole verification. Standard/complex:
             # a reviewer judges the diff against the spec, and the runner verifies
@@ -1215,9 +1228,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
 
         action, halt_reason = convergence_decision(
             findings, state, acc_ok, attempt, autofix_mode,
-            approved_ids=approved_ids,
+            approved_ids=approved_ids, failed_acceptance=failed_acceptance,
         )
-        advance_state(state, findings, acc_ok)
+        advance_state(state, findings, acc_ok, failed_acceptance)
 
         fix_findings = [f for f in findings if f.disposition == "fix"]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]

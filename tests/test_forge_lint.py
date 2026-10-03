@@ -35,7 +35,7 @@ LEGAL_MINIMAL_PLAN = """# Plan header
 **Files:**
 - Create: `foo.py`
 
-**Acceptance:** `python3 -m pytest -q tests/test_foo.py`
+**Acceptance:** `python3 -m pytest -q tests/test_foo.py` passes
 
 **Tier:** `standard`
 
@@ -64,7 +64,7 @@ def _base_plan(**overrides):
     task1_tier = overrides.get("task1_tier", "**Tier:** `standard`")
     task1_depends = overrides.get("task1_depends", "**Depends on:** nothing.")
     task1_acceptance = overrides.get(
-        "task1_acceptance", "**Acceptance:** `python3 -m pytest -q tests/test_a.py`"
+        "task1_acceptance", "**Acceptance:** `python3 -m pytest -q tests/test_a.py` passes"
     )
     task1_heading = overrides.get("task1_heading", "### Task 1: First thing")
     task2_heading = overrides.get("task2_heading", "### Task 2: Second thing")
@@ -106,7 +106,7 @@ def _base_plan(**overrides):
 
 **Spec:** Beta section
 
-**Acceptance:** `python3 -m pytest -q tests/test_b.py`
+**Acceptance:** `python3 -m pytest -q tests/test_b.py` passes
 
 {task2_tier}
 
@@ -303,7 +303,7 @@ class ForgeLintTests(unittest.TestCase):
             "**Files:**\n"
             "- Create: `foo.py`\n\n"
             "**Tests:** case one; case two\n\n"
-            "**Acceptance:** `python3 -m pytest -q tests/test_a.py`\n\n"
+            "**Acceptance:** `python3 -m pytest -q tests/test_a.py` passes\n\n"
             "**Tier:** `standard`\n\n"
             "**Depends on:** nothing.\n"
         )
@@ -322,6 +322,44 @@ class ForgeLintTests(unittest.TestCase):
 
     # --- field clause grammar (rules 1-3) --------------------------------
 
+    # --- acceptance clause grammar (Task 1, acceptance outcomes) -----------
+
+    def test_lint_reports_every_malformed_command_clause_across_tasks(self):
+        plan = _base_plan(
+            task1_acceptance=(
+                "**Acceptance:**\n"
+                "- `make test` passes\n"
+                "- `make lint` succeeds\n"
+                "- `make docs`"
+            ),
+        ).replace(
+            "**Acceptance:** `python3 -m pytest -q tests/test_b.py` passes",
+            "**Acceptance:** `pytest -q` passes.",
+        )
+        errors = self._errors(self._lint(plan))
+        clause_errors = [d for d in errors if "does not parse" in d.message]
+        self.assertEqual(len(clause_errors), 3)
+        joined = "\n".join("{} {}".format(d.where, d.message) for d in clause_errors)
+        for needle in ("task 1", "task 2", "`make lint` succeeds", "`make docs`",
+                       "`pytest -q` passes.", "prints nothing"):
+            self.assertIn(needle, joined)
+        lines = plan.splitlines()
+        for needle in ("- `make lint` succeeds", "- `make docs`", "`pytest -q` passes."):
+            line_no = next(i for i, ln in enumerate(lines, 1) if needle in ln)
+            self.assertTrue(
+                any("line {}".format(line_no) in d.where + d.message for d in clause_errors),
+                (needle, line_no),
+            )
+
+    def test_lint_accepts_all_prose_acceptance(self):
+        plan = _base_plan(
+            task1_acceptance="**Acceptance:** The output reads well, see `docs/x.md`."
+        ).replace(
+            "**Acceptance:** `python3 -m pytest -q tests/test_b.py` passes",
+            "**Acceptance:** Nothing regresses.",
+        )
+        self.assertEqual(self._errors(self._lint(plan, spec_path=self.spec_path)), [])
+
     def test_acceptance_semicolon_outside_inline_code_named(self):
         defects = self._lint(_base_plan(
             task1_acceptance="**Acceptance:** `cmd1`; `cmd2`"
@@ -334,7 +372,7 @@ class ForgeLintTests(unittest.TestCase):
 
     def test_acceptance_semicolon_inside_inline_code_legal(self):
         defects = self._lint(_base_plan(
-            task1_acceptance='**Acceptance:** `python3 -c "import sys; sys.exit(0)"`'
+            task1_acceptance='**Acceptance:** `python3 -c "import sys; sys.exit(0)"` passes'
         ), spec_path=self.spec_path)
         self.assertEqual(self._errors(defects), [])
 
@@ -372,7 +410,7 @@ class ForgeLintTests(unittest.TestCase):
             gc="**Global Constraints:**\n- Keep it simple.\n- Stay short.",
             task1_acceptance=(
                 "**Acceptance:**\n"
-                "- `python3 -m pytest -q tests/test_a.py`\n"
+                "- `python3 -m pytest -q tests/test_a.py` passes\n"
                 "- second clause"
             ),
             task1_tests="**Tests:**\n- case one\n- case two",
@@ -967,7 +1005,7 @@ def _coverage_plan(*spec_values):
             "- [ ] Done\n\n"
             "**Files:**\n- Create: `f{n}.py`\n\n"
             "{spec}"
-            "**Acceptance:** `python3 -m pytest -q`\n\n"
+            "**Acceptance:** `python3 -m pytest -q` passes\n\n"
             "**Tier:** `standard`\n\n"
             "**Depends on:** nothing.\n".format(n=i, spec=spec_line)
         )

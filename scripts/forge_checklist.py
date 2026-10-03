@@ -13,8 +13,8 @@ invokes the CLI.
 |                | or union across all tasks for ``--final``)                    |
 | ``g<N>``       | each clause of the plan header's ``**Global Constraints:**``  |
 | ``t<N>.t<M>``  | each test case listed on task N's ``**Tests:**`` line         |
-| ``t<N>.a<M>``  | each field-clause-grammar clause of task N's ``**Acceptance:**`` |
-|                | field that isn't solely an inline-code command                |
+| ``t<N>.a<M>``  | each prose clause of task N's ``**Acceptance:**`` field       |
+|                | (command clauses are the runner's, not the reviewer's)        |
 | ``t<N>``       | final review only: task N's title, as an integration item     |
 
 The *citable* set a review's findings may name as ``contract_ref`` is
@@ -53,9 +53,6 @@ class ChecklistItem:
     id: str
     source: str
     text: str
-
-
-_INLINE_CODE_ONLY_RE = re.compile(r"^`[^`]*`$")
 
 
 def _collapse_whitespace(text):
@@ -98,8 +95,11 @@ def _test_items(task_block, task_number):
 
 
 def _acceptance_items(task_block, task_number):
-    clauses = eb.parse_field_clauses(task_block, "Acceptance")
-    kept = [c for c in clauses if not _INLINE_CODE_ONLY_RE.match(c)]
+    kept = [
+        clause
+        for _, clause, check in forge_plan.parse_acceptance_field(task_block, task_number)
+        if check is None
+    ]
     return [
         ChecklistItem(
             id="t{}.a{}".format(task_number, i),

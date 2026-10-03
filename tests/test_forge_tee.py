@@ -61,6 +61,14 @@ class RunTeedTests(unittest.TestCase):
         self.assertEqual(len(res.tail), forge_common._ACC_TAIL_CHARS)
         self.assertEqual(set(res.tail.strip()), {"A"})
 
+    def test_returns_full_merged_output_alongside_unchanged_tail(self):
+        argv = [sys.executable, "-c", "print('HEAD'); print('A' * 5000)"]
+        res = forge_common.run_teed(argv, timeout=30, live_path=self.p, header="h")
+        self.assertTrue(res.output.startswith("HEAD\n"))
+        self.assertEqual(len(res.output), 5 + 5001)
+        self.assertEqual(len(res.tail), forge_common._ACC_TAIL_CHARS)
+        self.assertEqual(res.tail, res.output[-forge_common._ACC_TAIL_CHARS:])
+
     def test_timeout_kills_and_flags(self):
         argv = [sys.executable, "-c", "import time; time.sleep(10)"]
         start = time.monotonic()

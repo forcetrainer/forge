@@ -155,7 +155,7 @@ PLAN_PASS = """# Fixture Plan
 **Files:**
 - Modify: `foo.txt`
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -171,7 +171,7 @@ PLAN_DEPS = """# Fixture Plan
 ### Task 2: Second task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -180,7 +180,7 @@ PLAN_DEPS = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -194,7 +194,7 @@ PLAN_ACC_FAIL = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
-**Acceptance:** `false`
+**Acceptance:** `false` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -208,7 +208,7 @@ PLAN_BAD_HEADING = """# Fixture Plan
 ## Task 1: Wrong level
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -222,7 +222,7 @@ PLAN_DUP = """# Fixture Plan
 ### Task 1: First
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -231,7 +231,7 @@ PLAN_DUP = """# Fixture Plan
 ### Task 1: Second
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -248,7 +248,7 @@ PLAN_STD = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -264,7 +264,7 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -273,7 +273,7 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 ### Task 2: Trivial follow-up
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -295,7 +295,7 @@ PLAN_TWO_STD = """# Fixture Plan
 ### Task 1: First standard
 - [ ] Done
 
-**Acceptance:** `echo TASK1MARK >> f1.txt`
+**Acceptance:** `echo TASK1MARK >> f1.txt` passes
 
 **Tier:** standard
 
@@ -304,7 +304,7 @@ PLAN_TWO_STD = """# Fixture Plan
 ### Task 2: Second standard
 - [ ] Done
 
-**Acceptance:** `echo TASK2MARK >> f2.txt`
+**Acceptance:** `echo TASK2MARK >> f2.txt` passes
 
 **Tier:** standard
 
@@ -322,7 +322,7 @@ PLAN_STD_TRACKED = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `echo NEEDFIX >> f1.txt`
+**Acceptance:** `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
 
@@ -338,7 +338,7 @@ PLAN_STD_TRACKED_THEN_TRIVIAL = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `echo NEEDFIX >> f1.txt`
+**Acceptance:** `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
 
@@ -347,7 +347,7 @@ PLAN_STD_TRACKED_THEN_TRIVIAL = """# Fixture Plan
 ### Task 2: Trivial follow-up
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -419,7 +419,7 @@ PLAN_COMMIT_ONE = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
-**Acceptance:** `echo ONEMARK >> f1.txt`
+**Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -434,7 +434,7 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
-**Acceptance:** `echo ONEMARK >> f1.txt`
+**Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -443,7 +443,7 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 ### Task 2: Second task
 - [ ] Done
 
-**Acceptance:** `echo TWOMARK >> f2.txt`
+**Acceptance:** `echo TWOMARK >> f2.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -459,7 +459,7 @@ PLAN_COMMIT_STD = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `echo STDMARK >> f1.txt`
+**Acceptance:** `echo STDMARK >> f1.txt` passes
 
 **Tier:** standard
 
@@ -476,7 +476,7 @@ PLAN_COMMIT_ONE_THEN_STD = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
-**Acceptance:** `echo ONEMARK >> f1.txt`
+**Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
 
@@ -485,7 +485,7 @@ PLAN_COMMIT_ONE_THEN_STD = """# Fixture Plan
 ### Task 2: Second task
 - [ ] Done
 
-**Acceptance:** `echo TWOMARK >> f2.txt`
+**Acceptance:** `echo TWOMARK >> f2.txt` passes
 
 **Tier:** standard
 
@@ -501,7 +501,7 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 ### Task 1: No-op task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
 

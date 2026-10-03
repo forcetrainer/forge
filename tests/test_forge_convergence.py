@@ -352,5 +352,71 @@ class AdvanceStateTests(unittest.TestCase):
         self.assertEqual(state.resolved_ids, set())
 
 
+class AcceptanceStuckTests(unittest.TestCase):
+    """acceptance-stuck: the same first failing command clause on two consecutive
+    attempts halts `stuck`; every attempt overwrites prev_failed_acceptance."""
+
+    def _decide(self, state, cmd, attempt, acceptance_ok=False):
+        d = forge_run.convergence_decision(
+            [_exec_fail()], state, acceptance_ok, attempt, "auto",
+            failed_acceptance=cmd)
+        forge_run.advance_state(state, [_exec_fail()], acceptance_ok, cmd)
+        return d
+
+    def test_same_first_failing_command_twice_halts_stuck(self):
+        state = forge_run.ConvergenceState()
+        self.assertEqual(self._decide(state, "make a", 1), ("rework", None))
+        self.assertEqual(self._decide(state, "make a", 2), ("halt", "stuck"))
+
+    def test_different_first_failing_command_reworks(self):
+        state = forge_run.ConvergenceState()
+        self._decide(state, "make a", 1)
+        self.assertEqual(self._decide(state, "make b", 2), ("rework", None))
+
+    def test_acceptance_failure_after_worker_crash_reworks(self):
+        state = forge_run.ConvergenceState()
+        # attempt 1: worker crash (no failed_acceptance), acceptance red
+        forge_run.advance_state(state, [_exec_fail()], False)
+        self.assertIsNone(state.prev_failed_acceptance)
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_exec_fail()], state, False, 2, "auto",
+                failed_acceptance="make a"),
+            ("rework", None))
+
+    def test_acceptance_failure_after_green_attempt_is_regression(self):
+        state = forge_run.ConvergenceState()
+        forge_run.advance_state(state, [], True)
+        self.assertEqual(
+            forge_run.convergence_decision(
+                [_exec_fail()], state, False, 2, "auto",
+                failed_acceptance="make a"),
+            ("halt", "regression"))
+
+    def test_a_b_b_halts_stuck_at_third(self):
+        state = forge_run.ConvergenceState()
+        self.assertEqual(self._decide(state, "A", 1), ("rework", None))
+        self.assertEqual(self._decide(state, "B", 2), ("rework", None))
+        self.assertEqual(self._decide(state, "B", 3), ("halt", "stuck"))
+
+    def test_reviewed_attempt_clears_prev_failed_acceptance(self):
+        state = forge_run.ConvergenceState()
+        forge_run.advance_state(state, [_exec_fail()], False, "make a")
+        self.assertEqual(state.prev_failed_acceptance, "make a")
+        forge_run.advance_state(state, [_fix("f1")], True)
+        self.assertIsNone(state.prev_failed_acceptance)
+
+    def test_state_round_trips_prev_failed_acceptance(self):
+        state = forge_run.ConvergenceState(prev_failed_acceptance="make a")
+        d = state.to_dict()
+        self.assertEqual(d["prev_failed_acceptance"], "make a")
+        self.assertEqual(
+            forge_run.ConvergenceState.from_dict(d).prev_failed_acceptance,
+            "make a")
+        old = {"resolved_ids": [], "carried_ids": [], "prev_acceptance_ok": True}
+        self.assertIsNone(
+            forge_run.ConvergenceState.from_dict(old).prev_failed_acceptance)
+
+
 if __name__ == "__main__":
     unittest.main()

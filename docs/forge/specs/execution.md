@@ -143,6 +143,7 @@ Claude the orchestrator invokes the CLI.
 | `**Spec:**` single line, no parenthetical or `;`, every name resolving uniquely in the spec | names the unresolvable or ambiguous heading |
 | `**Depends on:**` references existing task numbers, no cycles | names the missing task or the cycle |
 | `**Acceptance:**` present per task | names the task |
+| every `**Acceptance:**` clause beginning with inline code parses as a command clause (`pipeline` spec: Acceptance clause grammar) | names the task and line, quotes the clause, lists the legal outcomes |
 | `**Tests:**` parses — bulleted form, or `none — <reason>` | names the task and quotes the offending line |
 | checklist generates for every task and for `--final` | names the task; an empty checklist is a **warning**, not an error |
 | every **changed** spec section is named by some task's `**Spec:**` line | names the unclaimed section |
@@ -208,7 +209,7 @@ satisfy — no new authoring burden, no new plan fields.
 | `spec:<heading>` | **final review only:** each spec section named on any task's `**Spec:**` line, union across all tasks, resolved via `extract-brief.py`'s `find_spec_sections`; `<heading>` is the section's heading text, whitespace-collapsed — not a slug |
 | `g<N>` | each clause of the plan header's `**Global Constraints:**` |
 | `t<N>.t<M>` | each test case listed on task N's `**Tests:**` line — a **coverage** item on that task's review only, but **citable** at the final review too, so a seeded finding can still name the case it was raised against |
-| `t<N>.a<M>` | each `;`-separated clause of task N's `**Acceptance:**` line **whose content is not solely an inline-code command** — those are already executed deterministically by the acceptance runner and would be dead checklist weight |
+| `t<N>.a<M>` | each **prose clause** of task N's `**Acceptance:**` field (`pipeline` spec: Acceptance clause grammar) — command clauses are checked deterministically by the acceptance runner and would be dead checklist weight |
 | `t<N>` | final review only: task N's title, as an integration item |
 
 **A task's checklist is what that task promised, not what the spec asserts.** Spec
@@ -271,7 +272,7 @@ import, `forge_checklist.py` raises naming the absent source, because an author 
 explicitly asks for a checklist and gets nothing has a defect to see. At the
 **runner/orchestrator** layer it is a **skip**, not an error: a task with no
 `**Tests:**`, no `**Global Constraints:**` and an `**Acceptance:**` of nothing but
-inline-code commands is a legal plan with no contract material to cover, and forcing an
+command clauses is a legal plan with no contract material to cover, and forcing an
 error there would make legal plans unexecutable. Dropping spec sections as a task
 source makes this case materially more reachable than before, which is what the plan
 lint warning on an empty checklist is for. The review dispatches with no
@@ -556,11 +557,13 @@ decision itself is not modified; a dropped finding never reaches it.
 ## Rework loop and convergence
 
 Per task — standard and complex; trivial runs acceptance only, with no reviewer. Each
-attempt: worker → acceptance → reviewer → classify. An **execution failure** (worker
-crash, worker timeout, acceptance non-zero) preempts the reviewer and is treated as an
+attempt: worker → acceptance → reviewer → classify. Acceptance is green when every
+command clause meets its stated outcome; prose clauses are the reviewer's. An
+**execution failure** (worker crash, worker timeout, a command clause not meeting
+its stated outcome) preempts the reviewer and is treated as an
 implicit `fix`-retry finding with no provenance and no impact: it never defers, never
-scope-halts, and never counts as a carried finding, but it is subject to the regression
-and backstop rules. Then the decision is taken deterministically, in this precedence:
+scope-halts, and never counts as a carried finding, but it is subject to the regression,
+acceptance-stuck and backstop rules. Then the decision is taken deterministically, in this precedence:
 
 1. **Gate mode** and any reviewer finding → **halt** (`gate`). A transient execution
    failure is exempt: it carries no impact.
@@ -573,7 +576,14 @@ and backstop rules. Then the decision is taken deterministically, in this preced
    the build. A newly-surfaced finding never seen before is *not* a regression;
    incremental reviewer discovery is allowed.
 4. **Stuck** → **halt**: a fix finding is carried from the prior attempt with nothing
-   resolved this round — the worker cannot crack it.
+   resolved this round — the worker cannot crack it. Or **acceptance-stuck**: this
+   attempt's execution failure is acceptance, and its **first failing command clause**
+   (plan order) is the same clause — identical command text — that was the prior
+   attempt's first failing one. Any other prior attempt (passed acceptance, worker crash
+   or timeout, a different first failing clause) does not count; output and exit code
+   are not compared, since timings in a tail make a repeated failure never compare
+   equal. Same halt reason, `stuck`; the halt surfaces the clause, its stated outcome
+   and the last output tail.
 5. No fix findings remain and acceptance is green → **pass**.
 6. The attempt count reaches `MAX_ATTEMPTS_BACKSTOP` (**5**) → **halt** (`backstop`);
    otherwise → **rework**: re-dispatch the worker with the outstanding fix findings, and
@@ -718,6 +728,7 @@ python3 forge_dispose.py \
   --state <state.json> \          # prior ConvergenceState (empty/absent on attempt 1)
   --attempt <N> \
   --acceptance-ok <true|false> \
+  --failed-acceptance <command> \ # first failing command clause's command; only with --execution-failure for an acceptance failure
   --autofix <auto|gate>
 ```
 
@@ -733,12 +744,17 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
     "halt":   [ {"…": "…", "repair_task": {"…": "…"}} ],
     "seeded": [ {"…": "…"} ]
   },
-  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true}
+  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null}
 }
 ```
 
 `fix`, `defer` and `halt` are always present; `seeded` appears only when a seed finding
 exists. `ConvergenceState` round-trips through `--state` as sorted lists.
+`prev_failed_acceptance` is the attempt's first failing command clause's command when
+acceptance was its execution failure, else `null`; every attempt overwrites it. A state
+file without the key reads as `null`. `--failed-acceptance` without
+`--execution-failure`, or with `--acceptance-ok true`, is a usage error (exit non-zero,
+naming the conflict), never ignored.
 
 **Authority.** `forge_dispose` computes the diff it verifies against. The reviewer's own
 diff view is advisory and its provenance claims are overridden regardless, so a reviewer
@@ -759,7 +775,9 @@ the orchestrator's role there. Per task, in order:
    `docs/forge/constraints.md`, the deferral rule and TDD discipline — never pasted plan
    or spec content. All trivial-tier tasks batch into a single `forge-light` dispatch,
    serial within, respecting `Depends on`, and skip steps 4–6.
-3. **Acceptance** — run the task's acceptance commands; capture pass or fail.
+3. **Acceptance** — run each command clause and check its stated outcome (`pipeline`
+   spec: Acceptance clause grammar); capture pass or fail and, on fail, the first
+   failing clause's command for `--failed-acceptance`.
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
@@ -1044,6 +1062,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-02: acceptance is green when every command clause meets its stated outcome, not when every inline-code span exits 0; the checklist takes prose clauses, lint rejects an unparseable command clause; a repeated first-failing acceptance clause on consecutive attempts halts `stuck` (state `prev_failed_acceptance`, CLI `--failed-acceptance`) instead of looping to the backstop — 7 tasks looped on failed acceptance, 4 to the backstop, across 14 audited runs (#112)
 2026-10-03: the `## Citable refs` section opens with a line saying its ids are citable, not coverage items — both reviewers shown the unlabeled list covered its `spec:` ids and needed a validation retry
 2026-10-02: the verdict-validation retry resumes the reviewer that emitted the invalid verdict (cold only as a failed-resume fallback); every review packet prints its citable ids, and `spec:` ids are the heading text, not a slug; a `violated` coverage entry names its backing finding via `finding`, replacing the contract_ref-equals-id rule — together the cause of 16 of 16 observed retries and of retries replacing findings (1→6, 3→2)
 2026-10-02: Codex standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. Standard and complex still share one model and differ by effort. Verified with `codex exec -m` on codex-cli 0.154.0

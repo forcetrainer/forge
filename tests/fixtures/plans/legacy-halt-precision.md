@@ -27,7 +27,7 @@
 - a legal minimal plan lints clean
 - an empty checklist produces a warning and exit 0
 
-**Acceptance:** `python3 -m pytest -q tests/test_forge_lint.py`
+**Acceptance:** `python3 -m pytest -q tests/test_forge_lint.py` passes
 
 **Tier:** `standard`
 
@@ -51,7 +51,7 @@
 - a resolved label on an id absent from the carried set is ignored and dispositioned normally
 - a falsely-resolved finding reappearing later still trips the regression rule
 
-**Acceptance:** `python3 -m pytest -q tests/test_forge_classify.py`
+**Acceptance:** `python3 -m pytest -q tests/test_forge_classify.py` passes
 
 **Tier:** `standard`
 
@@ -71,7 +71,7 @@
 **Tests:**
 - none — mechanical edits
 
-**Acceptance:** `grep -h '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json` shows the same version twice
+**Acceptance:** `grep -h '"version"' .claude-plugin/plugin.json .codex-plugin/plugin.json` passes
 
 **Tier:** `trivial` — version strings and one status word; no logic, no design content.
 

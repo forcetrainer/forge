@@ -617,11 +617,14 @@ class ConvergenceState:
     appearance count is not); ``prev_acceptance_ok`` is the prior attempt's
     acceptance result (for the green->red regression check). An execution-failure
     attempt yields no review signal, so it advances only ``prev_acceptance_ok`` and
-    leaves both id sets untouched."""
+    leaves both id sets untouched. ``prev_failed_acceptance`` is the prior
+    attempt's first failing command clause's command when acceptance was that
+    attempt's execution failure, else None; every attempt overwrites it."""
 
     resolved_ids: set = field(default_factory=set)
     carried_ids: set = field(default_factory=set)
     prev_acceptance_ok: bool | None = None
+    prev_failed_acceptance: str | None = None
 
     def to_dict(self):
         """Serialize for the CLI's ``--state`` round-trip (sets -> sorted lists,
@@ -630,6 +633,7 @@ class ConvergenceState:
             "resolved_ids": sorted(self.resolved_ids),
             "carried_ids": sorted(self.carried_ids),
             "prev_acceptance_ok": self.prev_acceptance_ok,
+            "prev_failed_acceptance": self.prev_failed_acceptance,
         }
 
     @classmethod
@@ -642,6 +646,7 @@ class ConvergenceState:
             resolved_ids=set(d.get("resolved_ids") or []),
             carried_ids=set(d.get("carried_ids") or []),
             prev_acceptance_ok=d.get("prev_acceptance_ok"),
+            prev_failed_acceptance=d.get("prev_failed_acceptance"),
         )
 
 
@@ -676,7 +681,8 @@ def _is_execution_failure(findings):
 
 
 def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
-                         backstop=MAX_ATTEMPTS_BACKSTOP, approved_ids=frozenset()):
+                         backstop=MAX_ATTEMPTS_BACKSTOP, approved_ids=frozenset(),
+                         failed_acceptance=None):
     """Decide one attempt deterministically from the classified findings, the
     running state, acceptance, the attempt count, and the autofix mode. Returns
     ``(action, halt_reason)`` with ``action`` in {"pass", "rework", "halt"} and a
@@ -696,7 +702,11 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
        fix that silently didn't take is still caught.
     4. stuck -> halt/``stuck``: a fix finding persists across two consecutive
        attempts with nothing resolved this round (net progress is otherwise not
-       required — a round may resolve one finding and surface another).
+       required — a round may resolve one finding and surface another). Or
+       acceptance-stuck: ``failed_acceptance`` (this attempt's first failing
+       command clause's command, only when acceptance is its execution failure)
+       equals the prior attempt's — identical command text; output and exit code
+       are not compared. Same halt reason.
     5. no fix findings remain and acceptance is green -> ``pass``.
     6. attempt count reaches the backstop -> halt/``backstop`` (a seatbelt against
        slow non-convergence, not a target cap); otherwise -> ``rework``.
@@ -716,6 +726,9 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     resolved_this_round = prior_fix - real_fix
     if carried and not resolved_this_round:
         return ("halt", "stuck")
+    if (failed_acceptance is not None
+            and failed_acceptance == state.prev_failed_acceptance):
+        return ("halt", "stuck")
     if not any(f.disposition == "fix" for f in findings) and acceptance_ok:
         return ("pass", None)
     if attempt >= backstop:
@@ -723,7 +736,7 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     return ("rework", None)
 
 
-def advance_state(state, findings, acceptance_ok):
+def advance_state(state, findings, acceptance_ok, failed_acceptance=None):
     """Fold one attempt's classified findings into the convergence state for the
     next attempt. An **execution-failure** attempt (worker crash/timeout,
     acceptance non-zero) produced no review signal, so it leaves *both* id sets
@@ -734,7 +747,10 @@ def advance_state(state, findings, acceptance_ok):
     authoritative resolved-id set and replaces the carried-fix set with this
     attempt's outstanding fix ids. Only reviewer fix findings carry identity (see
     _real_fix_canons); this attempt's acceptance result is always stored for the
-    next green->red check."""
+    next green->red check. Every attempt, execution failure or reviewed,
+    overwrites ``prev_failed_acceptance`` with ``failed_acceptance`` (None unless
+    acceptance was this attempt's execution failure)."""
+    state.prev_failed_acceptance = failed_acceptance
     if _is_execution_failure(findings):
         state.prev_acceptance_ok = acceptance_ok
         return
@@ -851,11 +867,30 @@ def main(argv=None):
              "the scope-decision halt for this attempt — regression (rule 3) "
              "still applies to it. Omitted: no exemptions, today's behavior.",
     )
+    parser.add_argument(
+        "--failed-acceptance", default=None,
+        help="the first failing command clause's command; valid only with "
+             "--execution-failure and --acceptance-ok false (an acceptance "
+             "failure). A repeat of the prior attempt's value halts `stuck`.",
+    )
     args = parser.parse_args(argv)
 
     if args.execution_failure and args.verdict:
         print(
             "error: --verdict and --execution-failure are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 1
+    if args.failed_acceptance is not None and not args.execution_failure:
+        print(
+            "error: --failed-acceptance requires --execution-failure (an "
+            "acceptance failure is the attempt's execution failure)",
+            file=sys.stderr,
+        )
+        return 1
+    if args.failed_acceptance is not None and args.acceptance_ok == "true":
+        print(
+            "error: --failed-acceptance conflicts with --acceptance-ok true",
             file=sys.stderr,
         )
         return 1
@@ -969,9 +1004,10 @@ def main(argv=None):
 
     action, halt_reason = convergence_decision(
         findings, state, acceptance_ok, args.attempt, args.autofix,
-        approved_ids=frozenset(args.approved)
+        approved_ids=frozenset(args.approved),
+        failed_acceptance=args.failed_acceptance,
     )
-    advance_state(state, findings, acceptance_ok)
+    advance_state(state, findings, acceptance_ok, args.failed_acceptance)
 
     decision = _build_decision(action, halt_reason, findings, state)
     if checklist is not None and verdict is not None:

@@ -29,7 +29,7 @@ PLAN_PASS_JUSTIFIED = """# Fixture Plan
 **Files:**
 - Modify: `foo.txt`
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — mechanical, single call site
 
@@ -43,7 +43,7 @@ PLAN_STD_THEN_TRIVIAL_JUSTIFIED = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** standard
 
@@ -52,7 +52,7 @@ PLAN_STD_THEN_TRIVIAL_JUSTIFIED = """# Fixture Plan
 ### Task 2: Trivial follow-up
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** trivial — mechanical, single call site
 
@@ -72,7 +72,7 @@ PLAN_COMPLEX = """# Fixture Plan
 ### Task 1: Complex task
 - [ ] Done
 
-**Acceptance:** `true`
+**Acceptance:** `true` passes
 
 **Tier:** complex — cross-cutting invariant: shared dispatch contract
 

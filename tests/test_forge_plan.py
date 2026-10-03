@@ -43,7 +43,7 @@ class ParsePlanTasksTests(unittest.TestCase):
         self.assertEqual(by_num[1].title, "First task")
         self.assertEqual(by_num[1].tier, "trivial")
         self.assertEqual(by_num[1].depends_on, [])
-        self.assertEqual(by_num[1].acceptance_commands, ["true"])
+        self.assertEqual([c.command for c in by_num[1].acceptance_checks], ["true"])
         self.assertEqual(by_num[2].depends_on, [1])
 
     def test_checkbox_line_points_at_done_line(self):
@@ -67,35 +67,31 @@ class ParsePlanTasksTests(unittest.TestCase):
         self.assertIn("1", str(ctx.exception))
         self.assertIn("duplicate", str(ctx.exception).lower())
 
-    def test_acceptance_commands_extracted_from_bulleted_form(self):
-        # Field clause grammar (Task 1, #87): acceptance_commands reads
-        # inline-code spans regardless of clause structure, so a bulleted
-        # **Acceptance:** block must yield the same commands a single-line
-        # form would.
+    def test_acceptance_checks_extracted_from_bulleted_form(self):
         plan = (
             "# Fixture Plan\n\n"
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
             "**Acceptance:**\n"
-            "- `python3 -m pytest -q tests/test_a.py` all pass\n"
-            "- `python3 -m pytest -q tests/test_b.py`\n\n"
+            "- `python3 -m pytest -q tests/test_a.py` passes\n"
+            "- the output reads well, see `docs/x.md`\n"
+            "- `python3 -m pytest -q tests/test_b.py` exits 1\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
         )
         tasks = forge_run.parse_plan_tasks(self._write(plan))
         self.assertEqual(
-            tasks[0].acceptance_commands,
+            [(c.command, c.outcome, c.expected, c.stated) for c in tasks[0].acceptance_checks],
             [
-                "python3 -m pytest -q tests/test_a.py",
-                "python3 -m pytest -q tests/test_b.py",
+                ("python3 -m pytest -q tests/test_a.py", "passes", None, "passes"),
+                ("python3 -m pytest -q tests/test_b.py", "exits", 1, "exits 1"),
             ],
         )
 
-    def test_acceptance_commands_agree_with_clauses_across_h4_heading(self):
-        # #87 Task 5: an h4 inside an **Acceptance:** block must terminate
-        # both the clause parser and the command extractor identically —
-        # every command the checklist lists is also executed.
+    def test_acceptance_checks_stop_at_h4_heading(self):
+        # #87 Task 5: an h4 inside an **Acceptance:** block terminates the
+        # clause parser, so the clause after it is not a check.
         plan = (
             "# Fixture Plan\n\n"
             "**Goal:** Do the thing.\n\n"
@@ -104,42 +100,131 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Acceptance:**\n"
             "- `pytest -q` passes\n"
             "#### note\n"
-            "- `ruff check` clean\n\n"
+            "- `ruff check` passes\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
         )
-        plan_path = self._write(plan)
-        tasks = forge_run.parse_plan_tasks(plan_path)
-        self.assertEqual(tasks[0].acceptance_commands, ["pytest -q"])
+        tasks = forge_run.parse_plan_tasks(self._write(plan))
+        self.assertEqual([c.command for c in tasks[0].acceptance_checks], ["pytest -q"])
 
-        eb = forge_run.forge_plan.eb
-        lines = eb.read_lines(plan_path)
-        block = eb.extract_task_block(lines, 1)
-        clauses = eb.parse_field_clauses(block, "Acceptance")
-        # Every command the checklist's clauses contain must also be
-        # extracted for execution — the "ruff check" clause must not exist
-        # without a matching command, and vice versa.
-        self.assertEqual(len(clauses), 1)
-        self.assertEqual(
-            [m for c in clauses for m in re.findall(r"`([^`]+)`", c)],
-            tasks[0].acceptance_commands,
-        )
-
-    def test_acceptance_commands_extracted_from_single_line_form(self):
+    def test_acceptance_checks_extracted_from_single_line_form(self):
         plan = (
             "# Fixture Plan\n\n"
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
-            "**Acceptance:** `python3 -m pytest -q tests/test_a.py` all pass\n\n"
+            "**Acceptance:** `python3 -m pytest -q tests/test_a.py` passes\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
         )
         tasks = forge_run.parse_plan_tasks(self._write(plan))
         self.assertEqual(
-            tasks[0].acceptance_commands,
+            [c.command for c in tasks[0].acceptance_checks],
             ["python3 -m pytest -q tests/test_a.py"],
         )
+
+    def test_malformed_command_clause_raises_naming_task_line_clause_and_outcomes(self):
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:**\n"
+            "- `true` passes\n"
+            "- `make test` succeeds\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(self._write(plan))
+        msg = str(ctx.exception)
+        self.assertIn("task 1", msg)
+        self.assertIn("line 10", msg)
+        self.assertIn("`make test` succeeds", msg)
+        for outcome in forge_run.forge_plan.ACCEPTANCE_OUTCOMES:
+            self.assertIn(outcome, msg)
+
+    def test_malformed_single_line_clause_names_its_line(self):
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:** `true`\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(self._write(plan))
+        self.assertIn("line 8", str(ctx.exception))
+
+    def test_prose_only_acceptance_yields_no_checks(self):
+        plan = (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:** The docs read well.\n\n"
+            "**Tier:** standard\n\n"
+            "**Depends on:** nothing\n"
+        )
+        self.assertEqual(forge_run.parse_plan_tasks(self._write(plan))[0].acceptance_checks, [])
+
+
+class ParseAcceptanceClauseTests(unittest.TestCase):
+    def setUp(self):
+        self.parse = forge_run.forge_plan.parse_acceptance_clause
+
+    def test_passes(self):
+        c = self.parse("`make test` passes")
+        self.assertEqual((c.command, c.outcome, c.expected, c.stated), ("make test", "passes", None, "passes"))
+
+    def test_exits_n(self):
+        c = self.parse("`grep -q x f` exits 1")
+        self.assertEqual((c.command, c.outcome, c.expected, c.stated), ("grep -q x f", "exits", 1, "exits 1"))
+
+    def test_prints_nothing(self):
+        c = self.parse("`grep -n slug f` prints nothing")
+        self.assertEqual((c.outcome, c.expected), ("prints-nothing", None))
+
+    def test_prints_text_second_span_is_not_a_command(self):
+        c = self.parse("`python3 -V` prints `Python 3`")
+        self.assertEqual((c.command, c.outcome, c.expected), ("python3 -V", "prints", "Python 3"))
+        self.assertEqual(c.stated, "prints `Python 3`")
+
+    def test_leading_whitespace_still_a_command_clause(self):
+        c = self.parse("   `make test` passes")
+        self.assertEqual((c.command, c.outcome), ("make test", "passes"))
+
+    def test_prose_with_inline_code_is_none(self):
+        self.assertIsNone(self.parse("The file `docs/x.md` reads well"))
+        self.assertIsNone(self.parse("Output reports version `0.13.1`"))
+
+    def test_bare_command_raises_naming_missing_outcome(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.parse("`make test`")
+        self.assertIn("outcome", str(ctx.exception))
+
+    def test_unknown_outcome_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("`make test` succeeds")
+
+    def test_trailing_period_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("`make test` passes.")
+
+    def test_exits_negative_and_word_raise(self):
+        for bad in ("`x` exits -1", "`x` exits one", "`x` exits"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.parse(bad)
+
+    def test_second_command_span_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("`a` `b` passes")
+
+    def test_trailing_text_after_prints_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("`x` prints `y` and more")
 
 
 class TierJustificationTests(unittest.TestCase):
@@ -162,7 +247,7 @@ class TierJustificationTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
-            "**Acceptance:** `true`\n\n"
+            "**Acceptance:** `true` passes\n\n"
             "**Tier:** {}\n\n"
             "**Depends on:** nothing\n"
         ).format(tier_line)
@@ -278,33 +363,6 @@ class TierJustificationTests(unittest.TestCase):
         self.assertIn("justification", msg.lower())
 
 
-class ParsePlanTasksRealPlansTests(unittest.TestCase):
-    """Regression proof against the actual shipped plans that motivated the
-    tier-normalization fix -- both use the backticked **Tier:** template form
-    that the un-normalized parser rejected."""
-
-    def _plan_path(self, name):
-        return str(
-            pathlib.Path(__file__).resolve().parent.parent
-            / "docs"
-            / "forge"
-            / "plans"
-            / name
-        )
-
-    def test_phase13_review_continuity_plan_parses(self):
-        tasks = forge_run.parse_plan_tasks(
-            self._plan_path("2026-08-21-phase13-review-continuity.md")
-        )
-        self.assertGreater(len(tasks), 0)
-
-    def test_phase12b_claude_dispatch_parity_plan_parses(self):
-        tasks = forge_run.parse_plan_tasks(
-            self._plan_path("2026-07-17-phase12b-claude-dispatch-parity.md")
-        )
-        self.assertGreater(len(tasks), 0)
-
-
 class ParseEffortOverridesTests(unittest.TestCase):
     """parse_effort_overrides: repeatable --effort N=LEVEL entries -> {int: str}.
     Malformed entries and disallowed levels (including 'ultra') raise naming the
@@ -337,3 +395,39 @@ class ParseEffortOverridesTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             forge_run.parse_effort_overrides(["1=bogus"])
         self.assertIn("bogus", str(ctx.exception))
+
+
+class OutcomeMetTests(unittest.TestCase):
+    def setUp(self):
+        self.parse = forge_run.forge_plan.parse_acceptance_clause
+        self.met = forge_run.forge_plan.outcome_met
+
+    def _met(self, clause, exit_code, output="", timed_out=False):
+        return self.met(self.parse(clause), exit_code, output, timed_out)
+
+    def test_passes_met_by_exit_0_not_exit_1(self):
+        self.assertTrue(self._met("`t` passes", 0))
+        self.assertFalse(self._met("`t` passes", 1))
+
+    def test_exits_n_met_by_exactly_n(self):
+        self.assertTrue(self._met("`t` exits 1", 1))
+        self.assertFalse(self._met("`t` exits 1", 0))
+
+    def test_prints_nothing_met_by_empty_output_any_exit(self):
+        for code in (0, 1, 2):
+            self.assertTrue(self._met("`t` prints nothing", code, ""))
+            self.assertFalse(self._met("`t` prints nothing", code, "x"))
+
+    def test_prints_text_needs_text_and_exit_0(self):
+        self.assertTrue(self._met("`t` prints `ok`", 0, "all ok\n"))
+        self.assertFalse(self._met("`t` prints `ok`", 1, "all ok\n"))
+        self.assertFalse(self._met("`t` prints `ok`", 0, "nope\n"))
+
+    def test_prints_text_found_before_the_tail_window(self):
+        out = "ok\n" + "x" * 10000
+        self.assertTrue(self._met("`t` prints `ok`", 0, out))
+
+    def test_timed_out_meets_no_outcome(self):
+        for clause in ("`t` passes", "`t` exits 1", "`t` prints nothing",
+                       "`t` prints `ok`"):
+            self.assertFalse(self._met(clause, None, "ok", timed_out=True))

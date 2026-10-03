@@ -44,8 +44,9 @@ PLAN_MD = """# Plan header
 - the foo handles the edge case
 
 **Acceptance:**
-- `python3 -m pytest -q tests/test_foo.py` all pass
-- `python3 foo.py`
+- `python3 -m pytest -q tests/test_foo.py` passes
+- the foo output names `foo.py` and reads well
+- `python3 foo.py` prints nothing
 
 **Tier:** `standard`
 
@@ -62,7 +63,7 @@ PLAN_MD = """# Plan header
 
 **Spec:** Beta section
 
-**Acceptance:** `python3 -m pytest -q tests/test_bar.py`
+**Acceptance:** `python3 -m pytest -q tests/test_bar.py` passes
 
 **Tier:** `standard`
 
@@ -156,18 +157,61 @@ class ForgeChecklistTests(unittest.TestCase):
     # --- acceptance clause parsing (field clause grammar) -------------------
 
     def test_acceptance_bulleted_block_yields_one_item_per_bullet(self):
-        # Task 1's **Acceptance:** is a two-bullet block; the second bullet
-        # is solely inline-code and is dropped, leaving one item.
+        # Task 1's **Acceptance:** is a three-bullet block; the two command
+        # clauses are dropped, leaving the one prose clause.
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
         acceptance_items = [it for it in items if it.source == "acceptance"]
         self.assertEqual(len(acceptance_items), 1)
         self.assertEqual(acceptance_items[0].id, "t1.a1")
 
-    def test_clause_solely_inline_code_excluded(self):
-        # Task 2's only acceptance clause is solely an inline-code command.
+    def test_command_clause_excluded(self):
+        # Task 2's only acceptance clause is a command clause.
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 2)
         acceptance_items = [it for it in items if it.source == "acceptance"]
         self.assertEqual(acceptance_items, [])
+
+    def test_acceptance_ids_number_prose_clauses_only(self):
+        plan_path = os.path.join(self.tmp, "plan_mixed.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(
+                "# Plan header\n\n"
+                "**Goal:** Mixed acceptance.\n\n"
+                "# Task 1\n\n"
+                "### Task 1: Mixed\n"
+                "- [ ] Done\n\n"
+                "**Acceptance:**\n"
+                "- reads well, see `docs/x.md`\n"
+                "- `make test` passes\n"
+                "- version string is `0.13.1`\n\n"
+                "**Tier:** `standard`\n\n"
+                "**Depends on:** nothing.\n"
+            )
+        items = fc.build_task_checklist(plan_path, None, 1)
+        self.assertEqual(
+            [(it.id, it.text) for it in items],
+            [
+                ("t1.a1", "reads well, see `docs/x.md`"),
+                ("t1.a2", "version string is `0.13.1`"),
+            ],
+        )
+
+    def test_malformed_command_clause_raises_naming_task_and_clause(self):
+        plan_path = os.path.join(self.tmp, "plan_bad.md")
+        with open(plan_path, "w", encoding="utf-8") as f:
+            f.write(
+                "# Plan header\n\n"
+                "**Goal:** Bad acceptance.\n\n"
+                "# Task 1\n\n"
+                "### Task 1: Bad\n"
+                "- [ ] Done\n\n"
+                "**Acceptance:** `make test`\n\n"
+                "**Tier:** `standard`\n\n"
+                "**Depends on:** nothing.\n"
+            )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc.build_task_checklist(plan_path, None, 1)
+        self.assertIn("task 1", str(ctx.exception))
+        self.assertIn("`make test`", str(ctx.exception))
 
     def test_semicolon_inside_bulleted_acceptance_clause_is_literal(self):
         task_block = (
@@ -204,8 +248,8 @@ class ForgeChecklistTests(unittest.TestCase):
     def test_clause_mixing_prose_and_code_included(self):
         items = fc.build_task_checklist(self.plan_path, self.spec_path, 1)
         by_id = {it.id: it for it in items}
-        self.assertIn("`python3 -m pytest -q tests/test_foo.py`", by_id["t1.a1"].text)
-        self.assertIn("all pass", by_id["t1.a1"].text)
+        self.assertIn("`foo.py`", by_id["t1.a1"].text)
+        self.assertIn("reads well", by_id["t1.a1"].text)
 
     # --- global constraints clause parsing (field clause grammar, header) ---
 
@@ -320,7 +364,7 @@ class ForgeChecklistTests(unittest.TestCase):
                 "### Task 1: Empty task\n"
                 "- [ ] Done\n\n"
                 "**Files:**\n- Create: `x.py`\n\n"
-                "**Acceptance:** `python3 x.py`\n\n"
+                "**Acceptance:** `python3 x.py` passes\n\n"
                 "**Tier:** `standard`\n\n"
                 "**Depends on:** nothing.\n"
             )
@@ -345,7 +389,7 @@ class ForgeChecklistTests(unittest.TestCase):
                 "- [ ] Done\n\n"
                 "**Files:**\n- Create: `x.py`\n\n"
                 "**Spec:** Alpha section\n\n"
-                "**Acceptance:** `python3 x.py`\n\n"
+                "**Acceptance:** `python3 x.py` passes\n\n"
                 "**Tier:** `standard`\n\n"
                 "**Depends on:** nothing.\n"
             )

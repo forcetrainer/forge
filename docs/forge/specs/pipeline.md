@@ -245,9 +245,10 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   drifted; a field authored like a contract and validated like prose is the whole
   explanation. Historical plans are not migrated: a completed plan is never re-executed,
   and lint runs on the plan about to run.
-- **`**Acceptance:**`** is the commands to run and what must pass. An environment-gated
-  skip is not a pass — the command asserts required infrastructure is present, or makes
-  the skip exit non-zero. A grep for text is not a command: acceptance executes the
+- **`**Acceptance:**`** is what must hold when the task is done: command clauses the
+  runner checks and prose clauses the reviewer verdicts on (Acceptance clause grammar,
+  below). An environment-gated skip is not a pass — the command asserts required
+  infrastructure is present, or makes the skip exit non-zero. A grep for text is not a command: acceptance executes the
   behavior and asserts on what changed, not on words describing it. Prose artifacts —
   skills, docs, migrations — are the stated exception: nothing is executable, so
   mechanical text checks are the correct form (`testing-anti-patterns.md`). That
@@ -281,10 +282,36 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   collapse into a single checklist item, so a reviewer owed one `coverage` verdict for
   every command in it (#87).
 
-  An acceptance clause that is **solely** an inline-code command is dropped from the
-  checklist — the acceptance runner executes it deterministically, so it is dead checklist
-  weight. The rule is per clause, and commands are read from inline-code spans regardless
-  of form, so it is independent of clause structure.
+- **Acceptance clause grammar.** Each `**Acceptance:**` clause is exactly one of two
+  kinds, decided by its first character after trimming:
+  - **Command clause** — begins with an inline-code span. Its whole text must be
+    `` `<command>` <outcome> ``: one single-backtick span holding the command, one space,
+    then exactly one outcome from the table below, nothing after it (no trailing period).
+    The command span is the clause's first span; the `` `<text>` `` span of a
+    `` prints `<text>` `` outcome is part of the outcome, never a command. A command
+    cannot contain a backtick — one that needs it goes in a script the clause runs.
+  - **Prose clause** — begins with anything else. Never executed; inline code inside it
+    is literal text (a path, a version string), never a command. It becomes a `t<N>.a<M>`
+    checklist item for the reviewer.
+
+  | outcome | the clause passes when |
+  |---|---|
+  | `passes` | exit code 0 |
+  | `exits <N>` | exit code exactly `<N>` (a non-negative decimal integer) |
+  | `prints nothing` | stdout and stderr both empty; exit code not checked |
+  | `` prints `<text>` `` | the full output (stdout and stderr combined) contains `<text>` literally and exit code 0 |
+
+  A command that times out fails whatever its outcome. A clause beginning with inline
+  code that does not match this shape exactly — a bare `` `<command>` ``, an unknown or
+  misspelled outcome, a second command span, trailing text — is a lint **error** naming
+  the task, the line and the clause, and listing the four legal outcomes. It is never
+  read as prose and never defaulted to `passes`: a clause the runner cannot read is
+  refused, not guessed (constraint: `parsers-fail-loud`). The runner checks exactly the
+  stated outcome; nothing else in a clause is checked by machine.
+
+  Command clauses are dropped from the checklist — the runner checks them
+  deterministically, so they would be dead checklist weight. Prose clauses are the
+  reviewer's.
 
   Historical plans are not migrated, per the same rule the `**Tests:**` drift set: a
   completed plan is never re-executed, and lint runs on the plan about to run.
@@ -396,6 +423,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-02: acceptance clauses are command clauses (`` `<command>` <outcome> ``, outcome from a closed set: `passes`, `exits <N>`, `prints nothing`, `` prints `<text>` `` over combined output) or prose clauses, never executed; a clause beginning with inline code that does not parse is a lint error. Replaces "every inline-code span is a command that must exit 0", which executed version strings and file paths and scored a passing `prints nothing` grep as a failure (#112)
 2026-09-09: amendment re-review is whole-document, never scoped — "scoped to the changed sections" never defined the baseline, and three incompatible readings each satisfied it while covering different things; scoping saved little because the whole-document contradiction question forces a full read regardless (#96 final review)
 
 2026-09-09: the prose exception to execute-don't-substring gains a bar — a mechanical text check must be demonstrated to fail when the thing it guards is violated, and is written against the requirement's meaning rather than its spelling; five checks in the #96 run were green while guarding nothing, including one whose requirement, acceptance command and eponymous test all passed with the violation in place (#98)

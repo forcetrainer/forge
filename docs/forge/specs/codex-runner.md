@@ -88,7 +88,7 @@ forge-run.py --status --run-dir DIR
 - `--effort N=LEVEL` (repeatable; LEVEL in `low`/`medium`/`high`/`xhigh`/`max`)
   overrides task N's worker reasoning effort only — never the model, never the
   reviewer's. `ultra` and unknown task numbers are rejected loudly.
-- `--timeout SECONDS` (default 3600; recommend ~900) bounds every worker and reviewer
+- `--timeout SECONDS` (default 3600, `DEFAULT_TIMEOUT`) bounds every worker and reviewer
   `codex exec` subprocess.
 - `--autofix auto|gate` (default `auto`) is the finding-autonomy knob; the disposition
   matrix it selects is the `execution` spec's.
@@ -132,8 +132,11 @@ forge-run.py --status --run-dir DIR
 2. Dispatch the worker: one `codex exec` process, tier-pinned model/effort. Cold spawn
    prompt = worker contract preamble + brief; the preamble is the corresponding
    `agents/*.md` body — single source shared with the Claude harness.
-3. Run the task's acceptance commands directly. Failure → rework iteration.
-4. Trivial tier: acceptance commands are the whole verification. Standard/complex:
+3. Run each command clause directly and check its stated outcome (`pipeline` spec:
+   Acceptance clause grammar); prose clauses are never executed. Any clause whose command
+   does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
+   stated outcome, exit code and output tail.
+4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists because a `codex exec`
    reviewer is a subprocess and cannot gather its own context.
@@ -213,7 +216,7 @@ setup.
 
 - One receipt per task attempt, `task-<N>-attempt-<i>.json`: task number, title, tier,
   model + effort requested, brief path + SHA-256, worker exit code, acceptance results
-  (command, exit code, output tail), review verdict, attempt number, status
+  (command, stated outcome, exit code, output tail, passed), review verdict, attempt number, status
   (`passed` | `rework` | `escalated`), outstanding findings.
 - `run.json` is the run summary and the monitor's contract:
 
@@ -325,8 +328,8 @@ notifications.
   machinery does not exist and is not to be reintroduced: `osascript` is blocked by the
   Codex sandbox, and a prompt hook is the wrong layer for a state a blocked
   orchestrator already holds.
-- **`--timeout` is the hang backstop** (recommend ~900). A dead-man's switch, not a
-  performance tuner: set it well above any real task and well below "all day." A stuck
+- **`--timeout` is the hang backstop** (default `DEFAULT_TIMEOUT`, 3600; pass it only to
+  override). A dead-man's switch, not a performance tuner: set it well above any real task and well below "all day." A stuck
   task is killed, counts as a failed iteration, and escalates — so even a hang becomes
   a relayed halt rather than silence.
 - **Runner stdout is a human progress narrative** (`task N: <title> — starting` /
@@ -556,6 +559,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-02: acceptance runs command clauses and checks each stated outcome, never prose clauses; receipts record the outcome and pass flag. `--timeout` drops "recommend ~900" for the 3600 default — two turns died at ~900s mid-build and later builds ran 30 minutes (#112)
 2026-10-02: standard and complex tiers move to gpt-6.1-sol (medium, high); trivial stays gpt-6-luna·low. gpt-6.1-sol is OpenAI's listed upgrade of GPT-6 Sol for Codex (learn.chatgpt.com/docs/models). Each tier's model·effort verified with `codex exec -m` on codex-cli 0.154.0
 2026-09-30: Worker isolation — every dispatch disables `multi_agent`, `multi_agent_v2` and `memories`, and reviewers run read-only; the subagent risk reflects multi_agent_v2. Verified against codex-cli 0.154.0 and openai/codex main
 2026-09-30: the run.json status enum, `current_phase` values and Halted banner name the doc-sync stage the runner already writes (`escalated-doc-sync`, `doc_sync`); the Halt section's class count is corrected

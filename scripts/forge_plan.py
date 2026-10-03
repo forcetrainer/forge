@@ -7,7 +7,9 @@ parsers-fail-loud).
 """
 import re
 
-from forge_common import ALLOWED_EFFORTS, TIER_MAP, Task, eb
+from forge_common import (
+    ACCEPTANCE_OUTCOMES, ALLOWED_EFFORTS, TIER_MAP, AcceptanceCheck, Task, eb,
+)
 
 
 def _field_value(block_lines, block_mask, name):
@@ -19,39 +21,93 @@ def _field_value(block_lines, block_mask, name):
     return None
 
 
-def _field_text(block_lines, block_mask, name):
-    """Full text of a ``**Name:**`` field: its line plus any wrapped
-    continuation, joined with spaces. A blank line, a new field, a heading, or a
-    fence ends it."""
-    prefix = "**{}:**".format(name)
-    for i, ln in enumerate(block_lines):
-        if block_mask[i] or not ln.startswith(prefix):
-            continue
-        parts = [ln[len(prefix):]]
-        j = i + 1
-        while j < len(block_lines):
-            if block_mask[j]:
-                break
-            nxt = block_lines[j]
-            if (
-                nxt.strip() == ""
-                or eb.FIELD_LINE_RE.match(nxt)
-                or re.match(r"^#{1,6}\s", nxt)
-            ):
-                break
-            parts.append(nxt)
-            j += 1
-        return " ".join(p.strip() for p in parts).strip()
-    return ""
+class AcceptanceClauseError(RuntimeError):
+    """A command clause that does not parse (spec: pipeline, Acceptance clause
+    grammar). Never defaulted to ``passes`` and never read as prose."""
 
 
-def _parse_commands(text):
-    """Inline-code spans on an ``**Acceptance:**`` line are the commands."""
-    return [
-        m.group(1).strip()
-        for m in re.finditer(r"`([^`]+)`", text)
-        if m.group(1).strip()
-    ]
+_EXITS_RE = re.compile(r"exits ([0-9]+)")
+_PRINTS_RE = re.compile(r"prints `([^`]+)`")
+
+
+def outcome_met(check, exit_code, output, timed_out):
+    """Whether a command clause's stated outcome is met (spec: pipeline,
+    Acceptance clause grammar). ``output`` is the full merged stdout+stderr, not
+    the tail. A timed-out command meets no outcome."""
+    if timed_out:
+        return False
+    if check.outcome == "passes":
+        return exit_code == 0
+    if check.outcome == "exits":
+        return exit_code == check.expected
+    if check.outcome == "prints-nothing":
+        return output == ""
+    if check.outcome == "prints":
+        return exit_code == 0 and check.expected in output
+    raise ValueError("unknown acceptance outcome {!r}".format(check.outcome))
+
+
+def parse_acceptance_clause(clause):
+    """Parse one ``**Acceptance:**`` clause. Returns None for a prose clause
+    (first character after trimming is not a backtick); an ``AcceptanceCheck``
+    for a command clause (inline-code command, one space, an outcome). Raises ValueError naming
+    the cause for a clause that begins with inline code and does not match."""
+    text = clause.strip()
+    if not text.startswith("`"):
+        return None
+    close = text.find("`", 1)
+    if close == -1:
+        raise ValueError("the command span is never closed")
+    command = text[1:close].strip()
+    if not command:
+        raise ValueError("the command span is empty")
+    rest = text[close + 1:]
+    if rest == "":
+        raise ValueError("the outcome is missing after the command")
+    if not rest.startswith(" ") or rest.startswith("  "):
+        raise ValueError(
+            "the command span must be followed by exactly one space and an outcome"
+        )
+    stated = rest[1:]
+    if stated == "passes":
+        return AcceptanceCheck(command, "passes", None, stated)
+    if stated == "prints nothing":
+        return AcceptanceCheck(command, "prints-nothing", None, stated)
+    m = _EXITS_RE.fullmatch(stated)
+    if m:
+        return AcceptanceCheck(command, "exits", int(m.group(1)), stated)
+    m = _PRINTS_RE.fullmatch(stated)
+    if m:
+        return AcceptanceCheck(command, "prints", m.group(1), stated)
+    raise ValueError(
+        "{!r} is not a legal outcome (or has a trailing period, a second "
+        "command span, or trailing text)".format(stated)
+    )
+
+
+def parse_acceptance_field(block, task_number, first_line=None):
+    """Every ``**Acceptance:**`` clause of a task block as ``(line, clause,
+    check)`` — ``check`` None for a prose clause. ``first_line`` is the 1-based
+    plan line of the block's first line, so ``line`` is the plan line of the
+    clause (None when unknown). Raises ``AcceptanceClauseError`` naming the
+    task, the line, the clause, the cause and the four legal outcomes."""
+    parsed = []
+    for idx, clause in eb.parse_field_clause_lines(block, "Acceptance"):
+        line = first_line + idx if first_line is not None else None
+        try:
+            check = parse_acceptance_clause(clause)
+        except ValueError as e:
+            raise AcceptanceClauseError(
+                "task {}{}: **Acceptance:** clause {!r} does not parse — {}; "
+                "a clause beginning with inline code must be \"`<command>` "
+                "<outcome>\" with one outcome of: {}".format(
+                    task_number,
+                    ", line {}".format(line) if line is not None else "",
+                    clause, e, "; ".join(ACCEPTANCE_OUTCOMES),
+                )
+            ) from e
+        parsed.append((line, clause, check))
+    return parsed
 
 
 def _parse_depends(text):
@@ -146,7 +202,11 @@ def parse_plan_tasks(plan_path):
             )
 
         depends_on = _parse_depends(_field_value(block_lines, block_mask, "Depends on") or "")
-        acceptance = _parse_commands(_field_text(block_lines, block_mask, "Acceptance"))
+        acceptance = [
+            check
+            for _, _, check in parse_acceptance_field(block, num, start + 1)
+            if check is not None
+        ]
 
         checkbox_line = -1
         for offset, bl in enumerate(block_lines):
@@ -163,7 +223,7 @@ def parse_plan_tasks(plan_path):
                 tier=tier,
                 tier_justification=tier_justification,
                 depends_on=depends_on,
-                acceptance_commands=acceptance,
+                acceptance_checks=acceptance,
                 checkbox_line=checkbox_line,
             )
         )
