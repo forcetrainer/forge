@@ -94,7 +94,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: The validation retry resumes its reviewer
-- [ ] Done
+- [x] Done — passed, 1 attempt (1 coverage retry, resumed)
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`_review_with_coverage`; the task and final reviewer dispatch closures; retry prompt files)
