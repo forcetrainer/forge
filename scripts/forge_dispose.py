@@ -93,10 +93,17 @@ def _coverage_from_obj(obj):
                 "reviewer coverage entry is not a JSON object; got: "
                 + repr(e)[:200]
             )
+        finding = e.get("finding")
+        if finding is not None and not isinstance(finding, str):
+            raise RuntimeError(
+                "reviewer coverage entry {!r} finding is not a string finding "
+                "id or null; got: {}".format(e.get("id"), repr(finding)[:200])
+            )
         entries.append(CoverageEntry(
             id=e.get("id"),
             status=e.get("status"),
             evidence=e.get("evidence", ""),
+            finding=finding,
         ))
     return entries
 
@@ -485,7 +492,7 @@ def _checklist_id(item):
     return item.id if hasattr(item, "id") else item["id"]
 
 
-def validate_coverage(verdict, checklist):
+def validate_coverage(verdict, checklist, citable=None):
     """Validate a reviewer verdict's coverage array against the supplied
     checklist. Returns a list of human-readable defect strings — empty means
     valid. This is validation, never parsing: a verdict with missing/invalid
@@ -499,8 +506,12 @@ def validate_coverage(verdict, checklist):
     - unknown ids: a coverage entry whose id is not on the checklist.
     - duplicate ids: a checklist id covered by more than one entry.
     - empty evidence: any entry with blank/whitespace-only evidence.
-    - unbacked violated: a "violated" entry whose id is not named as the
-      contract_ref of at least one finding in this same verdict.
+    - unbacked violated: a "violated" entry whose ``finding`` is absent, names
+      no finding in this verdict, or names one that is not effectively
+      contract-breaking (impact ``contract-breaking`` and a non-null
+      ``contract_ref``, a member of ``citable`` when that is truthy). Several
+      entries may name one finding.
+    - stray finding: ``finding`` on an entry whose status is not "violated".
     """
     checklist_ids = [_checklist_id(it) for it in checklist]
     checklist_id_set = set(checklist_ids)
@@ -543,18 +554,51 @@ def validate_coverage(verdict, checklist):
             "empty evidence for coverage id(s): " + ", ".join(empty_evidence)
         )
 
-    backed_refs = {
-        f.contract_ref for f in (verdict.findings or []) if f.contract_ref
-    }
-    unbacked_violated = [
-        entry.id for entry in coverage
-        if entry.status == "violated" and entry.id not in backed_refs
-    ]
-    if unbacked_violated:
-        defects.append(
-            "'violated' coverage id(s) with no backing finding contract_ref: "
-            + ", ".join(unbacked_violated)
+    citable_id_set = None
+    if citable:
+        citable_id_set = (
+            citable if isinstance(citable, (set, frozenset))
+            else {_checklist_id(it) for it in citable}
         )
+    findings_by_id = {f.id: f for f in (verdict.findings or [])}
+    for entry in coverage:
+        if entry.status != "violated":
+            if entry.finding is not None:
+                defects.append(
+                    "coverage id {!r} has status {!r} but names finding {!r};"
+                    " only 'violated' entries carry a finding".format(
+                        entry.id, entry.status, entry.finding
+                    )
+                )
+            continue
+        prefix = "'violated' coverage id {!r}".format(entry.id)
+        if not entry.finding:
+            defects.append(prefix + " names no backing finding")
+            continue
+        backing = findings_by_id.get(entry.finding)
+        if backing is None:
+            defects.append(
+                prefix + " names finding {!r}, which is not in this "
+                "verdict".format(entry.finding)
+            )
+        elif backing.impact != "contract-breaking":
+            defects.append(
+                prefix + " is backed by finding {!r} with impact {!r}, "
+                "not 'contract-breaking'".format(entry.finding, backing.impact)
+            )
+        elif not backing.contract_ref:
+            defects.append(
+                prefix + " is backed by finding {!r} with a null "
+                "contract_ref".format(entry.finding)
+            )
+        elif (citable_id_set is not None
+              and backing.contract_ref not in citable_id_set):
+            defects.append(
+                prefix + " is backed by finding {!r} whose contract_ref {!r} "
+                "is not a citable ref".format(
+                    entry.finding, backing.contract_ref
+                )
+            )
 
     return defects
 
@@ -931,7 +975,7 @@ def main(argv=None):
 
     decision = _build_decision(action, halt_reason, findings, state)
     if checklist is not None and verdict is not None:
-        defects = validate_coverage(verdict, checklist)
+        defects = validate_coverage(verdict, checklist, citable)
         decision["coverage_valid"] = not defects
         decision["coverage_defects"] = defects
 

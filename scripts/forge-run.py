@@ -555,7 +555,7 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     empty-checklist skip, so calling it unconditionally here is safe on a
     checklist-less task too."""
     defects = (
-        list(forge_dispose.validate_coverage(verdict, checklist))
+        list(forge_dispose.validate_coverage(verdict, checklist, citable))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)

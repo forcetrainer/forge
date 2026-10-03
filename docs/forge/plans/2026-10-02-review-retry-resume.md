@@ -11,7 +11,7 @@
 - A near-miss citable id is a validation defect, never normalized to the id it resembles.
 
 ### Task 1: Violated coverage names its backing finding
-- [ ] Done
+- [x] Done — passed, 1 attempt
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`CoverageEntry.finding`; `REVIEW_VERDICT_INSTRUCTION` violated/finding clause)

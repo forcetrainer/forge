@@ -122,11 +122,17 @@ REVIEW_VERDICT_INSTRUCTION = (
     "checklist id supplied in the packet, each {\"id\": \"<checklist id>\", "
     "\"status\": \"satisfied\" | \"violated\" | \"n/a\" | \"unverifiable\", "
     "\"evidence\": "
-    "\"file:line, hunk, or reason\"} — evidence must be non-empty on every "
-    "entry, and \"n/a\" requires a reason in evidence (why the diff cannot "
+    "\"file:line, hunk, or reason\", \"finding\": \"f1\"} — evidence must "
+    "be non-empty on every entry, and \"n/a\" requires a reason in evidence (why the diff cannot "
     "touch that item), never a rubber-stamped satisfied. "
     "\"unverifiable\" requires a reason in evidence and obliges no backing "
-    "finding — unlike \"violated\", which does require one. "
+    "finding — unlike \"violated\", which does require one: a "
+    "\"violated\" entry must carry \"finding\", the id of a finding in this "
+    "same verdict whose impact is \"contract-breaking\" and whose "
+    "contract_ref is non-null and cited from this review's packet; several "
+    "violated entries may name the same finding, whose single contract_ref "
+    "need not equal each violated id. \"finding\" is omitted or null on "
+    "every other status. "
     "location.lines accepts a single line (\"12\"), a single range "
     "(\"12-20\"), or a comma-separated list of either (\"12-20,45,60-62\") — "
     "a finding is in-diff when any one of those ranges falls inside the "
@@ -207,6 +213,7 @@ class CoverageEntry:
     id: str
     status: str  # "satisfied" | "violated" | "n/a" | "unverifiable"
     evidence: str
+    finding: str | None = None  # id of the backing finding; "violated" only
 
 
 @dataclass
