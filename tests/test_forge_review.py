@@ -575,7 +575,7 @@ class FinalReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                                # a2
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto",
         )
         self.assertEqual(outcome.status, "passed")
@@ -592,7 +592,7 @@ class FinalReviewLoopTests(unittest.TestCase):
                 "f1.txt", "99", "legacy bug", repair_task=repair)},
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto",
         )
         self.assertEqual(outcome.status, "escalated")
@@ -612,7 +612,7 @@ class FinalReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _findings_msg("style nit")},  # improvement -> defer
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto",
         )
         self.assertEqual(outcome.status, "passed")
@@ -625,7 +625,7 @@ class FinalReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _findings_msg("even a harmless nit")},
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "gate",
         )
         self.assertEqual(outcome.status, "escalated")
@@ -646,7 +646,7 @@ class FinalReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                                 # a2 re-review -> pass
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto",
         )
         self.assertEqual(outcome.status, "passed")
@@ -673,7 +673,7 @@ class FinalReviewLoopTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},                                 # a3 re-review -> pass
         ])
         outcome = forge_run.run_final_review_loop(
-            self.spec, run_base, self.run_dir, self.fake, self.d,
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto",
         )
         self.assertEqual(outcome.status, "passed")

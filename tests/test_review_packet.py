@@ -751,3 +751,58 @@ class PacketForSpecContextTests(unittest.TestCase):
         with open(path) as f:
             content = f.read()
         self.assertNotIn("## Spec context", content)
+
+    # --- Task 6: per-task packet labels sections across specs ---
+
+    def _two_spec_repo(self, task_spec_line, header=True):
+        for name, system, body in (("alpha", "alpha", "ALPHA-BODY"), ("beta", "beta", "BETA-BODY")):
+            os.makedirs(os.path.join(self.repo_dir, "specs"), exist_ok=True)
+            with open(os.path.join(self.repo_dir, "specs", name + ".md"), "w") as f:
+                f.write("---\nsystem: {}\n---\n# T\n\n## Intro\n\n{}\n".format(system, body))
+        head = "**Spec files:**\n- specs/alpha.md\n- specs/beta.md\n\n" if header else ""
+        with open(self.plan_path, "w") as f:
+            f.write(
+                "# Plan\n\n**Goal:** Do it.\n" + head +
+                "\n### Task 1: Build\n- [ ] Done\n\n"
+                "**Files:**\n- Modify: `foo.txt`\n\n"
+                + task_spec_line +
+                "\n\n**Acceptance:** `true` passes\n\n**Tier:** standard\n\n"
+                "**Depends on:** nothing\n"
+            )
+        with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:
+            f.write("x\n")
+        base = self._commit_all("initial")
+        with open(os.path.join(self.repo_dir, "foo.txt"), "a") as f:
+            f.write("y\n")
+        return base
+
+    def _packet(self, base, spec_path=None):
+        task = self.forge_run.Task(number=1, title="Build", tier="standard")
+        run_dir = tempfile.mkdtemp(prefix="packet-for-out-")
+        self.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+        path = self.forge_git._packet_for(
+            task, self.plan_path, run_dir, base, self.repo_dir, spec_path=spec_path)
+        with open(path) as f:
+            return f.read()
+
+    def test_two_spec_plan_packet_labels_each_section_with_its_spec_id(self):
+        base = self._two_spec_repo("**Spec:** [alpha] Intro, [beta] Intro")
+        content = self._packet(base)
+        self.assertIn("### [alpha] Intro", content)
+        self.assertIn("### [beta] Intro", content)
+        self.assertIn("ALPHA-BODY", content)
+        self.assertIn("BETA-BODY", content)
+
+    def test_one_spec_plan_packet_pastes_sections_unlabeled(self):
+        base = self._two_spec_repo("**Spec:** Intro", header=False)
+        os.remove(os.path.join(self.repo_dir, "specs", "beta.md"))
+        content = self._packet(base, spec_path=os.path.join(self.repo_dir, "specs", "alpha.md"))
+        self.assertIn("### Intro\n", content)
+        self.assertNotIn("[alpha]", content)
+        self.assertIn("ALPHA-BODY", content)
+
+    def test_packet_diff_block_is_the_same_with_or_without_spec_context(self):
+        base = self._two_spec_repo("**Spec:** [alpha] Intro")
+        content = self._packet(base)
+        diff = self.forge_git._git_diff(self.repo_dir, base)
+        self.assertIn("```diff\n" + diff + "```\n", content)

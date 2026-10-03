@@ -115,6 +115,7 @@ from forge_git import (  # noqa: F401
     _git_diff,
     _git_head,
     _packet_for,
+    named_spec_sections,
     _working_tree_dirty,
     freeze_attempt,
     freeze_diff,
@@ -1178,8 +1179,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
-                    # Task 6: the per-task packet takes the spec set.
-                    spec_path=_packet_spec(plan_path, spec_path),
+                    spec_path=spec_path,
                     citable=citable,
                 )
             review_resume_state = {
@@ -1551,9 +1551,10 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason):
     }
 
 
-def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
+def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
-                          plan_path=None, seeded_findings=None):
+                          plan_path=None, seeded_findings=None,
+                          named_sections=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1630,10 +1631,10 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     if plan_path is not None:
         checklist, coverage_skipped = _checklist_or_skip(
             forge_checklist.build_final_checklist, plan_path,
-            _checklist_spec(plan_path, spec_path),
+            _checklist_spec(plan_path, spec_paths),
         )
         final_citable = forge_checklist.final_citable_refs(
-            plan_path, _checklist_spec(plan_path, spec_path),
+            plan_path, _checklist_spec(plan_path, spec_paths),
         )
 
     attempt = 0
@@ -1733,12 +1734,10 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                     f.write(packet_text)
             else:
                 packet_checklist = checklist
-                # Task 6: a plan with no spec lists none; os.devnull stands in
-                # for the spec text until _final_packet takes the spec set.
                 packet_path = _final_packet(
-                    spec_path or os.devnull, run_base, diff, run_dir,
+                    spec_paths, run_base, diff, run_dir,
                     prior_findings=prior_findings or None, checklist=checklist,
-                    citable=final_citable,
+                    citable=final_citable, named_sections=named_sections,
                 )
 
             review_resume_state = {
@@ -1879,17 +1878,14 @@ class DocSyncResult:
     contradiction: str | None = None
 
 
-def _doc_sync_brief(spec_path, diff, run_dir):
-    """Write the doc-sync prompt: the spec + reconcile-only instruction + the
-    shipped whole-plan ``diff`` fenced with a dynamic-length fence (like
-    _final_review_fix_brief, so a diff line that is itself a ``` fence can't close
-    the block early). Overwritten fresh; there is exactly one doc-sync stage."""
-    # Task 6: a plan with no spec has none to open; the brief then carries the
-    # instruction and the diff alone.
-    spec_text = ""
-    if spec_path:
-        with open(spec_path, "r", encoding="utf-8") as f:
-            spec_text = f.read().rstrip("\n") + "\n\n"
+def _doc_sync_brief(spec_paths, diff, run_dir, named_sections=None):
+    """Write the doc-sync prompt: the spec listing (paths and the section
+    labels the plan names, never spec text — the worker opens the files itself)
+    + reconcile-only instruction + the shipped whole-plan ``diff`` fenced with a
+    dynamic-length fence (like _final_review_fix_brief, so a diff line that is
+    itself a ``` fence can't close the block early). A plan with no spec lists
+    none. Overwritten fresh; there is exactly one doc-sync stage."""
+    spec_text = rp.build_spec_files_section(spec_paths, named_sections) + "\n"
     diff_section = _fenced_diff(diff)
     brief = (
         spec_text
@@ -1960,8 +1956,8 @@ def _git_commit_doc_sync(cwd):
     return _git_head(cwd), reconciled
 
 
-def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
-                      timeout=DEFAULT_TIMEOUT):
+def dispatch_doc_sync(spec_paths, run_base, diff, run_dir, tier, codex_bin, cwd,
+                      timeout=DEFAULT_TIMEOUT, named_sections=None):
     """Terminal doc-sync stage (Terminal doc-sync stage spec): one ``codex exec``
     dispatch that reconciles EXISTING documentation to the shipped whole-plan
     ``diff`` — stale references, changed signatures/behavior, spec changelog —
@@ -1983,7 +1979,7 @@ def dispatch_doc_sync(spec_path, run_base, diff, run_dir, tier, codex_bin, cwd,
     resumed, so its captured thread id is discarded rather than persisted."""
     model, effort = TIER_MAP[tier]
     preamble = contract_preamble(tier)
-    brief_path = _doc_sync_brief(spec_path, diff, run_dir)
+    brief_path = _doc_sync_brief(spec_paths, diff, run_dir, named_sections)
     with open(brief_path, "r", encoding="utf-8") as f:
         brief = f.read()
     prompt = preamble + "\n\n" + brief
@@ -2101,22 +2097,13 @@ def stage_deferrals(staged, findings, *, task_number=None, stage=None,
     return staged
 
 
-def _checklist_spec(plan_path, spec_path):
+def _checklist_spec(plan_path, spec_paths):
     """The spec argument ``forge_checklist`` takes: a plan declaring
-    ``**Spec files:**`` reads its specs itself and takes none."""
+    ``**Spec files:**`` reads its specs itself and takes none; a legacy plan
+    takes its one ``--spec`` file, which is ``spec_paths[0]`` when it has one."""
     if eb.parse_spec_files(eb.read_lines(plan_path)):
         return None
-    return spec_path
-
-
-def _packet_spec(plan_path, spec_path):
-    """The one spec path the final-review packet and doc-sync brief still take:
-    the legacy ``--spec``, or the plan's first declared spec, or None for a
-    plan with no spec."""
-    # Task 6: those stages take the whole spec set; this is the single-path
-    # stand-in until they do.
-    spec_set = eb.load_spec_set(plan_path, spec_path)
-    return spec_set[0].path if spec_set else None
+    return spec_paths[0] if spec_paths else None
 
 
 def _check_spec_set(recorded, current):
@@ -2214,6 +2201,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     spec_paths = [
         os.path.abspath(f.path) for f in eb.load_spec_set(plan_path, spec_path)
     ]
+    named_sections = named_spec_sections(plan_path, spec_path)
     recorded_specs = _read_specs(run_dir)
     if recorded_specs is not None:
         _check_spec_set(recorded_specs, spec_paths)
@@ -2566,11 +2554,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_outcome = run_final_review_loop(
-                # Task 6: passes the spec set.
-                _packet_spec(plan_path, spec_path), run_base, run_dir,
+                spec_paths, run_base, run_dir,
                 codex_bin, cwd, final_tier,
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
-                seeded_findings=seeded_findings,
+                seeded_findings=seeded_findings, named_sections=named_sections,
             )
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
@@ -2590,10 +2577,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 # `fix: final-review` commit the loop just landed. A doc/contract
                 # contradiction it cannot mechanically reconcile halts the run.
                 doc_sync = dispatch_doc_sync(
-                    # Task 6: passes the spec set.
-                    _packet_spec(plan_path, spec_path), run_base,
+                    spec_paths, run_base,
                     _git_diff(cwd, run_base), run_dir,
                     final_tier, codex_bin, cwd, timeout=timeout,
+                    named_sections=named_sections,
                 )
                 doc_sync_record = {
                     "status": doc_sync.status,

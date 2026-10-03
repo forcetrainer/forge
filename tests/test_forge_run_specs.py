@@ -332,6 +332,136 @@ class SpecSetRunTests(unittest.TestCase):
         self.assertIn("spec2.md", res.stderr)
         self.assertIn("removed", res.stderr)
 
+    # --- packets and briefs list spec paths (Task 6) -----------------------
+
+    def two_spec_paths(self):
+        return [os.path.join(self.d, ALPHA), os.path.join(self.d, BETA)]
+
+    def named_sections(self, plan_text):
+        import forge_git
+        plan = self.plan(plan_text)
+        return forge_git.named_spec_sections(plan, None)
+
+    def test_final_packet_for_two_specs_lists_paths_and_labels_without_body(self):
+        import forge_git
+        paths = self.two_spec_paths()
+        named = self.named_sections(header_plan([ALPHA, BETA]))
+        out = forge_git._final_packet(
+            paths, "HEAD", "+DIFF-LINE\n", self.run_dir_made(), named_sections=named)
+        with open(out) as f:
+            packet = f.read()
+        for p in paths:
+            self.assertIn(p, packet)
+        self.assertIn("[alpha] Intro", packet)
+        self.assertIn("[beta] Rules", packet)
+        self.assertIn("+DIFF-LINE", packet)
+        for body in ("ALPHA-BODY", "BETA-BODY", "2026-10-03: created"):
+            self.assertNotIn(body, packet)
+
+    def test_final_packet_for_one_spec_has_path_and_no_body(self):
+        import forge_git
+        out = forge_git._final_packet(
+            [os.path.join(self.d, ALPHA)], "HEAD", "+DIFF-LINE\n", self.run_dir_made())
+        with open(out) as f:
+            packet = f.read()
+        self.assertIn(ALPHA, packet)
+        self.assertNotIn("ALPHA-BODY", packet)
+        self.assertIn("+DIFF-LINE", packet)
+
+    def test_final_packet_for_no_spec_lists_none_and_carries_the_diff(self):
+        import forge_git
+        out = forge_git._final_packet([], "HEAD", "+DIFF-LINE\n", self.run_dir_made())
+        with open(out) as f:
+            packet = f.read()
+        self.assertIn("This plan has no spec.", packet)
+        self.assertNotIn(".md", packet)
+        self.assertIn("```diff\n+DIFF-LINE\n```\n", packet)
+
+    def test_doc_sync_brief_for_two_specs_lists_paths_and_no_body(self):
+        paths = self.two_spec_paths()
+        named = self.named_sections(header_plan([ALPHA, BETA]))
+        out = forge_run._doc_sync_brief(
+            paths, "+DIFF-LINE\n", self.run_dir_made(), named_sections=named)
+        with open(out) as f:
+            brief = f.read()
+        for p in paths:
+            self.assertIn(p, brief)
+        self.assertIn("[alpha] Intro", brief)
+        self.assertIn("[beta] Rules", brief)
+        self.assertIn("+DIFF-LINE", brief)
+        for body in ("ALPHA-BODY", "BETA-BODY", "2026-10-03: created"):
+            self.assertNotIn(body, brief)
+
+    def test_doc_sync_brief_for_no_spec_carries_instruction_and_diff(self):
+        out = forge_run._doc_sync_brief([], "+DIFF-LINE\n", self.run_dir_made())
+        with open(out) as f:
+            brief = f.read()
+        self.assertIn("This plan has no spec.", brief)
+        self.assertIn("Reconcile EXISTING documentation", brief)
+        self.assertIn("+DIFF-LINE", brief)
+
+    def run_dir_made(self):
+        os.makedirs(self.run_dir, exist_ok=True)
+        return self.run_dir
+
+    # --- whole runs through the runner (Task 6) ----------------------------
+
+    STANDARD_ONE = TASK_ONE.replace("trivial — test fixture, mechanical", "standard")
+
+    def stage_prompts(self):
+        prompts = _log_prompts(self.prompt_log)
+        task = [p for p in prompts if "## Spec context" in p]
+        final = [p for p in prompts if "## Review kind" in p and "## Specs" in p]
+        sync = [p for p in prompts if "Reconcile EXISTING documentation" in p]
+        return task, final, sync
+
+    def listing_lines(self, prompt):
+        """The spec-listing lines of a stage prompt: the path and section lines
+        under its '## Specs' heading, as the listing renders them. Text that
+        only the listing produces — the plan file inside the diff and the
+        contract checklist repeat the relative paths and labels."""
+        lines = prompt.split("## Specs\n", 1)[1].splitlines()
+        return [ln for ln in lines
+                if ln.startswith("- /") or ln.startswith("  - section: ")]
+
+    def test_two_spec_run_gives_every_stage_both_specs(self):
+        plan = self.plan(header_plan([ALPHA, BETA], tasks=(self.STANDARD_ONE,)))
+        self.commit("plan")
+        res = self.run_cli(plan)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        task, final, sync = self.stage_prompts()
+        self.assertEqual((len(task) >= 1, len(final) >= 1, len(sync)), (True, True, 1))
+        # per-task packet: both named sections pasted, labeled by spec id
+        for needle in ("ALPHA-BODY", "BETA-BODY", "[alpha] Intro", "[beta] Rules"):
+            self.assertIn(needle, task[0])
+        # final review and doc-sync: both paths and labels, no spec text
+        for prompt in (final[0], sync[0]):
+            listed = self.listing_lines(prompt)
+            self.assertEqual(listed, [
+                "- " + os.path.join(self.d, ALPHA), "  - section: [alpha] Intro",
+                "- " + os.path.join(self.d, BETA), "  - section: [beta] Rules",
+            ])
+            # The final-review checklist quotes each named section's first
+            # line (Contract checklist spec), so the spec-only line checked
+            # here is one no named section reaches.
+            self.assertNotIn("2026-10-03: created", prompt)
+        self.assertNotIn("ALPHA-BODY", sync[0])
+        self.assertNotIn("BETA-BODY", sync[0])
+
+    def test_no_spec_run_with_a_diff_completes_final_review_and_doc_sync(self):
+        no_spec = self.STANDARD_ONE.replace("**Spec:** [alpha] Intro, [beta] Rules\n\n", "")
+        plan = self.plan("# Plan\n\n**Goal:** g\n\n" + no_spec)
+        self.commit("plan")
+        res = self.run_cli(plan)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        task, final, sync = self.stage_prompts()
+        self.assertEqual(task, [])
+        self.assertEqual((len(final), len(sync)), (1, 1))
+        self.assertIn("This plan has no spec.", final[0])
+        self.assertIn("CHANGE", final[0])
+        self.assertIn("This plan has no spec.", sync[0])
+        self.assertIn("CHANGE", sync[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -87,7 +87,7 @@ class DispatchDocSyncTests(unittest.TestCase):
         ])
         diff = forge_run._git_diff(self.d, run_base)
         result = forge_run.dispatch_doc_sync(
-            self.spec, run_base, diff, self.run_dir, "standard", self.fake, self.d,
+            [self.spec], run_base, diff, self.run_dir, "standard", self.fake, self.d,
         )
         self.assertEqual(result.status, "reconciled")
         self.assertIsNotNone(result.commit)
@@ -102,7 +102,7 @@ class DispatchDocSyncTests(unittest.TestCase):
         ])
         diff = forge_run._git_diff(self.d, run_base)
         result = forge_run.dispatch_doc_sync(
-            self.spec, run_base, diff, self.run_dir, "standard", self.fake, self.d,
+            [self.spec], run_base, diff, self.run_dir, "standard", self.fake, self.d,
         )
         self.assertEqual(result.status, "clean")
         self.assertIsNone(result.commit)
@@ -121,7 +121,7 @@ class DispatchDocSyncTests(unittest.TestCase):
         ])
         diff = forge_run._git_diff(self.d, run_base)
         result = forge_run.dispatch_doc_sync(
-            self.spec, run_base, diff, self.run_dir, "standard", self.fake, self.d,
+            [self.spec], run_base, diff, self.run_dir, "standard", self.fake, self.d,
         )
         self.assertEqual(result.status, "halt")
         self.assertIn("README claims f1 is JSON", result.contradiction)
