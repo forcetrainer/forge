@@ -503,16 +503,21 @@ extract-brief.py <plan.md> <task-number> [--spec <spec.md>] [--out <dir>]
 ### `scripts/review-packet.py`
 
 ```
-review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
+review-packet.py <plan.md> <task-number> --base <git-ref> [--spec <spec.md>] [--out <dir>]
 ```
 
 - Output `<out>/task-<N>-review.md`; prints the path to stdout.
+- The specs come from the plan's `**Spec files:**`; `--spec` is for a legacy plan only.
 - Contents: the Task N block (interface, tests, acceptance); the spec sections the
   task's `**Spec:**` line names, pasted as context and labeled `[<spec id>] <heading>`
   when the plan declares more than one spec file; and `git diff <base>` in a
   fenced `diff` block; fence length exceeds the longest backtick run in the diff body,
   minimum 3.
-- Missing task number or a failed git invocation → nonzero exit, message on stderr.
+- Missing task number, a task declaring `**Spec:**` in a plan with no spec, an
+  unmatched or ambiguous section name, a spec set that fails to load (`--spec` given
+  alongside `**Spec files:**`, a declared path naming no file or resolving outside the
+  repository root, an undeclared `[<spec id>]`), or a failed git invocation → nonzero
+  exit, message on stderr.
 
 ### Shared behavior
 

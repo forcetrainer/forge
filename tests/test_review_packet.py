@@ -806,3 +806,147 @@ class PacketForSpecContextTests(unittest.TestCase):
         content = self._packet(base)
         diff = self.forge_git._git_diff(self.repo_dir, base)
         self.assertIn("```diff\n" + diff + "```\n", content)
+
+
+# --- review-packet.py command line resolves the plan's spec set ---
+
+
+class CliSpecContextTests(unittest.TestCase):
+    def setUp(self):
+        from _forge_support import forge_run  # noqa: F401  (loads sys.path setup)
+        import forge_git as _forge_git
+
+        self.forge_run = forge_run
+        self.forge_git = _forge_git
+        self.repo_dir = tempfile.mkdtemp(prefix="cli-spec-repo-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        self.plan_path = os.path.join(self.repo_dir, "plan.md")
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.repo_dir, check=True, capture_output=True,
+            text=True,
+        ).stdout
+
+    def _write_specs(self):
+        os.makedirs(os.path.join(self.repo_dir, "specs"), exist_ok=True)
+        for name, body in (("alpha", "ALPHA-BODY"), ("beta", "BETA-BODY")):
+            with open(os.path.join(self.repo_dir, "specs", name + ".md"), "w") as f:
+                f.write("---\nsystem: {}\n---\n# T\n\n## Intro\n\n{}\n".format(name, body))
+
+    def _repo(self, spec_line, header=""):
+        with open(self.plan_path, "w") as f:
+            f.write(
+                "# Plan\n\n**Goal:** Do it.\n" + header +
+                "\n### Task 1: Build\n- [ ] Done\n\n"
+                "**Files:**\n- Modify: `foo.txt`\n\n"
+                + (spec_line + "\n\n" if spec_line else "") +
+                "**Acceptance:** `true` passes\n\n**Tier:** standard\n\n"
+                "**Depends on:** nothing\n"
+            )
+        with open(os.path.join(self.repo_dir, "foo.txt"), "w") as f:
+            f.write("x\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "initial")
+        base = self._git("rev-parse", "HEAD").strip()
+        with open(os.path.join(self.repo_dir, "foo.txt"), "a") as f:
+            f.write("y\n")
+        return base
+
+    def _cli(self, base, *extra):
+        out_dir = tempfile.mkdtemp(prefix="cli-spec-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script(
+            [self.plan_path, "1", "--base", base, "--out", out_dir, *extra]
+        )
+        return result, out_dir
+
+    def _packet(self, result, out_dir):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(out_dir, "task-1-review.md")) as f:
+            return f.read()
+
+    @staticmethod
+    def _context(packet):
+        return packet[packet.index("## Spec context"):]
+
+    TWO_HEADER = "**Spec files:**\n- specs/alpha.md\n- specs/beta.md\n"
+
+    def test_two_spec_header_plan_pastes_labeled_sections(self):
+        self._write_specs()
+        base = self._repo("**Spec:** [alpha] Intro, [beta] Intro", self.TWO_HEADER)
+        result, out_dir = self._cli(base)
+        ctx = self._context(self._packet(result, out_dir))
+        self.assertIn("### [alpha] Intro\n", ctx)
+        self.assertIn("ALPHA-BODY", ctx)
+        self.assertIn("### [beta] Intro\n", ctx)
+        self.assertIn("BETA-BODY", ctx)
+
+    def test_legacy_plan_with_spec_pastes_unlabeled_sections(self):
+        self._write_specs()
+        base = self._repo("**Spec:** Intro")
+        spec = os.path.join(self.repo_dir, "specs", "alpha.md")
+        result, out_dir = self._cli(base, "--spec", spec)
+        ctx = self._context(self._packet(result, out_dir))
+        self.assertIn("### Intro\n", ctx)
+        self.assertNotIn("[alpha]", ctx)
+        self.assertIn("ALPHA-BODY", ctx)
+
+    def test_one_spec_header_plan_pastes_unlabeled_sections(self):
+        self._write_specs()
+        base = self._repo("**Spec:** Intro", "**Spec files:**\n- specs/alpha.md\n")
+        result, out_dir = self._cli(base)
+        ctx = self._context(self._packet(result, out_dir))
+        self.assertIn("### Intro\n", ctx)
+        self.assertNotIn("[alpha]", ctx)
+        self.assertIn("ALPHA-BODY", ctx)
+
+    def test_plan_with_no_spec_and_no_spec_line_has_no_spec_context(self):
+        base = self._repo("")
+        result, out_dir = self._cli(base)
+        packet = self._packet(result, out_dir)
+        self.assertNotIn("## Spec context", packet)
+        with open(self.plan_path) as f:
+            block = rp.extract_task_block(f.read(), 1)
+        self.assertEqual(
+            packet, rp.build_packet(block, base, rp.git_diff(self.repo_dir, base))
+        )
+
+    def test_spec_line_in_plan_with_no_spec_exits_naming_the_task(self):
+        base = self._repo("**Spec:** Intro")
+        result, _ = self._cli(base)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("task 1", result.stderr)
+        self.assertIn("the plan has no spec", result.stderr)
+
+    def test_spec_flag_with_header_plan_exits_naming_both(self):
+        self._write_specs()
+        base = self._repo("**Spec:** [alpha] Intro", self.TWO_HEADER)
+        result, _ = self._cli(
+            base, "--spec", os.path.join(self.repo_dir, "specs", "alpha.md")
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("**Spec files:**", result.stderr)
+        self.assertIn("--spec", result.stderr)
+
+    def test_cli_packet_equals_the_runners_packet(self):
+        self._write_specs()
+        base = self._repo("**Spec:** [alpha] Intro, [beta] Intro", self.TWO_HEADER)
+        result, out_dir = self._cli(base)
+        cli_packet = self._packet(result, out_dir)
+        task = self.forge_run.Task(number=1, title="Build", tier="standard")
+        run_dir = tempfile.mkdtemp(prefix="cli-spec-run-")
+        self.addCleanup(shutil.rmtree, run_dir, ignore_errors=True)
+        path = self.forge_git._packet_for(
+            task, self.plan_path, run_dir, base, self.repo_dir
+        )
+        with open(path) as f:
+            runner_packet = f.read()
+        # The runner's packet opens with the discovery review-kind marker the
+        # CLI never writes; everything after it must be identical.
+        marker = "## Review kind\n\ndiscovery\n\n"
+        self.assertTrue(runner_packet.startswith(marker))
+        self.assertEqual(cli_packet, runner_packet[len(marker):])

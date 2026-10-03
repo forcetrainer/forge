@@ -167,13 +167,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     # structural guard (`discovery-review-is-cold`) and not a special case.
     # The worker's brief is untouched: the worker may know it was paused.
     block = strip_ledger_annotations(block)
-    spec_sections = None
-    entries = eb.parse_spec_entries(block)
-    if entries:
-        resolved = eb.resolve_entries(
-            entries, eb.load_spec_set(plan_path, spec_path), task.number
-        )
-        spec_sections = [(r.label, "".join(r.lines)) for r in resolved]
+    spec_sections = rp.task_spec_sections(plan_path, block, task.number, spec_path)
     diff = _git_diff(cwd, base)
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
