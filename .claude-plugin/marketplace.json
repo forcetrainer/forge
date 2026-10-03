@@ -10,18 +10,18 @@
       "source": {
         "source": "url",
         "url": "https://github.com/forcetrainer/forge.git",
-        "sha": "add3224ce687b2abadf9e3c5ca10ee5cf26b7c03"
+        "sha": "04e7b68ecf52b3a3eb29ada2b288c8c972a96378"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Stable (0.13.1)."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Stable (0.13.2)."
     },
     {
       "name": "forge-beta",
       "source": {
         "source": "url",
         "url": "https://github.com/forcetrainer/forge.git",
-        "sha": "add3224ce687b2abadf9e3c5ca10ee5cf26b7c03"
+        "sha": "04e7b68ecf52b3a3eb29ada2b288c8c972a96378"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Tracks stable (0.13.1) until the next prerelease."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI. Tracks stable (0.13.2) until the next prerelease."
     }
   ]
 }
