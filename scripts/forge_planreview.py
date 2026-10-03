@@ -154,7 +154,9 @@ def _check_finding(label, finding, section_table, spec_headings, task_numbers, d
     table_entry = None
     if isinstance(section, str) and not _is_blank(section):
         table_entry = next((e for e in section_table if e.heading == section), None)
-        if section not in spec_headings:
+        # A section-table heading is whitespace-collapsed and may differ from
+        # the spec's raw heading text, so table membership is itself a match.
+        if table_entry is None and section not in spec_headings:
             defects.append(
                 "finding {!r} names section {!r} which matches no spec heading".format(
                     label, section

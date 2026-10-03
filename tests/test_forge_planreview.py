@@ -249,7 +249,10 @@ class FindingTests(unittest.TestCase):
         v = _with_findings(_finding(kind="uncovered", section="Gamma", task=None))
         result = _validate(v)
         self.assertFalse(result.valid)
-        self.assertTrue(any("f1" in d and "Gamma" in d for d in result.defects))
+        self.assertTrue(
+            any("f1" in d and "not in the section table" in d for d in result.defects),
+            result.defects,
+        )
 
     def test_contradiction_citing_heading_outside_table_is_valid(self):
         result = _validate(_with_findings(_finding(section="Gamma", task=None)))
@@ -270,6 +273,34 @@ class FindingTests(unittest.TestCase):
         result = _validate(_with_findings(_finding(task=9)))
         self.assertFalse(result.valid)
         self.assertTrue(any("f1" in d and "9" in d for d in result.defects))
+
+    def test_boolean_task_is_a_defect_not_task_one(self):
+        result = _validate(_with_findings(_finding(task=True)))
+        self.assertFalse(result.valid)
+        self.assertTrue(any("f1" in d and "True" in d for d in result.defects))
+
+    def test_uncovered_finding_cites_the_table_heading_when_raw_heading_differs(self):
+        # The section table carries whitespace-collapsed heading text; the
+        # spec's raw heading may differ. An `uncovered` finding copies the
+        # table's text and must be accepted.
+        table = [
+            forge_checklist.SectionEntry("Alpha", [1]),
+            forge_checklist.SectionEntry("Beta Two", [2]),
+        ]
+        verdict = {
+            "verdict": "findings",
+            "coverage": [
+                {"section": "Alpha", "requirements": [
+                    {"requirement": "r1", "covered_by": ["g1"], "na": None}]},
+                {"section": "Beta Two", "requirements": [
+                    {"requirement": "r2", "covered_by": [], "na": None}]},
+            ],
+            "findings": [_finding(kind="uncovered", section="Beta Two", task=2)],
+        }
+        result = p.validate_verdict(
+            verdict, table, PROMISE_IDS, ["Alpha", "Beta  Two"], TASK_NUMBERS,
+        )
+        self.assertTrue(result.valid, result.defects)
 
     def test_null_task_is_accepted(self):
         result = _validate(_with_findings(_finding(task=None)))
@@ -312,10 +343,6 @@ class DisposeTests(unittest.TestCase):
         disp = p.dispose(findings)
         self.assertEqual([f["id"] for f in disp.amend], ["a", "b"])
         self.assertEqual([f["id"] for f in disp.surface], ["c"])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 SPEC_FIXTURE = """# Spec
@@ -564,3 +591,7 @@ class PlanReviewCliTests(PlanCliMixin, unittest.TestCase):
     def test_plan_without_spec_exits_nonzero(self):
         result = self.run_cli(["--plan", self.plan_path])
         self.assertNotEqual(result.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

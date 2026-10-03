@@ -888,14 +888,17 @@ class PlanPromiseTests(unittest.TestCase):
         self.assertIn("Gamma Section", [e.heading for e in table])
 
     def test_section_and_subsection_are_separate_entries(self):
+        # "Zeta child" is a subsection of "Gamma Section"; task 1 names the
+        # parent and task 2 the child.
         path = self.write_plan(
             "plan_sub.md",
-            PROMISE_PLAN_MD.replace("**Spec:** ALPHA SEC", "**Spec:** Zeta child"),
+            PROMISE_PLAN_MD
+            .replace("**Spec:** Alpha section, Beta section", "**Spec:** Gamma")
+            .replace("**Spec:** ALPHA SEC", "**Spec:** Zeta child"),
         )
-        # a subsection named by another task is its own entry
-        headings = [e.heading for e in fc.build_section_table(path, self.spec_path)]
-        self.assertIn("Zeta child", headings)
-        self.assertIn("Alpha section", headings)
+        table = {e.heading: e.tasks for e in fc.build_section_table(path, self.spec_path)}
+        self.assertEqual(table["Gamma Section"], [1])
+        self.assertEqual(table["Zeta child"], [2])
 
     def test_no_task_naming_a_section_raises(self):
         path = self.write_plan(
