@@ -12,7 +12,7 @@ final review against the whole-plan diff + spec, JSON receipts, a ``run.json``
 summary, and plan-checkbox ledger annotations.
 
 Usage:
-    forge-run.py <plan.md> --spec <spec.md> [--run-dir DIR] [--codex-bin PATH]
+    forge-run.py <plan.md> [--spec <spec.md>] [--run-dir DIR] [--codex-bin PATH]
 
 Exit codes:
     0  every task passed
@@ -136,6 +136,7 @@ from forge_receipts import (  # noqa: F401
     _read_latest_receipt,
     _read_run_tasks,
     _read_seeded_findings,
+    _read_specs,
     _read_started_at,
     annotate_ledger,
     ensure_forge_gitignore,
@@ -1177,7 +1178,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 packet_path = _packet_for(
                     task, plan_path, run_dir, review_base, cwd,
                     prior_findings=prior_findings or None, checklist=checklist,
-                    spec_path=spec_path, citable=citable,
+                    # Task 6: the per-task packet takes the spec set.
+                    spec_path=_packet_spec(plan_path, spec_path),
+                    citable=citable,
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
@@ -1626,9 +1629,12 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
     final_citable = None
     if plan_path is not None:
         checklist, coverage_skipped = _checklist_or_skip(
-            forge_checklist.build_final_checklist, plan_path, spec_path,
+            forge_checklist.build_final_checklist, plan_path,
+            _checklist_spec(plan_path, spec_path),
         )
-        final_citable = forge_checklist.final_citable_refs(plan_path, spec_path)
+        final_citable = forge_checklist.final_citable_refs(
+            plan_path, _checklist_spec(plan_path, spec_path),
+        )
 
     attempt = 0
     while True:
@@ -1727,8 +1733,10 @@ def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
                     f.write(packet_text)
             else:
                 packet_checklist = checklist
+                # Task 6: a plan with no spec lists none; os.devnull stands in
+                # for the spec text until _final_packet takes the spec set.
                 packet_path = _final_packet(
-                    spec_path, run_base, diff, run_dir,
+                    spec_path or os.devnull, run_base, diff, run_dir,
                     prior_findings=prior_findings or None, checklist=checklist,
                     citable=final_citable,
                 )
@@ -1876,11 +1884,15 @@ def _doc_sync_brief(spec_path, diff, run_dir):
     shipped whole-plan ``diff`` fenced with a dynamic-length fence (like
     _final_review_fix_brief, so a diff line that is itself a ``` fence can't close
     the block early). Overwritten fresh; there is exactly one doc-sync stage."""
-    with open(spec_path, "r", encoding="utf-8") as f:
-        spec_text = f.read()
+    # Task 6: a plan with no spec has none to open; the brief then carries the
+    # instruction and the diff alone.
+    spec_text = ""
+    if spec_path:
+        with open(spec_path, "r", encoding="utf-8") as f:
+            spec_text = f.read().rstrip("\n") + "\n\n"
     diff_section = _fenced_diff(diff)
     brief = (
-        spec_text.rstrip("\n") + "\n\n"
+        spec_text
         + DOC_SYNC_INSTRUCTION + "\n\n"
         + "## Whole-plan diff\n\n" + diff_section
     )
@@ -2089,6 +2101,42 @@ def stage_deferrals(staged, findings, *, task_number=None, stage=None,
     return staged
 
 
+def _checklist_spec(plan_path, spec_path):
+    """The spec argument ``forge_checklist`` takes: a plan declaring
+    ``**Spec files:**`` reads its specs itself and takes none."""
+    if eb.parse_spec_files(eb.read_lines(plan_path)):
+        return None
+    return spec_path
+
+
+def _packet_spec(plan_path, spec_path):
+    """The one spec path the final-review packet and doc-sync brief still take:
+    the legacy ``--spec``, or the plan's first declared spec, or None for a
+    plan with no spec."""
+    # Task 6: those stages take the whole spec set; this is the single-path
+    # stand-in until they do.
+    spec_set = eb.load_spec_set(plan_path, spec_path)
+    return spec_set[0].path if spec_set else None
+
+
+def _check_spec_set(recorded, current):
+    """A resumed run's spec set must equal the recorded one. Compared as sets of
+    real paths, so order and spelling never differ; a difference raises naming
+    the added and removed paths."""
+    rec = {os.path.realpath(p): p for p in recorded}
+    cur = {os.path.realpath(p): p for p in current}
+    if set(rec) == set(cur):
+        return
+    added = sorted(cur[r] for r in set(cur) - set(rec))
+    removed = sorted(rec[r] for r in set(rec) - set(cur))
+    raise RuntimeError(
+        "this run's spec set differs from the one recorded in run.json — "
+        "added: {}; removed: {}".format(
+            ", ".join(added) or "none", ", ".join(removed) or "none"
+        )
+    )
+
+
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
              timeout=DEFAULT_TIMEOUT, autofix_mode="auto", resolve=None):
     """Sequential whole-plan loop. Every invocation first lints the plan (+ spec)
@@ -2160,6 +2208,15 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         print(line, flush=True)
     if any(d.severity == "error" for d in lint_defects):
         raise RuntimeError("plan lint failed:\n" + "\n".join(lint_lines))
+    # The plan's spec set: its `**Spec files:**`, or the legacy `--spec`. A
+    # resumed run's set must match the recorded one — checked before the run
+    # dir is touched or anything dispatches.
+    spec_paths = [
+        os.path.abspath(f.path) for f in eb.load_spec_set(plan_path, spec_path)
+    ]
+    recorded_specs = _read_specs(run_dir)
+    if recorded_specs is not None:
+        _check_spec_set(recorded_specs, spec_paths)
     # Parse and validate the plan BEFORE creating the run dir: an unparseable
     # plan (or an --effort pointing at a missing task) is a contract error that
     # must leave no run.json — the spec surfaces it via stderr only.
@@ -2304,7 +2361,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
     # each passed task so live per-task progress is visible. base_commit rides
     # along so a resume still reads it; started_at/pid feed the monitor.
-    write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base,
+    write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries, run_base,
                    started_at=run_started, pid=run_pid, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state)
     # Drop a short launcher for the standing monitor and print a one-token command
@@ -2337,7 +2394,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # and shows live per-task elapsed (its summary is otherwise `queued` until
         # it completes).
         summary.update({"status": "running", "started_at": task_started})
-        write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
+        write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state)
         # Resume a frozen scope-decision halt on the task it names: replay the
@@ -2424,7 +2481,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 # replay a freeze that is already in the mainline.
                 halt_state = None
             write_run_json(
-                run_dir, plan_path, spec_path, "running", task_summaries, run_base,
+                run_dir, plan_path, spec_paths, "running", task_summaries, run_base,
                 started_at=run_started, pid=run_pid, threads=threads,
                 seeded_findings=seeded_findings or None, halt=halt_state,
             )
@@ -2493,7 +2550,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # leaving run.json's tasks stamped `queued` from the seed write above for the
     # whole final-review phase. Flush the corrected summaries before entering it.
     if not escalated:
-        write_run_json(run_dir, plan_path, spec_path, "running", task_summaries,
+        write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state)
 
@@ -2509,7 +2566,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_outcome = run_final_review_loop(
-                spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
+                # Task 6: passes the spec set.
+                _packet_spec(plan_path, spec_path), run_base, run_dir,
+                codex_bin, cwd, final_tier,
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
                 seeded_findings=seeded_findings,
             )
@@ -2531,7 +2590,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 # `fix: final-review` commit the loop just landed. A doc/contract
                 # contradiction it cannot mechanically reconcile halts the run.
                 doc_sync = dispatch_doc_sync(
-                    spec_path, run_base, _git_diff(cwd, run_base), run_dir,
+                    # Task 6: passes the spec set.
+                    _packet_spec(plan_path, spec_path), run_base,
+                    _git_diff(cwd, run_base), run_dir,
                     final_tier, codex_bin, cwd, timeout=timeout,
                 )
                 doc_sync_record = {
@@ -2555,7 +2616,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # the monitor stops the spinner and paints the terminal-state banner. The
     # autonomy record (autofix_mode always; deferrals/doc_sync when present) rides
     # the final write for --status and the orchestrator's completion summary.
-    write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base,
+    write_run_json(run_dir, plan_path, spec_paths, overall, task_summaries, run_base,
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
                    doc_sync=doc_sync_record, threads=threads,
@@ -2626,7 +2687,11 @@ def main(argv=None):
         description="Deterministic whole-plan task runner over `codex exec`.",
     )
     parser.add_argument("plan", nargs="?", help="approved plan markdown file")
-    parser.add_argument("--spec", help="design spec markdown file")
+    parser.add_argument(
+        "--spec",
+        help="design spec markdown file, for a legacy plan with no "
+        "**Spec files:** header",
+    )
     parser.add_argument(
         "--status",
         action="store_true",
@@ -2692,8 +2757,8 @@ def main(argv=None):
             print(forge_status.render_status(state))
         return 0
 
-    if not args.plan or not args.spec:
-        parser.error("plan and --spec are required (or use --status --run-dir)")
+    if not args.plan:
+        parser.error("plan is required (or use --status --run-dir)")
 
     run_dir = args.run_dir or _default_run_dir()
     try:
@@ -2727,8 +2792,25 @@ def main(argv=None):
                     prior_halt = _read_halt(run_dir)
                 except RuntimeError:
                     prior_halt = None
+                # The recorded spec set is preserved, not replaced by this
+                # invocation's: a spec-set mismatch is itself a contract error,
+                # and overwriting the record with the mismatching set would let
+                # the next resume pass the check.
+                # A first invocation has no recorded set, so it records the
+                # plan's own; if that cannot be determined it records none,
+                # which a later invocation's check treats as no prior run.
+                specs = _read_specs(run_dir)
+                if specs is None:
+                    try:
+                        specs = [
+                            os.path.abspath(f.path)
+                            for f in eb.load_spec_set(args.plan, args.spec)
+                        ]
+                    except (RuntimeError, OSError):
+                        specs = None
                 write_run_json(
-                    run_dir, args.plan, args.spec, "contract-error",
+                    run_dir, args.plan, specs,
+                    "contract-error",
                     _read_run_tasks(run_dir) or [], _read_base_commit(run_dir),
                     contract_error=str(e),
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
