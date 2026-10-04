@@ -58,8 +58,8 @@ stages:
 flowchart LR
     I([idea]) --> B[brainstorm]
     B -- "✋ design approved" --> S[["spec<br/>docs/forge/specs/"]]
-    S --> P[["plan<br/>docs/forge/plans/"]]
-    P -- "✋ routing approved" --> E[TDD execution]
+    S -- "reviewed against the code" --> P[["plan<br/>docs/forge/plans/"]]
+    P -- "reviewed against the spec<br/>✋ routing approved" --> E[TDD execution]
     E -- "review + full suite" --> D([shipped])
 ```
 
@@ -87,18 +87,28 @@ asks questions in small batches, proposes a few approaches with a
 recommendation, and walks through the design section by section for
 approval. The point is to make design decisions in conversation, where
 changing course is cheap. Specs stay short and get amended in place as the
-system changes.
+system changes. Before planning starts, a separate agent that took no part in
+the conversation reviews the spec against the actual code — the files and
+functions it names, the behavior it assumes. Factual corrections get applied;
+anything that's a judgment call comes back to me.
 
 **Planning** turns the spec into tasks: which files, what interfaces, what
 tests, what counts as done. Plans never contain implementation code — code
 written before there's compiler and test feedback gets written twice. Each
 task is tagged trivial, standard, or complex based on what it actually
-requires.
+requires. A plan lists the specs it implements — often more than one — and
+each task names the spec sections it delivers. Before anything is built, a
+second cold reviewer checks the plan against those specs: nothing in the plan
+contradicts them, and every requirement is covered by a test or acceptance
+check the plan actually promises. A gap found here costs an edit to the plan;
+the same gap found after the build costs a rework.
 
 **Execution** sends each task to a worker agent matched to its tier —
 cheapest model for trivial work, strongest for complex — pinned per agent so
 a session-level model switch can't quietly downgrade a build. Workers do
-strict TDD (failing test first, then code). Review scales with risk: trivial
+strict TDD (failing test first, then code) — one test per behavior, running
+only the tests they touched; the full suite runs once, at the end. Review
+scales with risk: trivial
 tasks just pass their acceptance commands; bigger tasks get a real review
 that **classifies** each finding — **fix** it, **defer** it (logged), or
 **halt** for a human decision — and reworks until findings *converge* rather
@@ -160,10 +170,11 @@ after a halt, and known Codex caveats — is in
 |---|---|
 | `skills/brainstorming` | Gear routing, then idea → design → spec through dialogue. Includes a browser-based visual companion for mockups. |
 | `skills/planning` | Spec → plan (what/where, no code) → tiered execution. Codex execution notes in `codex-execution.md`. |
-| `skills/tdd` | Red-green-refactor cut to its operational core. Test-harness creation is plan-level work, never a drive-by. |
+| `skills/tdd` | Red-green-refactor cut to its operational core. Tests per behavior, not per function; the full suite runs once, at completion. Test-harness creation is plan-level work, never a drive-by. |
 | `skills/project-memory` | Formats and rules for constraints and GitHub issues (deferrals, programs, phases). |
 | `agents/` | The three tier workers (forge-light, forge-standard, forge-deep), model pinned per harness. |
 | `scripts/` — briefs & packets | `extract-brief.py` (plan+spec → worker brief) and `review-packet.py` (task block + diff → review packet). Stdlib; used by both harnesses. |
+| `scripts/` — document checks | `forge_docreview.py` (spec review and plan review — builds the reviewer's packet, validates its verdict) and `forge_lint.py` (plan and spec grammar, run when a plan is written and again before anything dispatches). Stdlib; used by both harnesses. |
 | `scripts/` — Codex runtime | `forge-run.py` (the deterministic plan runner — one `codex exec`/task, receipts, per-task commits), `forge-monitor.py` (the live `rich` TUI), and the `forge_*` / `forge_status` helper modules. Stdlib except the monitor, which needs `rich`. |
 | `hooks/session-start` | Injects ~60 words of flow context, only in repos with `docs/forge/` (or legacy `docs/theforge/`, with a rename nudge). Silent everywhere else. |
 
