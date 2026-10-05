@@ -141,6 +141,40 @@ def _truncate(text):
     return text if len(text) <= _FINDING_MAX else text[:_FINDING_MAX] + "…"
 
 
+def _open_unverified(unverified):
+    """The entries of a run.json ``unverified`` list still lacking a human
+    call, in recorded order. Tolerant of a malformed value (a status read
+    never raises): non-dict items and a non-list value read as no entries."""
+    if not isinstance(unverified, list):
+        return []
+    return [e for e in unverified if isinstance(e, dict) and e.get("call") is None]
+
+
+def _unverified_entry_line(entry):
+    return "{} {}: {}".format(
+        entry.get("kind", "?"), entry.get("id", "?"), entry.get("reason", ""))
+
+
+def unverified_halt_lines(state):
+    """The terminal-banner text of a final review halted on open unverified
+    entries (halt class `unverified`): ``["HALTED — final review: N
+    unverified entries", "<kind> <id>: <reason>"]`` — the head line and the
+    first open entry — or None when the run is not halted on that class.
+    Shared, rich-free, by `--status` and the monitor so the two cannot drift."""
+    if state.get("status") != "escalated-final-review":
+        return None
+    if (state.get("halt") or {}).get("halt_reason") != "unverified":
+        return None
+    opened = _open_unverified(state.get("unverified"))
+    if not opened:
+        return None
+    return [
+        "HALTED — final review: {} unverified entr{}".format(
+            len(opened), "y" if len(opened) == 1 else "ies"),
+        _unverified_entry_line(opened[0]),
+    ]
+
+
 def read_run_state(run_dir, now=None):
     """Parse ``run.json`` + latest receipts into a state dict, or None when the
     dir is absent or holds neither. See module docstring for the shape. ``now``
@@ -212,6 +246,15 @@ def read_run_state(run_dir, now=None):
         if raw_status == "escalated-final-review":
             reason = "final review escalated"
             halt_class = (final_review or {}).get("halt_reason")
+            unverified_head = unverified_halt_lines({
+                "status": raw_status, "halt": (run or {}).get("halt"),
+                "unverified": (run or {}).get("unverified"),
+            })
+            if unverified_head:
+                # The class lives on the halt record, not a receipt finding;
+                # the head line already says it, so no `(class)` suffix.
+                reason = unverified_head[0].split(" — ", 1)[1]
+                halt_class = None
         elif raw_status == "escalated-doc-sync":
             # Terminal doc-sync stage halt: the cause is the named doc/contract
             # contradiction on run.json's doc_sync record (no matrix halt class).
@@ -260,6 +303,9 @@ def read_run_state(run_dir, now=None):
         # a freeze. Absent (None) on every run that did not halt on one, and
         # on old run.json shapes.
         "halt": run.get("halt") if run else None,
+        # The final review's accumulated unverified entries, each with its
+        # human call once made (null until then); [] on a run with none.
+        "unverified": (run.get("unverified") if run else None) or [],
         # The run's recorded spec set; a pre-`specs` run.json's single `spec`
         # string reads as a one-element set.
         "specs": read_run_specs(run) if run else [],
@@ -290,6 +336,12 @@ def render_status(state):
         # `--resolve <id>=repair|defer`; already-approved ids are shown as
         # resolved so a second resume does not re-answer them.
         lines.extend(render_halt(halt))
+    if unverified_halt_lines(state):
+        lines.append("")
+        lines.extend(
+            "  {}".format(_unverified_entry_line(e))
+            for e in _open_unverified(state.get("unverified"))
+        )
     if state.get("deferrals"):
         # The terse one-liner is for a run still in progress. Once the run
         # is terminal, the full close-out review surface (untruncated
@@ -336,13 +388,21 @@ def render_halt(halt):
         # gets its own two lines rather than the per-task wording, which
         # would print "halted task None" and offer a command that cannot work.
         freeze = halt.get("freeze_commit")
-        return [
+        lines = [
             "",
             "halted in the {} stage".format(stage),
             "  frozen edits: {}".format(freeze) if freeze
             else "  frozen edits: (nothing to freeze — the stage made no "
                  "change to the tree)",
         ]
+        if halt.get("halt_reason") == "unverified":
+            # The one stage class that poses a question `--resolve` answers:
+            # the ids are the open entries', listed under the header.
+            lines.append(
+                "  resume with: --resolve <id>=accept:<evidence>|defer|repair "
+                "for each open entry (<kind>:<id> when a finding and a "
+                "coverage entry share an id)")
+        return lines
     lines = ["", "halted task {} is resumable".format(halt.get("task"))]
     freeze = halt.get("freeze_commit")
     lines.append(

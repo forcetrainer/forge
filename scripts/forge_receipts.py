@@ -202,11 +202,70 @@ def _read_approved(run_dir):
     return list(approved)
 
 
+UNVERIFIED_KINDS = ("finding", "coverage")
+UNVERIFIED_VERBS = ("accept", "defer", "repair")
+
+
+def _check_unverified(entries, path):
+    """Validate a loaded ``unverified`` value; raises naming ``path`` on any
+    malformed entry (parsers-fail-loud). Each entry is ``{kind, id, reason,
+    call}`` with ``call`` null or ``{verb, evidence}``."""
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            "{}: `unverified` must be a list of entries, got {!r}".format(
+                path, entries))
+    for e in entries:
+        ok = (
+            isinstance(e, dict)
+            and e.get("kind") in UNVERIFIED_KINDS
+            and isinstance(e.get("id"), str) and e["id"]
+            and isinstance(e.get("reason"), str)
+            and "call" in e
+        )
+        call = e.get("call") if isinstance(e, dict) else None
+        if ok and call is not None:
+            ok = (
+                isinstance(call, dict)
+                and call.get("verb") in UNVERIFIED_VERBS
+                and (call.get("evidence") is None
+                     or isinstance(call.get("evidence"), str))
+            )
+        if not ok:
+            raise RuntimeError(
+                "{}: malformed `unverified` entry {!r} — expected {{kind: "
+                "finding|coverage, id, reason, call: null|{{verb: accept|"
+                "defer|repair, evidence}}}}".format(path, e))
+    return entries
+
+
+def _read_unverified(run_dir):
+    """The final review's accumulated ``unverified`` entries from an existing
+    ``run.json`` (read back on resume, like ``deferrals``), or ``[]`` when
+    there is no run.json or no such key. A present-but-malformed value raises
+    naming the file — silently dropping an entry would let a run complete
+    with an unverified finding nobody looked at."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError("{}: malformed JSON ({})".format(path, e))
+    entries = data.get("unverified")
+    if entries is None:
+        return []
+    return list(_check_unverified(entries, path))
+
+
 def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
-                   seeded_findings=None, halt=None, approved=None):
+                   seeded_findings=None, halt=None, approved=None,
+                   unverified=None):
     """Write ``run.json``. ``spec_paths`` is the run's spec set (a list of
     paths, possibly empty), recorded absolute under ``specs``; None records
     nothing, for a caller that could not determine the set. The progress
@@ -243,7 +302,11 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
     run-level set of human-approved canonical finding ids (any iterable of ids,
     e.g. the ``{id: resolution}`` map's keys), written as a sorted list and
     omitted on None. Every write must pass it: each call rebuilds ``run.json``,
-    so a write that omitted it would drop approvals the human already gave."""
+    so a write that omitted it would drop approvals the human already gave.
+    ``unverified`` is the final review's accumulated list of ``{kind, id,
+    reason, call}`` entries (``call`` null until the human answers); omitted
+    on None, read back on resume, and — like ``approved`` — passed by every
+    write, because each call rebuilds ``run.json``."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -268,6 +331,7 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
         ("doc_sync", doc_sync),
         ("seeded_findings", seeded_findings),
         ("halt", halt),
+        ("unverified", unverified),
     ):
         if value is not None:
             data[key] = value
@@ -281,7 +345,7 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
 
 def write_final_review_receipt(run_dir, verdict, halt_reason=None,
                                 coverage_skipped=None, coverage_retry=None,
-                                resume_fallback=None):
+                                resume_fallback=None, unverified=None):
     """Persist the plan-level final-review verdict alongside the task receipts.
     ``halt_reason`` (the convergence loop's disposition-matrix class —
     scope-decision | regression | stuck | backstop | gate) is additive and
@@ -295,7 +359,9 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
     unchanged. ``resume_fallback`` mirrors the per-task receipt's field of
     the same name (Session continuity / Continuity scope and failure specs)
     — True when a final-reviewer or final-review-fixer resume fell back to a
-    cold spawn this attempt; additive and optional, omitted when None."""
+    cold spawn this attempt; additive and optional, omitted when None.
+    ``unverified`` is the loop's accumulated unverified entries (kind, id,
+    reason, call); omitted when None."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "final-review.json")
     data = verdict_to_dict(verdict)
@@ -307,6 +373,8 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
         data["coverage_retry"] = coverage_retry
     if resume_fallback is not None:
         data["resume_fallback"] = resume_fallback
+    if unverified is not None:
+        data["unverified"] = unverified
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return path

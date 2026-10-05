@@ -1063,3 +1063,58 @@ class StagedDeferralDuplicateIdTests(unittest.TestCase):
             state = forge_status.read_run_state(d)
             text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
             self.assertNotIn("--occurrence", text)
+
+
+_UNVERIFIED = [
+    {"kind": "finding", "id": "f1", "reason": "no prod data", "call": None},
+    {"kind": "coverage", "id": "t1", "reason": "needs a snapshot", "call": None},
+    {"kind": "finding", "id": "f0", "reason": "settled", "call":
+        {"verb": "repair", "evidence": None}},
+]
+
+
+def _write_unverified_halt(d):
+    halt = {
+        "stage": "final-review", "freeze_commit": None, "freeze_base": "b" * 40,
+        "halt_reason": "unverified",
+        "outstanding": [{"kind": e["kind"], "id": e["id"], "reason": e["reason"]}
+                        for e in _UNVERIFIED if e["call"] is None],
+    }
+    _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+               halt=halt, unverified=_UNVERIFIED)
+
+
+class UnverifiedHaltStatusTests(unittest.TestCase):
+    def test_render_prints_the_halt_line_and_every_open_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertIn("HALTED — final review: 2 unverified entries", out)
+        self.assertIn("finding f1: no prod data", out)
+        self.assertIn("coverage t1: needs a snapshot", out)
+        self.assertNotIn("f0", out)
+        self.assertNotIn("task None", out)
+
+    def test_status_cli_prints_the_same(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            r = _run_cli(["--status", "--run-dir", d])
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("HALTED — final review: 2 unverified entries", r.stdout)
+        self.assertIn("coverage t1: needs a snapshot", r.stdout)
+
+    def test_banner_lines_are_the_halt_line_plus_first_open_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            state = forge_status.read_run_state(d)
+        self.assertEqual(
+            forge_status.unverified_halt_lines(state),
+            ["HALTED — final review: 2 unverified entries",
+             "finding f1: no prod data"])
+
+    def test_no_banner_lines_for_other_halts(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+                       unverified=_UNVERIFIED)
+            state = forge_status.read_run_state(d)
+        self.assertIsNone(forge_status.unverified_halt_lines(state))

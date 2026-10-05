@@ -958,3 +958,79 @@ class FingerprintErrorFinalTests(ReviewerWroteCase):
     def test_failure_on_exit_of_resumed_final_reviewer(self):
         rc, err = self.main_failing_fingerprint(self._resumed(), 6)
         self._assert_contract_error(rc, err, final_reviews=2)
+
+
+class UnverifiedHaltTests(UnverifiedCase):
+    """A final review that passes with an unverified entry lacking a human
+    call is a stage halt of class `unverified` (Disposition matrix)."""
+
+    def _fix_msg(self):
+        return json.dumps({"verdict": "findings", "findings": [{
+            "id": "fx", "summary": "needs a fix",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "t1", "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }, self.seed_finding("f1", "cannot run the migration here")]})
+
+    def test_coverage_entry_without_findings_halts_unverified(self):
+        responses = self.first_call(self.coverage_msg("needs a prod snapshot"))
+        responses.append(self.DOC_SYNC_CLEAN)
+        real = forge_run._freeze_stage_halt
+        with mock.patch.object(forge_run, "_freeze_stage_halt", wraps=real) as spy:
+            rc, _, err = self.run_main(responses)
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_args.args[2:4], ("final-review", "unverified"))
+        run = self.run_json()
+        self.assertEqual(run["status"], "escalated-final-review")
+        halt = run["halt"]
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "unverified")
+        self.assertEqual(halt["outstanding"], [
+            {"kind": "coverage", "id": "t1", "reason": "needs a prod snapshot"}])
+        self.assertEqual(run["unverified"], [{
+            "kind": "coverage", "id": "t1", "reason": "needs a prod snapshot",
+            "call": None}])
+        self.assertEqual(self.dispatches("doc-sync-last"), [])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_seed_omitted_by_verification_verdict_stays_open(self):
+        rc, _, err = self.run_main([
+            self.WORKER, self.TASK_PASS, self.final(self._fix_msg()),
+            {"exit": 0, "msg": ""},                      # final-review fixer
+            self.final('{"verdict": "pass"}'),           # verification omits f1
+            self.DOC_SYNC_CLEAN,
+        ])
+        self.assertEqual(rc, 2, err)
+        run = self.run_json()
+        self.assertEqual(run["halt"]["halt_reason"], "unverified")
+        self.assertEqual([e["id"] for e in run["unverified"]], ["f1"])
+        self.assertIsNone(run["unverified"][0]["call"])
+        self.assertEqual(self.dispatches("doc-sync-last"), [])
+
+    def test_second_invocation_accumulates_and_keeps_first_call(self):
+        rc, _, err = self.run_main(
+            self.first_call(self.seed_msg(("f1", "no prod data"))))
+        self.assertEqual(rc, 2, err)
+        rc, _, err = self.run_main(
+            [self.final(self.seed_msg(("f2", "cannot time the race")))],
+            ["--resolve", "f1=repair"])
+        self.assertEqual(rc, 2, err)
+        run = self.run_json()
+        self.assertEqual([e["id"] for e in run["unverified"]], ["f1", "f2"])
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "repair", "evidence": None})
+        self.assertIsNone(self.entry("f2")["call"])
+        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["f2"])
+
+    def test_final_review_receipt_lists_every_unverified_entry(self):
+        self.run_main(self.first_call(self.seed_msg(
+            ("f1", "no prod data"), ("f2", "race untimed"))))
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["unverified"], [
+            {"kind": "finding", "id": "f1", "reason": "no prod data",
+             "call": None},
+            {"kind": "finding", "id": "f2", "reason": "race untimed",
+             "call": None}])

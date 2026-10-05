@@ -251,6 +251,9 @@ class TaskOutcome:
     halt_reason: str | None = None
     deferrals: list = field(default_factory=list)
     repair_task: dict | None = None
+    # The final review's accumulated unverified entries (kind/id/reason/call),
+    # merged with the set read back from run.json. Empty on a per-task outcome.
+    unverified: list = field(default_factory=list)
 
 
 def finding_to_dict(finding):

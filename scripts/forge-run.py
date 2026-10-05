@@ -149,6 +149,7 @@ from forge_receipts import (  # noqa: F401
     write_receipt,
     write_run_json,
     _read_approved,
+    _read_unverified,
     write_watch_launcher,
 )
 
@@ -1645,11 +1646,68 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None):
     }
 
 
+def _collect_unverified(verdict):
+    """The unverified entries one final-review verdict contributes: every
+    ``seed``-disposition finding (``kind: "finding"``, canonical id, the
+    reviewer's summary as the reason) and every coverage entry whose status is
+    ``unverifiable`` (``kind: "coverage"``, the checklist id, the evidence as
+    the reason — that status needs no backing finding, so without this entry
+    the obligation would vanish on a ``pass``). Each carries ``call: None``
+    until the human answers it. Call after ``classify_findings``."""
+    entries = []
+    for f in verdict.findings:
+        if f.disposition == "seed":
+            entries.append({
+                "kind": "finding", "id": _canon(f), "reason": f.summary,
+                "call": None,
+            })
+    for c in verdict.coverage:
+        if c.status == "unverifiable":
+            entries.append({
+                "kind": "coverage", "id": c.id, "reason": c.evidence,
+                "call": None,
+            })
+    return entries
+
+
+def _merge_unverified(existing, new):
+    """``existing`` plus the entries of ``new`` whose ``(kind, id)`` it lacks,
+    in order. Accumulation is by kind and id — a reviewer's finding id may
+    equal a checklist coverage id, and neither entry may displace the other —
+    and an existing entry always wins, so a call the human already recorded
+    survives a later attempt or invocation that re-reports the same entry;
+    nothing is ever dropped."""
+    merged = [dict(e) for e in existing]
+    known = {(e["kind"], e["id"]) for e in merged}
+    for e in new:
+        key = (e["kind"], e["id"])
+        if key not in known:
+            merged.append(dict(e))
+            known.add(key)
+    return merged
+
+
+def _describe_halt(halt_record):
+    """Words naming a halt record's actual stage or task and class, for an
+    error that must say what the run is halted on."""
+    if halt_record is None:
+        return "absent (no halt record)"
+    reason = halt_record.get("halt_reason") or "no class"
+    if halt_record.get("stage"):
+        return "the {} stage halt ({})".format(halt_record["stage"], reason)
+    return "task {}'s halt ({})".format(halt_record.get("task"), reason)
+
+
+def _open_unverified(unverified):
+    """The entries still lacking a human call."""
+    return [e for e in unverified if e.get("call") is None]
+
+
 def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
                           plan_path=None, seeded_findings=None,
                           named_sections=None, halt_out=None,
-                          approved_ids=frozenset()):
+                          approved_ids=frozenset(), unverified=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1702,9 +1760,19 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     ``escalated`` outcome with ``halt_reason`` ``reviewer-wrote`` (Reviewer
     write discipline) — no further dispatch, no commit; ``halt_out`` (a dict,
     or None) receives ``reviewer_wrote`` (``_reviewer_wrote_record``) so the
-    caller can freeze the pre-review capture under the stage ref."""
+    caller can freeze the pre-review capture under the stage ref.
+
+    ``unverified`` (the entries read back from run.json) seeds the loop's
+    accumulator of terminal unverified entries (The disposition matrix): every
+    attempt adds its seed-disposition findings and ``unverifiable`` coverage
+    entries by id, an entry already present — with whatever human call it
+    carries — is never replaced, and a verification lap that omits one never
+    clears it. The merged list rides the final-review receipt and every
+    returned outcome's ``unverified``; deciding whether any entry still needs
+    a call is the caller's, after the loop."""
     if threads is None:
         threads = {}
+    unverified = [dict(e) for e in unverified or []]
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
     # Discovery-only seed: pre-populate with every seed found across the run so
@@ -1892,6 +1960,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     summary="reviewer-wrote: {}".format("; ".join(record["changes"])),
                     findings=list(record["changes"]),
                     halt_reason="reviewer-wrote",
+                    unverified=unverified,
                 )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run
@@ -1900,6 +1969,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             # call sites in the runner are wired identically.
             classify_findings(verdict, diff, run_diff=diff, carried_ids=state.carried_ids)
             findings = verdict.findings
+            unverified = _merge_unverified(unverified, _collect_unverified(verdict))
 
         # The final review has no acceptance command that can regress, so the
         # acceptance signal is always green: a fix-dispatch crash is an implicit
@@ -1935,13 +2005,15 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             run_dir, verdict, halt_reason=halt_reason if action == "halt" else None,
             coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
             resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
+            unverified=unverified or None,
         )
 
         if action == "pass":
             if applied_fix:
                 _git_commit_final_review_fixes(cwd)
             return TaskOutcome(
-                status="passed", attempts=attempt, summary="", deferrals=deferrals
+                status="passed", attempts=attempt, summary="", deferrals=deferrals,
+                unverified=unverified,
             )
         if action == "halt":
             return TaskOutcome(
@@ -1953,6 +2025,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 halt_reason=halt_reason,
                 deferrals=deferrals,
                 repair_task=repair_task,
+                unverified=unverified,
             )
         # rework: fix_findings (set above) drives the next attempt's fix dispatch.
 
@@ -2354,6 +2427,11 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # resumable run rather than a run whose freeze nothing points at.
     halt_state = halt_record
     resolve = dict(resolve or {})
+    # The final review's accumulated unverified entries are read back like
+    # `seeded_findings` and `deferrals`: a call a human recorded on an earlier
+    # invocation survives every merge below.
+    unverified = _read_unverified(run_dir)
+    unverified_deferrals = []
     approved = dict((halt_record or {}).get("approved") or {})
     # Only the halt record's own approvals count as already-answered for
     # `--resolve` validation: a run-level-only id has no outstanding question
@@ -2365,6 +2443,75 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # at run level has no resolution to restate; it stays an exemption.
     for approved_id in _read_approved(run_dir):
         approved.setdefault(approved_id, "approved")
+    unverified_halt = (
+        halt_record is not None
+        and halt_record.get("stage") == "final-review"
+        and halt_record.get("halt_reason") == "unverified"
+    )
+    if resolve and unverified_halt:
+        # An `unverified` stage halt asks one question per open entry; the id
+        # is the entry's, never a finding's scope exemption, so nothing here
+        # reaches `approved`. Validated whole before any call is written.
+        open_keys = [
+            (o.get("kind"), o.get("id"))
+            for o in halt_record.get("outstanding") or []
+        ]
+        listing = ", ".join(
+            "{}:{}".format(k, i) for k, i in sorted(open_keys)) or "(none)"
+        by_key = {(e["kind"], e["id"]): e for e in unverified}
+        targets = {}
+        for name, resolution in resolve.items():
+            # `ID` addresses the one open entry with that id; `KIND:ID`
+            # (kind = finding | coverage) addresses it when two share one.
+            kind, sep, bare = name.partition(":")
+            if sep and kind in ("finding", "coverage"):
+                matches = [k for k in open_keys if k == (kind, bare)]
+            else:
+                matches = [k for k in open_keys if k[1] == name]
+            if not matches:
+                raise RuntimeError(
+                    "--resolve names {} that the unverified halt record in "
+                    "{} does not list — open entries: {}".format(
+                        name, run_dir, listing))
+            if len(matches) > 1:
+                raise RuntimeError(
+                    "--resolve {} is ambiguous: {} are both open entries — "
+                    "name one as finding:{} or coverage:{}".format(
+                        name, " and ".join("{}:{}".format(*m) for m in matches),
+                        name, name))
+            key = matches[0]
+            if key in targets:
+                raise RuntimeError(
+                    "--resolve names the entry {}:{} twice".format(*key))
+            if key not in by_key:
+                raise RuntimeError(
+                    "--resolve names {}:{}, which the halt record lists but "
+                    "run.json in {} carries no unverified entry for".format(
+                        key[0], key[1], run_dir))
+            targets[key] = resolution
+        for key, resolution in targets.items():
+            entry = by_key[key]
+            verb, _, evidence = resolution.partition(":")
+            entry["call"] = {
+                "verb": verb, "evidence": evidence if verb == "accept" else None,
+            }
+            if verb == "defer":
+                unverified_deferrals.append({
+                    "id": entry["id"],
+                    "summary": "unverified {} {}: {}".format(
+                        entry["kind"], entry["id"], entry["reason"]),
+                })
+        resolve = {}
+    accepted = sorted(i for i, r in resolve.items() if r.startswith("accept:"))
+    if accepted:
+        # `accept` answers an unverified entry and nothing else; against any
+        # other halt — a scope-decision id above all — it is a contract error.
+        raise RuntimeError(
+            "--resolve {}: `accept:<evidence>` answers an unverified "
+            "final-review entry only, and this run's halt is {} — use "
+            "`ID=repair` or `ID=defer` for a scope-decision finding".format(
+                ", ".join("{}=accept:".format(i) for i in accepted),
+                _describe_halt(halt_record)))
     if resolve:
         # Canonical ids (carried_from else id) — the same identity
         # convergence_decision matches on, so a finding re-issued under a new
@@ -2460,6 +2607,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             ) if approved.get(canon) == "defer"],
             task_number=halt_record.get("task"), carried=carried_deferrals,
         )
+    # A `defer` call on an unverified entry stages like any other deferral,
+    # stamped with the stage that raised it.
+    stage_deferrals(deferrals, unverified_deferrals, stage="final-review",
+                    carried=carried_deferrals)
     doc_sync_record = None
     # Per-role codex exec session-id map (Codex mechanics spec) — cleared here at
     # invocation start (never read back from a prior run.json), populated in
@@ -2480,7 +2631,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries, run_base,
                    started_at=run_started, pid=run_pid, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
-                   deferrals=deferrals or None, approved=approved_ids or None)
+                   deferrals=deferrals or None, approved=approved_ids or None,
+                   unverified=unverified or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -2514,7 +2666,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
-                       deferrals=deferrals or None, approved=approved_ids or None)
+                       deferrals=deferrals or None, approved=approved_ids or None,
+                       unverified=unverified or None)
         # Resume a frozen scope-decision halt on the task it names: replay the
         # paused attempt onto the fixed tree, then hand execute_task the
         # reconciliation context. `restore_freeze`'s own return value decides
@@ -2603,6 +2756,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 started_at=run_started, pid=run_pid, threads=threads,
                 seeded_findings=seeded_findings or None, halt=halt_state,
                 deferrals=deferrals or None, approved=approved_ids or None,
+                unverified=unverified or None,
             )
         else:
             reviewer_wrote = halt_out.get("reviewer_wrote")
@@ -2689,7 +2843,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
-                       deferrals=deferrals or None, approved=approved_ids or None)
+                       deferrals=deferrals or None, approved=approved_ids or None,
+                       unverified=unverified or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -2709,7 +2864,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
                 seeded_findings=seeded_findings, named_sections=named_sections,
                 halt_out=final_halt_out, approved_ids=approved_ids,
+                unverified=unverified,
             )
+            unverified = final_outcome.unverified
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
             if final_outcome.status == "escalated":
@@ -2722,6 +2879,20 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                     cwd, run_dir, "final-review", final_outcome.halt_reason,
                     reviewer_wrote=final_halt_out.get("reviewer_wrote"),
                 )
+            elif _open_unverified(unverified):
+                # The review passed but an unverified entry has no human call
+                # (The disposition matrix): a stage halt of class
+                # `unverified`, frozen like any stage halt (nothing is left
+                # to freeze after a pass; the helper runs all the same), with
+                # doc-sync not run. The open entries are the payload: the
+                # presentation, and what `--resolve` ids are checked against.
+                overall = "escalated-final-review"
+                halt_state = _freeze_stage_halt(
+                    cwd, run_dir, "final-review", "unverified")
+                halt_state["outstanding"] = [
+                    {"kind": e["kind"], "id": e["id"], "reason": e["reason"]}
+                    for e in _open_unverified(unverified)
+                ]
             else:
                 # Terminal doc-sync: reconcile existing docs to the shipped diff,
                 # only now that every code gate is green (never masks a code
@@ -2760,7 +2931,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
                    doc_sync=doc_sync_record, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
-                   approved=approved_ids or None)
+                   approved=approved_ids or None,
+                   unverified=unverified or None)
     return 0 if overall == "passed" else 2
 
 
@@ -2775,23 +2947,29 @@ def resume(plan_path, spec_path, run_dir):
 
 
 RESOLUTIONS = ("repair", "defer")
+ACCEPT_PREFIX = "accept:"
 
 
 def parse_resolutions(entries):
-    """``--resolve ID=repair|defer`` entries -> ``{finding_id: resolution}``.
+    """``--resolve ID=repair|defer|accept:<evidence>`` entries ->
+    ``{id: resolution}`` with the resolution kept as written (``"repair"``,
+    ``"defer"`` or ``"accept:<evidence>"``, evidence stripped).
 
-    ``repair`` is "I fixed it", ``defer`` is "file it for later"; both are a
-    human's answer to a ``scope-decision`` halt (Halt resolution). Raises
-    RuntimeError naming the cause on a malformed entry, an unknown
-    resolution, or one id given two different resolutions — never guesses at
-    what was meant (parsers-fail-loud), because a misread resolution either
-    re-halts a run the human thought they had answered or waves through a
-    scope decision they never made."""
+    ``repair`` is "I fixed it", ``defer`` is "file it for later"; both answer
+    a ``scope-decision`` halt or an ``unverified`` entry (Halt resolution).
+    ``accept:<evidence>`` answers an unverified entry only and requires
+    non-empty evidence. Raises RuntimeError naming the entry on a malformed
+    one, an unknown resolution, ``accept`` without evidence, ``repair`` or
+    ``defer`` carrying evidence text, or one id given two different
+    resolutions — never guesses at what was meant (parsers-fail-loud), because
+    a misread resolution either re-halts a run the human thought they had
+    answered or waves through a decision they never made."""
     out = {}
     for entry in entries or []:
         if "=" not in entry:
             raise RuntimeError(
-                "--resolve expects ID=repair|defer, got {!r}".format(entry)
+                "--resolve expects ID=repair|defer|accept:EVIDENCE, "
+                "got {!r}".format(entry)
             )
         finding_id, _, resolution = entry.partition("=")
         finding_id = finding_id.strip()
@@ -2800,10 +2978,27 @@ def parse_resolutions(entries):
             raise RuntimeError(
                 "--resolve entry {!r} names no finding id".format(entry)
             )
-        if resolution not in RESOLUTIONS:
+        verb, colon, evidence = resolution.partition(":")
+        if verb == "accept":
+            if not colon or not evidence.strip():
+                raise RuntimeError(
+                    "--resolve {!r}: accept requires non-empty evidence — "
+                    "write {}=accept:<what you checked>".format(
+                        entry, finding_id)
+                )
+            resolution = ACCEPT_PREFIX + evidence.strip()
+        elif verb in RESOLUTIONS:
+            if colon:
+                raise RuntimeError(
+                    "--resolve {!r}: {} takes no evidence text — only "
+                    "accept:<evidence> does".format(entry, verb)
+                )
+        else:
             raise RuntimeError(
                 "--resolve {}: resolution must be one of {}, got {!r}".format(
-                    finding_id, ", ".join(RESOLUTIONS), resolution
+                    finding_id,
+                    ", ".join(RESOLUTIONS + ("accept:<evidence>",)),
+                    resolution,
                 )
             )
         if finding_id in out and out[finding_id] != resolution:
@@ -2868,11 +3063,13 @@ def main(argv=None):
         "--resolve",
         action="append",
         default=[],
-        metavar="ID=repair|defer",
-        help="carry a human resolution for a halted finding into this resumed "
-        "invocation (repeatable): `repair` = I already fixed it, `defer` = "
-        "file it for later. Exempts that finding from the scope-decision halt "
-        "for the rest of the run; the runner applies no fix of its own",
+        metavar="ID=repair|defer|accept:EVIDENCE",
+        help="carry a human resolution into this resumed invocation "
+        "(repeatable): `repair` = I already fixed it, `defer` = file it for "
+        "later. On a scope-decision halt it exempts that finding for the rest "
+        "of the run; on an unverified final-review halt the id is an open "
+        "entry's and `accept:EVIDENCE` records your own evidence (required, "
+        "non-empty). The runner applies no fix of its own",
     )
     parser.add_argument(
         "--autofix",
@@ -2949,6 +3146,13 @@ def main(argv=None):
                 # A first invocation has no recorded set, so it records the
                 # plan's own; if that cannot be determined it records none,
                 # which a later invocation's check treats as no prior run.
+                # Same for the final review's unverified entries and their
+                # calls: this rebuild would otherwise erase what the human
+                # already answered.
+                try:
+                    prior_unverified = _read_unverified(run_dir)
+                except RuntimeError:
+                    prior_unverified = []
                 specs = _read_specs(run_dir)
                 if specs is None:
                     try:
@@ -2965,6 +3169,7 @@ def main(argv=None):
                     contract_error=str(e),
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
                     halt=prior_halt, approved=prior_approved or None,
+                    unverified=prior_unverified or None,
                 )
             except OSError:
                 pass

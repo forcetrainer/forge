@@ -698,6 +698,75 @@ class ReviewerWroteCase(unittest.TestCase):
         return {"op": "write", "path": self.stray, "text": text}
 
 
+class UnverifiedCase(ReviewerWroteCase):
+    """Harness for the final review's unverified close-out halt. The plan is
+    ``PLAN_STD_TRACKED`` (its worker's acceptance appends NEEDFIX to f1.txt),
+    so a passed task one leaves line 2 of f1.txt in the whole-plan diff, and
+    the final checklist is the single integration item ``t1``. ``first_call``
+    is the call sequence of a first invocation up to the final reviewer."""
+
+    WORKER = {"exit": 0, "msg": ""}
+    TASK_PASS = {"exit": 0, "msg": '{"verdict": "pass"}'}
+    DOC_SYNC_CLEAN = {"exit": 0, "msg": '{"doc_sync": "clean"}'}
+
+    @staticmethod
+    def seed_finding(fid, reason):
+        return {
+            "id": fid, "summary": reason,
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "unverifiable",
+            "contract_ref": None, "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }
+
+    def seed_msg(self, *pairs):
+        return json.dumps({
+            "verdict": "findings",
+            "findings": [self.seed_finding(i, r) for i, r in pairs],
+        })
+
+    @staticmethod
+    def coverage_msg(reason, cid="t1"):
+        return json.dumps({
+            "verdict": "pass",
+            "coverage": [{"id": cid, "status": "unverifiable",
+                          "evidence": reason}],
+        })
+
+    def final(self, msg):
+        return {"exit": 0, "msg": msg}
+
+    def first_call(self, final_msg):
+        return [self.WORKER, self.TASK_PASS, self.final(final_msg)]
+
+    def unverified(self):
+        return self.run_json().get("unverified")
+
+    def entry(self, eid):
+        return next(e for e in self.unverified() if e["id"] == eid)
+
+    def run_main(self, responses, extra_args=()):
+        """``forge_run.main`` in-process (so a helper can be spied on);
+        returns (rc, stdout, stderr)."""
+        from unittest import mock
+        env = {
+            "FORGE_FAKE_LOG": self.log,
+            "FORGE_FAKE_PROMPT_LOG": self.log + ".prompts",
+            "FORGE_FAKE_RESPONSES": self.write_responses(responses),
+        }
+        old_cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, old_cwd)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = forge_run.main([
+                self.plan, "--spec", self.spec, "--run-dir", self.run_dir,
+                "--codex-bin", self.fake, *extra_args,
+            ])
+        return rc, out.getvalue(), err.getvalue()
+
+
 def _log_prompts(log_path):
     """Prompts received by the fake codex, one per dispatch, in call order.
     Set FORGE_FAKE_PROMPT_LOG to that path first. The prompt no longer rides in
@@ -759,4 +828,5 @@ __all__ = [
     "thread_stream",
     "INVALID_LOCATION_MSG",
     "ReviewerWroteCase",
+    "UnverifiedCase",
 ]

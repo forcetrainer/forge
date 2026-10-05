@@ -15,9 +15,12 @@ import sys
 import tempfile
 import unittest
 
-import pytest
-
-pytest.importorskip("rich")  # the monitor's one dependency; its UI can't be tested without it
+try:
+    import rich  # noqa: F401 — the monitor's one dependency
+except ImportError:
+    # unittest and pytest both turn a module-level SkipTest into a clean skip;
+    # `pytest.importorskip` is a collection ERROR under `unittest discover`.
+    raise unittest.SkipTest("rich is not installed; the monitor's UI can't be tested without it")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MON_PATH = REPO_ROOT / "scripts" / "forge-monitor.py"
@@ -180,6 +183,27 @@ class RenderTests(unittest.TestCase):
             self.assertIn("STALLED?", out)
             self.assertNotIn("RUN COMPLETE", out)
             self.assertNotIn("HALTED", out)
+
+    def test_unverified_halt_banner_names_count_and_first_open_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _base_tasks()
+            tasks[1]["status"] = "passed"
+            tasks[2]["status"] = "passed"
+            entries = [
+                {"kind": "finding", "id": "f1", "reason": "no prod data", "call": None},
+                {"kind": "coverage", "id": "t1", "reason": "needs a snapshot", "call": None},
+            ]
+            _write_run(d, status="escalated-final-review", current_task=None,
+                       current_phase=None, tasks=tasks, unverified=entries,
+                       halt={"stage": "final-review", "freeze_commit": None,
+                             "halt_reason": "unverified",
+                             "outstanding": [{k: e[k] for k in ("kind", "id", "reason")}
+                                             for e in entries]})
+            out = _render(forge_status.read_run_state(d))
+            self.assertIn("HALTED — final review: 2 unverified entries", out)
+            self.assertIn("f1", out)
+            self.assertIn("no prod data", out)
+            self.assertNotIn("task 2", out)
 
     def test_partial_run_json_does_not_crash(self):
         with tempfile.TemporaryDirectory() as d:

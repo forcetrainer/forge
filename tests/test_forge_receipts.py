@@ -287,3 +287,56 @@ class AcceptanceResultReceiptTests(unittest.TestCase):
         self.assertEqual(entry["exit_code"], 0)
         self.assertEqual(entry["output_tail"], "hi\n")
         self.assertIs(entry["passed"], True)
+
+
+class UnverifiedRunStateTests(unittest.TestCase):
+    ENTRIES = [
+        {"kind": "finding", "id": "f1", "reason": "r1", "call": None},
+        {"kind": "coverage", "id": "t1", "reason": "r2",
+         "call": {"verb": "accept", "evidence": "ran it"}},
+    ]
+
+    def _dir(self):
+        d = tempfile.mkdtemp(prefix="forge-unverified-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_unverified_is_written_and_read_back(self):
+        d = self._dir()
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "running", [], "base",
+            unverified=self.ENTRIES)
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertEqual(json.load(f)["unverified"], self.ENTRIES)
+        self.assertEqual(forge_receipts._read_unverified(d), self.ENTRIES)
+
+    def test_unverified_none_is_omitted_and_reads_empty(self):
+        d = self._dir()
+        forge_run.write_run_json(d, "/p/plan.md", "/p/spec.md", "running", [], "base")
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertNotIn("unverified", json.load(f))
+        self.assertEqual(forge_receipts._read_unverified(d), [])
+        self.assertEqual(forge_receipts._read_unverified(self._dir() + "/none"), [])
+
+    def test_read_unverified_raises_naming_file_on_a_malformed_value(self):
+        for bad in ({"f1": 1}, [1], [{"kind": "other", "id": "f1",
+                                      "reason": "r", "call": None}],
+                    [{"kind": "finding", "id": "", "reason": "r", "call": None}],
+                    [{"kind": "finding", "id": "f1", "reason": "r",
+                      "call": {"verb": "nope", "evidence": None}}]):
+            d = self._dir()
+            path = os.path.join(d, "run.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"unverified": bad}, f)
+            with self.assertRaises(RuntimeError, msg=bad) as cm:
+                forge_receipts._read_unverified(d)
+            self.assertIn(path, str(cm.exception))
+
+    def test_final_review_receipt_records_unverified_when_given(self):
+        d = self._dir()
+        verdict = forge_common.Verdict(kind="pass", findings=[])
+        with open(forge_run.write_final_review_receipt(
+                d, verdict, unverified=self.ENTRIES)) as f:
+            self.assertEqual(json.load(f)["unverified"], self.ENTRIES)
+        with open(forge_run.write_final_review_receipt(d, verdict)) as f:
+            self.assertNotIn("unverified", json.load(f))

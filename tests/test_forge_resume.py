@@ -920,3 +920,217 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         self.assertIn("h1", res.stderr)
         self.assertIn("no halt record", res.stderr)
         self.assertEqual(self._run_json()["approved"], ["h1"])
+
+
+class UnverifiedResolveTests(UnverifiedCase):
+    """`--resolve` on an `unverified` stage halt: the id is an unverified
+    entry's, `accept:<evidence>` | `defer` | `repair` is the human's call, and
+    the resumed run re-runs the final review (Resume; Halt resolution)."""
+
+    EVIDENCE = "ran the migration by hand against prod snapshot"
+
+    def _halt(self, *pairs):
+        rc, _, err = self.run_main(self.first_call(self.seed_msg(*pairs)))
+        self.assertEqual(rc, 2, err)
+
+    def _resume(self, args, *pairs):
+        """Resume with the final reviewer re-raising ``pairs`` as seeds."""
+        return self.run_main(
+            [self.final(self.seed_msg(*pairs)), self.DOC_SYNC_CLEAN], args)
+
+    def test_accept_records_evidence_reruns_final_review_and_completes(self):
+        self._halt(("f1", "no prod data"))
+        rc, _, err = self._resume(
+            ["--resolve", "f1=accept:" + self.EVIDENCE], ("f1", "no prod data"))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.dispatches("final-review-last")), 1)
+        self.assertEqual(len(self.dispatches("doc-sync-last")), 1)
+        self.assertEqual(self.run_json()["status"], "passed")
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "accept", "evidence": self.EVIDENCE})
+        self.assertIsNone(self.run_json().get("halt"))
+
+    def test_defer_stages_a_deferral_naming_the_entry_and_completes(self):
+        self._halt(("f1", "no prod data"))
+        rc, _, err = self._resume(["--resolve", "f1=defer"], ("f1", "no prod data"))
+        self.assertEqual(rc, 0, err)
+        deferrals = self.run_json()["deferrals"]
+        self.assertEqual([d["id"] for d in deferrals], ["f1"])
+        self.assertIn("f1", deferrals[0]["summary"])
+        self.assertEqual(deferrals[0]["stage"], "final-review")
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "defer", "evidence": None})
+
+    def test_repair_reruns_final_review_and_completes(self):
+        self._halt(("f1", "no prod data"))
+        rc, _, err = self._resume(["--resolve", "f1=repair"], ("f1", "no prod data"))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.dispatches("final-review-last")), 1)
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "repair", "evidence": None})
+
+    def test_resolving_one_of_two_halts_again_naming_only_the_other(self):
+        self._halt(("f1", "a"), ("f2", "b"))
+        rc, _, err = self._resume(
+            ["--resolve", "f1=repair"], ("f1", "a"), ("f2", "b"))
+        self.assertEqual(rc, 2, err)
+        halt = self.run_json()["halt"]
+        self.assertEqual([o["id"] for o in halt["outstanding"]], ["f2"])
+        self.assertEqual(len(self.dispatches("doc-sync-last")), 0)
+
+    def test_malformed_forms_are_contract_errors_naming_the_form(self):
+        self._halt(("f1", "no prod data"))
+        for entry in ("f1=accept", "f1=accept:", "f1=accept:   ",
+                      "f1=repair:text", "f1=defer:text"):
+            with self.subTest(entry=entry):
+                rc, _, err = self.run_main([], ["--resolve", entry])
+                self.assertEqual(rc, 1, err)
+                self.assertIn(entry.strip(), err)
+                self.assertEqual(self.run_json()["halt"]["halt_reason"],
+                                 "unverified")
+        self.assertIsNone(self.entry("f1")["call"])
+
+    def test_accept_on_a_scope_decision_id_is_a_contract_error(self):
+        halt_msg = _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            repair_task={
+                "title": "Fix the legacy guard", "files": ["f1.txt"],
+                "spec": "Halt resolution", "tests": ["the guard holds"],
+                "acceptance": "`true`", "tier": "standard",
+            })
+        rc, _, err = self.run_main([self.WORKER, {"exit": 0, "msg": halt_msg}])
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(self.run_json()["halt"]["halt_reason"], "scope-decision")
+        rc, _, err = self.run_main([], ["--resolve", "h1=accept:I checked it"])
+        self.assertEqual(rc, 1)
+        self.assertIn("h1=accept:", err)
+        self.assertIn("scope-decision", err)
+        self.assertEqual(self.run_json()["halt"]["halt_reason"], "scope-decision")
+
+    def test_unknown_id_is_a_contract_error_and_changes_nothing(self):
+        self._halt(("f1", "a"), ("f2", "b"))
+        before = self.run_json()
+        rc, _, err = self.run_main([], ["--resolve", "f9=repair"])
+        self.assertEqual(rc, 1)
+        self.assertIn("f9", err)
+        after = self.run_json()
+        self.assertEqual(after["unverified"], before["unverified"])
+        self.assertEqual(after["halt"], before["halt"])
+
+
+class UnverifiedSurvivalTests(UnverifiedCase):
+    """The unverified list rides every run.json write of a resumed run, so a
+    call recorded before the final review re-runs survives a kill."""
+
+    ENTRY = {"kind": "finding", "id": "x1", "reason": "r",
+             "call": {"verb": "repair", "evidence": None}}
+
+    def _kill_final(self):
+        from unittest import mock
+        return mock.patch.object(
+            forge_run, "run_final_review_loop",
+            side_effect=RuntimeError("simulated kill"))
+
+    def test_call_recorded_before_the_rerun_survives_a_kill_mid_rerun(self):
+        rc, _, err = self.run_main(self.first_call(self.seed_msg(("f1", "r"))))
+        self.assertEqual(rc, 2, err)
+        with self._kill_final():
+            rc, _, _ = self.run_main([], ["--resolve", "f1=repair"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "repair", "evidence": None})
+
+    def test_every_write_of_a_resumed_run_carries_the_unverified_list(self):
+        # A scope-decision task halt resumes through every write site: the
+        # initial write, the task-running write, the task-passed write and the
+        # pre-final-review flush.
+        from unittest import mock
+        halt_msg = _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            repair_task={
+                "title": "Fix", "files": ["f1.txt"], "spec": "Halt resolution",
+                "tests": ["t"], "acceptance": "`true`", "tier": "standard"})
+        rc, _, err = self.run_main([self.WORKER, {"exit": 0, "msg": halt_msg}])
+        self.assertEqual(rc, 2, err)
+        path = os.path.join(self.run_dir, "run.json")
+        run = self.run_json()
+        run["unverified"] = [self.ENTRY]
+        with open(path, "w") as f:
+            json.dump(run, f)
+        real = forge_run.write_run_json
+        seen = []
+
+        def spy(*args, **kwargs):
+            seen.append((args[3], kwargs.get("unverified")))
+            return real(*args, **kwargs)
+
+        with self._kill_final(), \
+                mock.patch.object(forge_run, "write_run_json", side_effect=spy):
+            self.run_main([self.WORKER, {"exit": 0, "msg": halt_msg}],
+                          ["--resolve", "h1=repair"])
+        # initial, task running, task passed, pre-final flush, contract error
+        self.assertGreaterEqual(len(seen), 5, seen)
+        for status, unverified in seen:
+            self.assertEqual(unverified, [self.ENTRY], (status, seen))
+
+    def test_accept_against_a_doc_sync_halt_names_the_stage(self):
+        rc, _, err = self.run_main(self.first_call('{"verdict": "pass"}')
+                                   + [self.DOC_SYNC_CLEAN])
+        self.assertEqual(rc, 0, err)
+        run = self.run_json()
+        run["status"] = "escalated-doc-sync"
+        run["halt"] = {"stage": "doc-sync", "freeze_commit": None,
+                       "freeze_base": "b" * 40, "halt_reason": None}
+        with open(os.path.join(self.run_dir, "run.json"), "w") as f:
+            json.dump(run, f)
+        rc, _, err = self.run_main([], ["--resolve", "f1=accept:checked"])
+        self.assertEqual(rc, 1)
+        self.assertIn("doc-sync", err)
+        self.assertNotIn("None", err)
+
+
+class UnverifiedIdCollisionTests(UnverifiedCase):
+    """A reviewer-chosen finding id may equal a checklist coverage id; both
+    entries are kept and `--resolve` never guesses between them."""
+
+    def _collision_msg(self):
+        return json.dumps({
+            "verdict": "findings",
+            "findings": [self.seed_finding("t1", "finding reason")],
+            "coverage": [{"id": "t1", "status": "unverifiable",
+                          "evidence": "coverage reason"}],
+        })
+
+    def _halt(self):
+        rc, _, err = self.run_main(self.first_call(self._collision_msg()))
+        self.assertEqual(rc, 2, err)
+
+    def test_both_entries_are_kept(self):
+        self._halt()
+        got = [(e["kind"], e["id"]) for e in self.unverified()]
+        self.assertEqual(got, [("finding", "t1"), ("coverage", "t1")])
+        self.assertEqual(len(self.run_json()["halt"]["outstanding"]), 2)
+
+    def test_bare_id_is_ambiguous_and_raises_naming_it(self):
+        self._halt()
+        before = self.run_json()
+        rc, _, err = self.run_main([], ["--resolve", "t1=repair"])
+        self.assertEqual(rc, 1)
+        self.assertIn("ambiguous", err)
+        self.assertIn("finding:t1", err)
+        self.assertIn("coverage:t1", err)
+        self.assertEqual(self.run_json()["unverified"], before["unverified"])
+
+    def test_kind_qualified_id_addresses_one_entry(self):
+        self._halt()
+        rc, _, err = self.run_main(
+            [self.final(self._collision_msg())],
+            ["--resolve", "finding:t1=repair"])
+        self.assertEqual(rc, 2, err)
+        calls = {(e["kind"], e["id"]): e["call"] for e in self.unverified()}
+        self.assertEqual(calls[("finding", "t1")],
+                         {"verb": "repair", "evidence": None})
+        self.assertIsNone(calls[("coverage", "t1")])
+        self.assertEqual(
+            [(o["kind"], o["id"]) for o in self.run_json()["halt"]["outstanding"]],
+            [("coverage", "t1")])
