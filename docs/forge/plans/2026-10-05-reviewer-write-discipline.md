@@ -20,6 +20,7 @@
 **Files:**
 - Modify: `scripts/forge_git.py` (factor the temporary-index capture out of `freeze_attempt`; add fingerprint, fingerprint diff, tree diff; `snapshot_tree` uses the capture)
 - Create: `scripts/forge_fingerprint.py` (CLI: `snapshot`, `verify`)
+- Modify: `scripts/forge-run.py` (both verification-packet sites, in `execute_task` and `run_final_review_loop`, call `forge_git.repair_delta(cwd, repair_snapshot)` instead of `_git_diff`)
 - Test: `tests/test_forge_fingerprint.py`
 - Test: `tests/test_forge_verification_packet.py` (repair delta cases)
 
@@ -50,7 +51,8 @@
 - `freeze_tree` given a captured tree parks exactly that content under the ref and leaves the tree clean, with a file created after the capture absent from the freeze commit
 - `restore_refs` after a commit on the branch moves the branch back to the recorded sha and leaves the commit unreachable but present; after a branch switch it re-attaches HEAD to the recorded branch
 - a git failure inside `repo_fingerprint` raises `FingerprintError`, not `RuntimeError`
-- a task verification packet and a final verification packet built after a repair that edited one formerly-untracked file, deleted another, added a third and left a fourth unchanged contain exactly one hunk each for the edit, the deletion and the addition, and nothing for the unchanged file
+- a task verification packet and a final verification packet written by the runner after a repair that edited one formerly-untracked file, deleted another, added a third and left a fourth unchanged contain exactly one hunk each for the edit, the deletion and the addition, and nothing for the unchanged file
+- no verification-packet site in `scripts/forge-run.py` calls `_git_diff` with the repair snapshot
 
 **Acceptance:**
 - `python3 -m unittest tests.test_forge_fingerprint tests.test_forge_verification_packet` passes
@@ -190,7 +192,8 @@
 - `--resolve f1=defer` stages a deferral whose title names f1 and completes
 - `--resolve f1=repair` re-runs the final review and completes
 - a resume that resolves one of two open entries halts again naming only the other
-- `--resolve f1=accept` with empty evidence, `--resolve f1=repair:text`, and `accept` on a `scope-decision` id are each a contract error naming the form
+- `--resolve f1=accept` with empty evidence, `--resolve f1=repair:text`, `--resolve f1=defer:text`, and `accept` on a `scope-decision` id are each a contract error naming the form
+- `--resolve f9=repair` on an `unverified` halt whose open entries are f1 and f2 is a contract error naming f9, and run.json's `unverified` and `halt` records are unchanged
 - the final-review receipt lists every unverified entry with kind, id and reason
 - `--status` on the halted run prints `HALTED — final review: 2 unverified entries` and each open entry
 - the monitor banner on that run dir reads `HALTED — final review: 2 unverified entries` with the first entry's id and reason
