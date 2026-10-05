@@ -309,7 +309,8 @@ setup.
   string, which readers accept as a one-element set.
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
   escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
-  fields (`deferrals`, `seeded_findings`, `halt`) are the resume state.
+  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `halt`) are the
+  resume state.
 - The clean-tree precondition holds on resume too, **without exception**. Passed tasks
   are already committed and a halted task's attempt is frozen under a forge-owned ref
   off the mainline (`execution` spec, Halt resolution), so a clean tree is the normal
@@ -317,11 +318,19 @@ setup.
   boundary; the first non-passed task re-runs with base = HEAD = last committed
   checkpoint. The human is never asked to commit a half-finished attempt or discard it
   to get past the precondition.
-- **`--resolve <finding-id>=repair|defer`** (repeatable) carries a human decision into a
-  resumed run: `repair` means the human fixed it, `defer` stages it as a deferral. Either
-  way the id is exempt from further `scope-decision` halts this run. An id absent from
-  the halt record raises naming it — never silently ignored. The runner applies no fix of
-  its own under either value.
+- **`--resolve <id>=repair|defer|accept:<evidence>`** (repeatable) carries a human
+  decision into a resumed run. On a `scope-decision` halt: `repair` means the human
+  fixed it, `defer` stages it as a deferral; either way the id is exempt from further
+  `scope-decision` halts this run (recorded in `run.json`'s run-level `approved`).
+  On an `unverified` stage halt (`execution` spec: The disposition matrix) the id is an
+  unverified entry's: `accept:<evidence>` records the human's evidence (non-empty;
+  required for a coverage entry, which has no finding to repair), `defer` stages a
+  deferral, `repair` means the human fixed it by hand; the call is recorded on the
+  entry in `run.json`'s `unverified`, and the resumed run re-runs the final review,
+  halting again only on an entry still without a call. `accept` on a `scope-decision`
+  id, or `repair`/`defer` syntax carrying evidence, is a contract error. An id absent
+  from the halt record raises naming it — never silently ignored. The runner applies
+  no fix of its own under any value.
 - Resuming a run whose recorded `freeze_commit` no longer exists (a rebase or reset
   between invocations) raises naming the missing sha. Frozen work is never silently
   discarded.
@@ -335,12 +344,17 @@ record names a task or a stage), contract error is exit 1.
   outstanding findings, plus the `halt` record that makes the run resumable; the
   orchestrator relays the receipt's contents to the user. Which conditions escalate is
   the `execution` spec's halt taxonomy. Every halt class freezes the task's in-progress
-  attempt so the run resumes rather than restarts; `--resolve` applies only to
-  `scope-decision`, the one class that poses a question needing an answer.
-- **Stage escalation (exit 2)** — the final review or the terminal doc-sync stage halts.
+  attempt so the run resumes rather than restarts; `--resolve` applies only to the two
+  classes that pose a question needing an answer — `scope-decision`, and the final
+  review's `unverified` stage halt below.
+- **Stage escalation (exit 2)** — the final review or the terminal doc-sync stage halts,
+  or the final review **passes with an unverified entry lacking a human call** (halt
+  class `unverified`, stage `final-review`; `execution` spec: The disposition matrix).
   Its uncommitted edits are frozen under a stage-keyed ref the same way a task's attempt
   is, so the run exits clean; the record names the stage, not a task, and the stage
-  re-runs from scratch on the next invocation rather than replaying its freeze.
+  re-runs from scratch on the next invocation rather than replaying its freeze. An
+  `unverified` halt's outstanding list is the open entries, each with its reason;
+  `--status` prints them.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
@@ -628,6 +642,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)
 2026-10-05: reviewer dispatches drop `sandbox_mode="read-only"`; the write guarantee moves to `forge_git.repo_fingerprint` — working tree, index, HEAD, branch — taken before every reviewer dispatch and on every exit, a mismatch halting non-recoverably as a contract error; task discovery packets carry command-clause acceptance results (#127)
 2026-10-03: amended by [pipeline] — `TIER_MAP` gains one guarded mirror: the Codex column of the planning skill's routing table and the document-review command in `codex-execution.md`, kept equal by test, because spec and plan reviewers are started by the session and never pass through the runner. Verified live on codex-cli 0.160.0: the command runs with `gpt-6.1-sol`, and a read-only reviewer opens a file given only its path (`tests/live/check_codex_spec_by_path.sh` passes)
 2026-10-03: amended by [pipeline] — `--spec` is optional: the runner reads a plan's specs from its `**Spec files:**` header and passes that set to every brief, checklist, packet and lint call; `--spec` remains for legacy plans. The final-review packet and doc-sync brief carry spec paths, not spec text; `run.json` records `specs` as a list and a resumed run's spec set must match it (#62)

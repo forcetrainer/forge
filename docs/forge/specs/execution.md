@@ -669,13 +669,20 @@ review to carry it to. A `seed` the final review produces is **terminal**: it is
 recorded on the final receipt as `unverified`, the review still converges on the
 convergence rule (seed findings never block a pass), and every `unverified` finding is
 presented at the **close-out gate** beside the staged deferrals, with the reviewer's
-reason — the human accepts it as-is, files it as a deferral, or — for a finding entry —
-halts on it; a coverage entry has no finding to repair, so its calls are accept
-(recorded with the human's own evidence) or file. A halt here is an ordinary
-`scope-decision` halt with that finding outstanding — the human repairs
-by hand and resumes with the finding approved (Halt resolution), and the resumed run
-re-enters at the final review. No disposition is promoted and nothing is re-classified:
-`unverifiable` stays `seed`, and the human's three-way call is the terminal act. The
+reason — the human's call on each entry is one of `accept` (leave it, recording the human's
+own evidence — required on a coverage entry, which has no finding behind it), `defer`
+(stage it as a deferral) or `repair` (the human fixed it by hand). **How the gate is
+reached differs by harness**, because a Codex runner cannot hold a conversation: on
+Codex a final-review pass with any entry lacking a call is a **stage halt** of class
+`unverified` — frozen under the stage rule like any stage halt (there is nothing to
+freeze after a pass, and the helper runs all the same), doc-sync not run, the halt
+payload listing every open entry with its reason, which *is* the presentation; the
+human answers on re-invocation with `--resolve <id>=accept:<evidence>|defer|repair`
+(`codex-runner` spec: Resume), and the resumed run re-runs the final review as every
+stage re-run does, halting again only on an entry still without a call. On Claude the
+orchestrator asks in conversation and records the same calls. No disposition is
+promoted and nothing is re-classified: `unverifiable` stays `seed`, and the human's
+call is the terminal act. The
 `unverified` set holds two kinds of entry: a `seed`-disposition finding, and a final
 coverage entry whose status is `unverifiable` — that status needs no backing finding
 (Coverage validation), so without this the obligation would vanish on a `pass` verdict
@@ -767,9 +774,10 @@ followed by a re-invocation, so `regression`, `stuck`, `backstop` and `gate` nee
 frozen tree for exactly the reason `scope-decision` does. Freezing only one class leaves
 the others dirty-and-unrecorded, and a resumed run that then halts on a different class
 strands its restored work in a ref nothing points at — worse than the dirty tree this
-section exists to remove. What *is* specific to `scope-decision` is the resolution
-mechanism below: `--resolve` and the approved-finding exemption answer a scope question,
-which the other classes do not pose.
+section exists to remove. What *is* specific to `scope-decision` — and to the
+final review's `unverified` stage halt (The disposition matrix) — is the resolution
+mechanism below: `--resolve` and the approved-finding exemption answer a question, which
+the other classes do not pose.
 
 **Freeze.** The in-progress attempt is captured as a commit — **untracked files
 included**, since a task built from new files is otherwise captured as empty — retained
@@ -1093,7 +1101,7 @@ gate and the labels). Staged deferrals persist across a resume rather than being
 by the current invocation's entries, so an earlier stage's entries are never erased. The
 end-of-plan summary lists them. The same gate presents the final review's `unverified`
 findings (The disposition matrix), each with its reviewer's reason, for the same
-three-way call — accept, file, halt.
+three-way call — accept, defer, repair.
 
 Implementers may defer **non-spec scope only** — nice-to-haves, refactors, edge polish.
 Anything the spec requires surfaces at the review gate and is never silently deferred
@@ -1258,7 +1266,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
-2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as a contract error on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume
+2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as a contract error on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 
