@@ -261,17 +261,20 @@
 - [ ] Done
 
 **Files:**
-- Test: `tests/test_forge_dispose.py` (gate-mode and parity-gap cases)
+- Modify: `scripts/forge_dispose.py` (verdict validation: a finding the reviewer labels pre-existing and contract-breaking with a null `repair_task` is a validation defect naming the finding id)
+- Test: `tests/test_forge_dispose.py` (gate-mode and parity-gap cases; the repair_task validation case, no expected-failure marker)
 - Test: `tests/test_forge_checklist.py` (final citable set case)
 
 **Spec:** [execution] Execution, [execution] Contract checklist, [execution] Reviewer verdict contract, [execution] Autonomy flag, [execution] The shared decision helper, [execution] Terminal doc-sync stage, [codex-runner] Runner
 
-**Interface:** none — these sections were reworded to match behavior the code already has; this task pins that behavior with tests so the prose cannot drift again.
+**Interface:**
+- `forge_dispose` verdict validation gains one rule: a finding with `provenance: "pre-existing"` and `impact: "contract-breaking"` and `repair_task: null` is a validation defect — `"<id>: repair_task is required on a pre-existing contract-breaking finding"` — handled by the existing one-retry-then-contract-error path, the same way a missing location on a contract-breaking finding is. All other sections this task names were reworded to match behavior the code already has; the tests pin it.
 
 **Tests:**
 - in gate mode an in-diff improvement finding halts as `gate` with `repair_task` null and no validation defect
 - in gate mode an unverifiable finding halts as `gate` with `repair_task` null
-- a pre-existing contract-breaking finding without `repair_task` is a validation defect in either mode
+- a pre-existing contract-breaking finding without `repair_task` is a validation defect in either mode, surfacing through the runner's verdict-validation retry like a missing location does
+- an in-diff contract-breaking finding and an unverifiable finding without `repair_task` are not validation defects
 - `final_citable_refs` equals the final checklist ids plus every task's `t<N>.t<M>` ids, and is a strict superset of the final coverage items when any task declares a test case
 - the `forge_dispose` CLI given a verdict on a line changed by an earlier task of the run, with no run diff, classifies it `pre-existing`; the in-process call with `run_diff` classifies it `in-run`
 
