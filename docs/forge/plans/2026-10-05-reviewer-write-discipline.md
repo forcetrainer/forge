@@ -224,21 +224,29 @@
 - Modify: `skills/planning/SKILL.md` (Claude loop: fingerprint CLI around review spawns, acceptance JSON path in the reviewer prompt, unverified close-out call)
 - Modify: `skills/planning/codex-execution.md` (worker isolation paragraph; unverified halt and `--resolve` verbs)
 - Modify: `docs/forge/execution-loop.md` (read-only reviewer references)
+- Modify: `docs/forge/specs/pipeline.md` (Agent files section: the review contract sentence, plus a changelog line)
+- Modify: `scripts/forge_fingerprint.py` (`freeze` subcommand so the Claude loop can perform the reviewer-wrote halt)
 - Test: `tests/test_forge_docs.py`
+- Test: `tests/test_forge_fingerprint.py` (freeze subcommand)
 
 **Spec:** [execution] Reviewer write discipline, [execution] The dispatch loop, [codex-runner] Worker isolation, [codex-runner] Testing
 
-**Interface:** none — prose only.
+**Interface:**
+- `forge_fingerprint.py freeze <json-or-path> --ref <ref-name>` — the reviewer-wrote halt path for the Claude loop: `restore_refs` to the recorded fingerprint, then `freeze_tree` of the recorded tree under `--ref` parented on the recorded HEAD; prints the freeze sha, or `none` when the recorded tree equals HEAD's; exits 1 on a git failure naming the command.
 
 **Tests:**
 - each of the two agent contracts contains the phrases `scratch copy`, `git stash`, `baseline`, `one mutant`, `restore`, `attributable`, and `stays green`, and does not contain `never modify files`
 - `skills/planning/SKILL.md` names `forge_fingerprint.py snapshot` before and `forge_fingerprint.py verify` after each reviewer spawn in its Claude dispatch loop, and names the validation retry among the exits it covers
 - `skills/planning/SKILL.md` names the acceptance-results JSON path in the Claude reviewer prompt together with the do-not-re-run assertion and the prose-clause obligation
 - `skills/planning/SKILL.md` names the close-out call on unverified entries with the verbs accept, defer and repair
+- `forge_fingerprint.py freeze` after a reviewer commit restores the branch to the recorded sha and parks the recorded tree under the ref with the stray commit absent; after a branch switch it re-attaches HEAD; it prints `none` when the recorded tree equals HEAD's
+- `skills/planning/SKILL.md` names `forge_fingerprint.py freeze` as the orchestrator's action on a verify mismatch
+- `docs/forge/specs/pipeline.md` no longer says review never modifies files
 - `skills/planning/codex-execution.md` does not say reviewers carry `sandbox_mode="read-only"` in its runner dispatch paragraph
 
 **Acceptance:**
 - `python3 -m pytest tests/test_forge_docs.py -q` passes
+- `python3 -m unittest discover -s tests -p test_forge_fingerprint.py` passes
 - `grep -c 'never modify files' agents/forge-standard.md agents/forge-deep.md` prints `0`
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that a `verify` mismatch is a `reviewer-wrote` halt with no fallback spawn, no coverage retry and no commit, on task and final reviews alike, and that a `verify` failure is a contract error.
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that the orchestrator writes the acceptance result records as JSON to the scratch directory and names that path in the reviewer prompt with the do-not-re-run assertion.
