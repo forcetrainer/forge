@@ -353,6 +353,37 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self.assertIn("th-rev1", review_calls[1])
         self.assertEqual(threads.get("final-reviewer"), "th-rev1")
 
+    def test_final_verification_packet_delta_over_formerly_untracked_files(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        for name, text in (("u_edit.txt", "e\n"), ("u_del.txt", "d\n"),
+                           ("u_same.txt", "s\n")):
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write(text)
+        ops = [
+            {"op": "append", "path": os.path.join(self.d, "u_edit.txt"), "text": "EDITED\n"},
+            {"op": "delete", "path": os.path.join(self.d, "u_del.txt")},
+            {"op": "write", "path": os.path.join(self.d, "u_add.txt"), "text": "ADDED\n"},
+        ]
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "issue", contract_ref="spec:Alpha section",
+            ), "stdout": _stream("th-rev1")},
+            {"exit": 0, "msg": "", "file_ops": ops, "stdout": _stream("th-fix1")},
+            {"exit": 0, "msg": _pass_msg(), "stdout": _stream("th-rev1")},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "final-review.md")) as f:
+            packet = f.read()
+        self.assertEqual(packet.count("+EDITED"), 1, packet)
+        self.assertEqual(packet.count("deleted file mode"), 1, packet)
+        self.assertEqual(packet.count("+ADDED"), 1, packet)
+        self.assertNotIn("u_same.txt", packet)
+
     def test_invalid_final_verdict_retries_by_resuming_final_reviewer_thread(self):
         run_base = self._init_repo_with_task_work()
         plan = self._plan()

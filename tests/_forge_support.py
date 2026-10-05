@@ -77,6 +77,7 @@ out = ""
 err = ""
 append_file = None
 append_text = ""
+file_ops = []
 resp = os.environ.get("FORGE_FAKE_RESPONSES")
 if resp and os.path.exists(resp):
     with open(resp) as f:
@@ -90,6 +91,7 @@ if resp and os.path.exists(resp):
         err = r.get("stderr", "")
         append_file = r.get("append_file")
         append_text = r.get("append_text", "")
+        file_ops = r.get("file_ops", [])
 if msg:
     if "## Contract checklist" in prompt:
         try:
@@ -128,6 +130,13 @@ if err:
 if append_file:
     with open(append_file, "a") as f:
         f.write(append_text)
+for op in file_ops:
+    # {"op": "write"|"append"|"delete", "path": abs path, "text": str}
+    if op["op"] == "delete":
+        os.remove(op["path"])
+    else:
+        with open(op["path"], "w" if op["op"] == "write" else "a") as f:
+            f.write(op.get("text", ""))
 if "--output-last-message" in argv:
     p = argv[argv.index("--output-last-message") + 1]
     with open(p, "w") as f:

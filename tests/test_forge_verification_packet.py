@@ -429,6 +429,43 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         # Outstanding finding text carried into the packet.
         self.assertIn("still missing the marker", packet)
 
+    def _repair_ops(self):
+        d = self.d
+        return [
+            {"op": "append", "path": os.path.join(d, "u_edit.txt"), "text": "EDITED\n"},
+            {"op": "delete", "path": os.path.join(d, "u_del.txt")},
+            {"op": "write", "path": os.path.join(d, "u_add.txt"), "text": "ADDED\n"},
+        ]
+
+    def test_task_verification_packet_delta_over_formerly_untracked_files(self):
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        for name, text in (("u_edit.txt", "e\n"), ("u_del.txt", "d\n"),
+                           ("u_same.txt", "s\n")):
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write(text)
+        self._set_responses([
+            {"exit": 0, "msg": "", "stdout": _worker_event_stream_local("th-w1")},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs repair", contract_ref="t1.a1",
+            ), "stdout": _worker_event_stream_local("th-r1")},
+            {"exit": 0, "msg": "", "file_ops": self._repair_ops()},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        outcome = forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
+        )
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        # The acceptance command re-runs on the repair attempt, so its own
+        # f1.txt hunk rides along; only the untracked-file hunks are counted.
+        self.assertNotIn("u_same.txt", packet)
+        self.assertEqual(packet.count("+EDITED"), 1, packet)
+        self.assertEqual(packet.count("deleted file mode"), 1, packet)
+        self.assertEqual(packet.count("+ADDED"), 1, packet)
+        self.assertEqual(packet.count("diff --git a/u_"), 3, packet)
+
     def test_task_discovery_packet_carries_citable_section_and_reviewer_prompt_does(self):
         plan = self._plan(PLAN_STD_CHECKLIST.replace(
             "**Acceptance:**", "**Spec:** Alpha section\n\n**Acceptance:**"))
@@ -539,3 +576,10 @@ def _worker_event_stream_local(thread_id, text="ok"):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoRawDiffAtVerificationSitesTests(unittest.TestCase):
+    def test_no_verification_packet_site_calls_git_diff_with_repair_snapshot(self):
+        src = (REPO_ROOT / "scripts" / "forge-run.py").read_text()
+        self.assertNotRegex(src, r"_git_diff\([^)]*repair_snapshot")
+        self.assertEqual(src.count("forge_git.repair_delta(cwd, repair_snapshot)"), 2)

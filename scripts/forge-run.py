@@ -1042,8 +1042,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # Pre-repair snapshot (Delta-scoped verification packets spec): every
         # rework lap dispatches a repair (resumed worker, or its cold
         # fallback below) — snapshot the tree just before that dispatch so a
-        # later verification packet's delta is `git diff <repair_snapshot>`,
-        # scoped to this repair alone rather than the task's whole
+        # later verification packet's delta is `forge_git.repair_delta` against
+        # the snapshot, scoped to this repair alone rather than the task's whole
         # accumulated diff. Never taken on attempt 1 (nothing has repaired
         # anything yet); never mutates the working tree.
         repair_snapshot = forge_git.snapshot_tree(cwd) if lap > 1 else None
@@ -1162,7 +1162,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 # on every verification lap of any multi-item checklist
                 # (fixed 2026-08-21; the spec's own words: "Verification laps
                 # carry the reduced checklist ... not the full one").
-                delta_diff = _git_diff(cwd, repair_snapshot)
+                delta_diff = forge_git.repair_delta(cwd, repair_snapshot)
                 checklist = (
                     forge_checklist.reduce_checklist(checklist, prior_findings)
                     if checklist else checklist
@@ -1644,7 +1644,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         findings = []
         # Pre-repair snapshot (Delta-scoped verification packets spec): taken
         # just before this attempt's fix dispatch so a later verification
-        # packet's delta is `git diff <repair_snapshot>`, scoped to this
+        # packet's delta is `forge_git.repair_delta` against the snapshot, scoped to this
         # repair alone rather than the whole run's accumulated diff. Never
         # set outside a fix-dispatch attempt.
         repair_snapshot = None
@@ -1720,7 +1720,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 else "discovery"
             )
             if is_verification and repair_snapshot is not None:
-                delta_diff = _git_diff(cwd, repair_snapshot)
+                delta_diff = forge_git.repair_delta(cwd, repair_snapshot)
                 packet_checklist = (
                     forge_checklist.reduce_checklist(checklist, prior_findings)
                     if checklist else checklist
