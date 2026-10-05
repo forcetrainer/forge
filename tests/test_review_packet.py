@@ -657,6 +657,63 @@ class BuildCitableSectionTests(unittest.TestCase):
         )
 
 
+class AcceptanceResultsSectionTests(unittest.TestCase):
+    TASK = "### Task 1: First task\n- [ ] Done\n"
+    ROWS = [
+        {"command": "python3 -m unittest tests.alpha", "outcome": "exit 0",
+         "exit_code": 0, "passed": True, "output_tail": "tail-alpha-OK"},
+        {"command": "grep -q beta file.txt", "outcome": "exit 1",
+         "exit_code": 7, "passed": False, "output_tail": "tail-beta-BOOM"},
+    ]
+
+    def test_discovery_packet_with_two_results_has_section_assertion_and_rows(self):
+        packet = rp.build_packet(
+            self.TASK, "HEAD", "", review_kind="discovery",
+            acceptance_results=self.ROWS,
+        )
+        self.assertIn("## Acceptance results", packet)
+        self.assertIn(rp.ACCEPTANCE_ASSERTION, packet)
+        for row in self.ROWS:
+            self.assertIn(row["command"], packet)
+            self.assertIn(row["outcome"], packet)
+            self.assertIn(str(row["exit_code"]), packet)
+            self.assertIn(row["output_tail"], packet)
+        self.assertIn("True", packet)
+        self.assertIn("False", packet)
+
+    def test_empty_results_render_section_and_assertion_without_rows(self):
+        packet = rp.build_packet(
+            self.TASK, "HEAD", "", review_kind="discovery", acceptance_results=[],
+        )
+        self.assertIn("## Acceptance results", packet)
+        self.assertIn(rp.ACCEPTANCE_ASSERTION, packet)
+        section = rp.build_acceptance_section([])
+        self.assertEqual(section.strip().splitlines()[0], "## Acceptance results")
+        self.assertNotIn("command", section.split(rp.ACCEPTANCE_ASSERTION)[1])
+
+    def test_assertion_names_not_rerun_and_prose_clauses(self):
+        self.assertIn("already been run", rp.ACCEPTANCE_ASSERTION)
+        self.assertIn("not to be re-run", rp.ACCEPTANCE_ASSERTION)
+        self.assertIn("prose clauses", rp.ACCEPTANCE_ASSERTION)
+
+    def test_discovery_packet_without_argument_has_no_section(self):
+        packet = rp.build_packet(self.TASK, "HEAD", "", review_kind="discovery")
+        self.assertNotIn("## Acceptance results", packet)
+
+    def test_verification_packet_never_has_section(self):
+        packet = rp.build_verification_packet([], "", None)
+        self.assertNotIn("## Acceptance results", packet)
+
+    def test_final_review_packet_never_has_section(self):
+        from _forge_support import forge_run  # noqa: F401
+        import forge_git
+        d = tempfile.mkdtemp(prefix="final-packet-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = forge_git._final_packet(["spec.md"], "HEAD", "", d)
+        with open(path) as f:
+            self.assertNotIn("## Acceptance results", f.read())
+
+
 # --- forge_git._packet_for(spec_path=...) — Task 8 ---
 
 
