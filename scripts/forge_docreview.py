@@ -27,7 +27,6 @@ from dataclasses import dataclass
 import forge_common
 
 
-REPO_ROOT = forge_common.REPO_ROOT
 
 BACKTICK_RE = re.compile(r'`([^`\n]+)`')
 # identifier, dotted name (a.b.c), or name()/a.b.c() form.
@@ -57,9 +56,13 @@ class Reference:
     ambiguous_matches: "list[str] | None" = None
 
 
-def _tracked_files():
+def _tracked_files(repo_root):
+    """``git ls-files`` of the repository under review — ``repo_root`` is the
+    target repo, never this script's own checkout (issue #125: installed as
+    a plugin, the two differ, and resolving against the plugin marked every
+    real file unresolved)."""
     result = subprocess.run(
-        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ["git", "ls-files"], cwd=repo_root, capture_output=True, text=True, check=True,
     )
     return [line for line in result.stdout.splitlines() if line]
 
@@ -149,7 +152,7 @@ def _resolve_path(ref, tracked_set, suffix_candidates):
     return False, None, None
 
 
-def _resolve_symbol(ref, pathspec=None):
+def _resolve_symbol(ref, repo_root, pathspec=None):
     """Exit 0 is a match; exit 1 is a legitimate no-match (legal, unresolved).
     Anything else is a tool failure — `git grep` couldn't even run — and must
     raise naming the cause, never collapse into a legal negative result
@@ -183,7 +186,7 @@ def _resolve_symbol(ref, pathspec=None):
     if pathspec is not None:
         argv += ["--", pathspec]
     result = subprocess.run(
-        argv, cwd=REPO_ROOT, capture_output=True, text=True,
+        argv, cwd=repo_root, capture_output=True, text=True,
     )
     if result.returncode == 0:
         path, line, _ = result.stdout.splitlines()[0].split(":", 2)
@@ -196,7 +199,7 @@ def _resolve_symbol(ref, pathspec=None):
     )
 
 
-def extract_references(spec_text):
+def extract_references(spec_text, repo_root):
     """Ordered, de-duplicated list of ``Reference`` for every backticked span
     in ``spec_text`` outside fenced regions. Includes ``"other"``-shaped
     spans (flags, enum values, constraint ids) unresolved — callers wanting
@@ -215,7 +218,7 @@ def extract_references(spec_text):
                 seen_set.add(ref)
                 seen.append(ref)
 
-    tracked_files = _tracked_files()
+    tracked_files = _tracked_files(repo_root)
     tracked_set = set(tracked_files)
     extensions = _extension_set(tracked_files)
     suffix_candidates = _suffix_candidates(tracked_files)
@@ -229,7 +232,7 @@ def extract_references(spec_text):
                 ref, tracked_set, suffix_candidates
             )
         elif shape == "symbol":
-            resolved, found_at = _resolve_symbol(ref)
+            resolved, found_at = _resolve_symbol(ref, repo_root)
         else:
             resolved, found_at = False, None
         references.append(
@@ -241,7 +244,7 @@ def extract_references(spec_text):
     return references
 
 
-def reference_table(spec_text):
+def reference_table(spec_text, repo_root):
     """The checklist: only ``path`` and ``symbol`` entries — ``other`` (flags,
     enum values, constraint ids) is noise and is dropped. A span with no
     alphanumeric character (a bare `/` from a sentence about path syntax, a
@@ -249,7 +252,7 @@ def reference_table(spec_text):
     though slash-detection alone would classify it path-shaped (spec: Spec
     review, Classification precision)."""
     return [
-        r for r in extract_references(spec_text)
+        r for r in extract_references(spec_text, repo_root)
         if r.shape in ("path", "symbol") and any(ch.isalnum() for ch in r.ref)
     ]
 
@@ -428,7 +431,7 @@ def _validate_required_fields(entries_by_type, defects):
                     )
 
 
-def _validate_dependencies_read(entries, defects):
+def _validate_dependencies_read(entries, defects, repo_root):
     """Structural verification of ``dependencies_read`` — a field carrying a
     claim about the repository is verified, not merely non-blank (spec: Spec
     review, Structural verification). ``file`` must name a tracked file;
@@ -437,7 +440,7 @@ def _validate_dependencies_read(entries, defects):
     never a second grep implementation. Skips a field already reported blank
     by ``_validate_required_fields`` — this is a second, independent check on
     top of that one, not a replacement for it."""
-    tracked_set = set(_tracked_files())
+    tracked_set = set(_tracked_files(repo_root))
     for i, entry in entries:
         label = _entry_label(entry, "dependencies_read", "symbol", i)
         file_val = entry.get("file")
@@ -452,7 +455,7 @@ def _validate_dependencies_read(entries, defects):
         symbol_val = entry.get("symbol")
         if _is_blank(symbol_val) or not isinstance(symbol_val, str):
             continue
-        found, _found_at = _resolve_symbol(symbol_val, pathspec=file_val)
+        found, _found_at = _resolve_symbol(symbol_val, repo_root, pathspec=file_val)
         if not found:
             defects.append(
                 "dependencies_read entry {!r} names symbol {!r} which does "
@@ -542,8 +545,9 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
 
     ``unresolved_refs`` is the set of ref strings the reviewer owes a
     disposition on (the packet's reference table, filtered to unresolved).
-    ``repo_root`` is accepted for interface symmetry with ``dispose`` and
-    ``validate_citation``; citation resolution itself is still `dispose`'s
+    ``repo_root`` is the repository under review: ``dependencies_read``
+    claims are checked against its tracked files, never this script's own
+    checkout (issue #125). Citation resolution itself is still `dispose`'s
     job. ``spec_sections`` is the **required** list of the spec under
     review's real section heading texts, checked against
     ``findings[].section`` (spec: Spec review, Structural verification) — a
@@ -564,7 +568,6 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     ``findings[]`` (a `pass` carrying findings, or a `findings` carrying
     none) is checked separately, since it is a relationship between two
     fields rather than either field's own shape."""
-    del repo_root  # accepted for interface symmetry; citation resolution happens in dispose()
     defects = []
 
     # Parse each declared entry array once, skipping (and reporting, never
@@ -611,7 +614,7 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     # repository is verified, not merely non-blank (spec: Spec review,
     # Structural verification) — the mechanical backstop against designing
     # against a function or section never actually read.
-    _validate_dependencies_read(entries_by_type["dependencies_read"], defects)
+    _validate_dependencies_read(entries_by_type["dependencies_read"], defects, repo_root)
     _validate_findings_sections(entries_by_type["findings"], spec_sections, defects)
 
     unresolved_set = set(unresolved_refs)
@@ -873,7 +876,7 @@ def _all_spec_section_names(spec_lines):
     return names
 
 
-def build_packet(spec_path):
+def build_packet(spec_path, repo_root):
     """Assemble the reviewer's packet as text (spec: Spec review). Always the
     whole document — an amendment re-reviews the whole spec, never a
     changed-sections scope (`pipeline` spec, "Amendments re-enter, and the
@@ -886,7 +889,7 @@ def build_packet(spec_path):
     lines = forge_common.eb.read_lines(spec_path)
     full_text = "".join(lines)
 
-    table = reference_table(full_text)
+    table = reference_table(full_text, repo_root)
     unresolved = [r for r in table if not r.resolved]
 
     parts = []
@@ -962,7 +965,11 @@ def main(argv=None):
         help="path to the reviewer's verdict JSON; when given, validates "
              "and disposes instead of emitting a packet.",
     )
-    parser.add_argument("--repo-root", default=REPO_ROOT)
+    parser.add_argument(
+        "--repo-root", default=os.getcwd(),
+        help="the repository under review; defaults to the current directory "
+             "(issue #125: never this script's own checkout).",
+    )
     parser.add_argument("--out")
     args = parser.parse_args(argv)
     if not args.plan and not args.spec:
@@ -975,7 +982,7 @@ def main(argv=None):
         return forge_planreview.run(args.plan, args.spec, args.verdict, args.out)
 
     try:
-        packet = build_packet(args.spec)
+        packet = build_packet(args.spec, args.repo_root)
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
@@ -1014,7 +1021,7 @@ def main(argv=None):
     # the verdict is checked against exactly what the reviewer was asked to
     # dispose of, never a wider or narrower set.
     spec_lines = forge_common.eb.read_lines(args.spec)
-    table = reference_table("".join(spec_lines))
+    table = reference_table("".join(spec_lines), args.repo_root)
     unresolved_refs = [r.ref for r in table if not r.resolved]
     spec_sections = _all_spec_section_names(spec_lines)
 

@@ -41,81 +41,81 @@ def _tracked_files():
 
 class ExtractReferencesTests(unittest.TestCase):
     def test_slash_span_is_path(self):
-        refs = d.extract_references("See `scripts/forge_common.py` for details.")
+        refs = d.extract_references("See `scripts/forge_common.py` for details.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
 
     def test_span_ending_in_extension_present_in_repo_is_path(self):
         # forge_common.py is a real tracked file, so .py is a real extension
         # in the repo's extension set even without a slash in the span.
-        refs = d.extract_references("Look at `forge_common.py` closely.")
+        refs = d.extract_references("Look at `forge_common.py` closely.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
 
     # --- f2: a span with whitespace or a quote is never a path (final
     # review) -----------------------------------------------------------
 
     def test_span_with_whitespace_containing_slash_is_not_path(self):
-        refs = d.extract_references('Prints `sh .forge/watch` at start.')
+        refs = d.extract_references('Prints `sh .forge/watch` at start.', str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "other")
-        table = d.reference_table('Prints `sh .forge/watch` at start.')
+        table = d.reference_table('Prints `sh .forge/watch` at start.', str(REPO_ROOT))
         self.assertEqual(table, [])
 
     def test_span_with_quote_containing_slash_is_not_path(self):
         refs = d.extract_references(
-            'Exposes `source: {source: "local", path: "./"}` config.'
+            'Exposes `source: {source: "local", path: "./"}` config.', str(REPO_ROOT)
         )
         self.assertEqual(refs[0].shape, "other")
         table = d.reference_table(
-            'Exposes `source: {source: "local", path: "./"}` config.'
+            'Exposes `source: {source: "local", path: "./"}` config.', str(REPO_ROOT)
         )
         self.assertEqual(table, [])
 
     def test_span_with_whitespace_slash_no_quote_is_not_path(self):
-        refs = d.extract_references('Uses `gh issue create/close` for issues.')
+        refs = d.extract_references('Uses `gh issue create/close` for issues.', str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "other")
-        table = d.reference_table('Uses `gh issue create/close` for issues.')
+        table = d.reference_table('Uses `gh issue create/close` for issues.', str(REPO_ROOT))
         self.assertEqual(table, [])
 
     def test_span_ending_in_extension_absent_from_repo_is_not_path(self):
-        refs = d.extract_references("A stray `thing.zzzzqqq` token.")
+        refs = d.extract_references("A stray `thing.zzzzqqq` token.", str(REPO_ROOT))
         self.assertNotEqual(refs[0].shape, "path")
 
     def test_double_dash_flag_is_other_and_dropped(self):
-        refs = d.extract_references("Pass `--autofix` to enable it.")
+        refs = d.extract_references("Pass `--autofix` to enable it.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "other")
-        table = d.reference_table("Pass `--autofix` to enable it.")
+        table = d.reference_table("Pass `--autofix` to enable it.", str(REPO_ROOT))
         self.assertEqual(table, [])
 
     def test_kebab_constraint_id_is_other_and_dropped(self):
-        refs = d.extract_references("Constraint: `stdlib-only`.")
+        refs = d.extract_references("Constraint: `stdlib-only`.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "other")
-        table = d.reference_table("Constraint: `stdlib-only`.")
+        table = d.reference_table("Constraint: `stdlib-only`.", str(REPO_ROOT))
         self.assertEqual(table, [])
 
     def test_identifier_present_in_tracked_file_resolves_with_found_at(self):
-        refs = d.extract_references("Call `extract_references` to get the list.")
+        refs = d.extract_references("Call `extract_references` to get the list.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "symbol")
         self.assertTrue(refs[0].resolved)
         self.assertIsNotNone(refs[0].found_at)
 
     def test_identifier_absent_from_every_tracked_file_does_not_resolve(self):
-        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.")
+        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "symbol")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
 
     def test_path_naming_existing_directory_resolves(self):
-        refs = d.extract_references("See the `docs/forge/specs` directory.")
+        refs = d.extract_references("See the `docs/forge/specs` directory.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
         self.assertTrue(refs[0].resolved)
 
     def test_path_naming_nonexistent_file_does_not_resolve(self):
-        refs = d.extract_references("See `scripts/does_not_exist_at_all.py`.")
+        refs = d.extract_references("See `scripts/does_not_exist_at_all.py`.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
         self.assertFalse(refs[0].resolved)
 
     def test_duplicate_reference_yields_one_table_entry(self):
         text = "First mention of `scripts/forge_common.py`. Again: `scripts/forge_common.py`."
-        table = d.reference_table(text)
+        table = d.reference_table(text, str(REPO_ROOT))
         self.assertEqual(len(table), 1)
 
     def test_backticked_span_inside_fenced_block_is_not_extracted(self):
@@ -126,7 +126,7 @@ class ExtractReferencesTests(unittest.TestCase):
             "```\n\n"
             "Prose after.\n"
         )
-        refs = d.extract_references(text)
+        refs = d.extract_references(text, str(REPO_ROOT))
         self.assertEqual(refs, [])
 
     def test_extension_set_is_derived_not_hardcoded(self):
@@ -137,7 +137,7 @@ class ExtractReferencesTests(unittest.TestCase):
         tracked = _tracked_files()
         exts = {f.rsplit(".", 1)[-1] for f in tracked if "." in f.rsplit("/", 1)[-1]}
         self.assertIn("py", exts)  # sanity: repo has .py files
-        refs = d.extract_references("A span ending in `x.py`.")
+        refs = d.extract_references("A span ending in `x.py`.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
 
 
@@ -148,7 +148,7 @@ class ReworkFindingsTests(unittest.TestCase):
         untracked_dir = SCRIPTS_DIR / "__test_untracked_dir__"
         untracked_dir.mkdir(exist_ok=True)
         self.addCleanup(lambda: shutil.rmtree(untracked_dir, ignore_errors=True))
-        refs = d.extract_references("See `scripts/__test_untracked_dir__` here.")
+        refs = d.extract_references("See `scripts/__test_untracked_dir__` here.", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
@@ -156,7 +156,7 @@ class ReworkFindingsTests(unittest.TestCase):
     # f2 — a bare punctuation span like `/` must not spuriously resolve to
     # the repo root once stripped down to the empty string.
     def test_bare_slash_span_does_not_resolve(self):
-        refs = d.extract_references("Syntax example: `/`")
+        refs = d.extract_references("Syntax example: `/`", str(REPO_ROOT))
         self.assertEqual(refs[0].shape, "path")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
@@ -175,14 +175,14 @@ class ReworkFindingsTests(unittest.TestCase):
 
         with mock.patch.object(d.subprocess, "run", side_effect=fake_run):
             with self.assertRaises(RuntimeError) as ctx:
-                d.extract_references("Call `someSymbolNameXyz` here.")
+                d.extract_references("Call `someSymbolNameXyz` here.", str(REPO_ROOT))
         self.assertIn("128", str(ctx.exception))
         self.assertIn("not a git repository", str(ctx.exception))
 
     def test_git_grep_exit_1_is_legal_no_match(self):
         # Exit 1 (no match) must still be treated as a legal negative result,
         # not swept into the fatal-error path.
-        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.")
+        refs = d.extract_references(f"Call `{NO_SUCH_SYMBOL}` here.", str(REPO_ROOT))
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
 
@@ -699,28 +699,28 @@ class BuildPacketTests(unittest.TestCase):
         # Scoped review is deleted (spec: Spec review, "Amendments re-enter,
         # and the review is always whole-document") — a packet for a spec
         # always carries every section, with no way to ask for less.
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn("Alpha references", packet)
         self.assertIn("Beta references", packet)
 
     def test_build_packet_takes_no_sections_parameter(self):
         with self.assertRaises(TypeError):
-            d.build_packet(self.spec_path, sections=["Alpha section"])
+            d.build_packet(self.spec_path, str(REPO_ROOT), sections=["Alpha section"])
 
     def test_packet_references_anti_patterns_doc_by_path_without_inlining(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn("skills/brainstorming/design-anti-patterns.md", packet)
         self.assertNotIn("Gate:", packet)
         self.assertNotIn("Trigger:", packet)
         self.assertNotIn("Instead:", packet)
 
     def test_packet_lists_every_unresolved_reference(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn(NO_SUCH_SYMBOL, packet)
         self.assertIn("scripts/does_not_exist_at_all.py", packet)
 
     def test_packet_states_required_verdict_fields(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn("disposition", packet)
         self.assertIn("evidence", packet)
         self.assertIn("intended-new", packet)
@@ -733,7 +733,7 @@ class BuildPacketTests(unittest.TestCase):
         # tracked path and `symbol` to appear literally in it. A reviewer
         # told neither writes `path.py:88` and `module.func`, and both are
         # rejected — observed 2026-10-03, two reviewers, one retry each.
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn("no line number", packet)
         self.assertIn("appears literally in that file", packet)
 
@@ -746,7 +746,7 @@ class BuildPacketTests(unittest.TestCase):
         # elsewhere in the packet for other reasons — see
         # test_packet_envelope_statement_check_catches_its_own_removal for
         # proof this actually discriminates.
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         self.assertIn("written to a file", packet)
         self.assertIn('"verdict"', packet)
         self.assertIn("pass", packet)
@@ -760,7 +760,7 @@ class BuildPacketTests(unittest.TestCase):
         lines = d._required_verdict_fields_text().splitlines()
         stripped = "\n".join(l for l in lines if "written to a file" not in l) + "\n"
         with mock.patch.object(d, "_required_verdict_fields_text", return_value=stripped):
-            packet = d.build_packet(self.spec_path)
+            packet = d.build_packet(self.spec_path, str(REPO_ROOT))
         with self.assertRaises(AssertionError):
             self.assertIn("written to a file", packet)
 
@@ -1093,8 +1093,9 @@ class CliValidityOrderingTests(unittest.TestCase):
 class TempGitRepoMixin:
     """A throwaway git repo with a controlled tracked-file set, so
     classification-precision tests aren't hostage to what this repo's own
-    file layout happens to be. `forge_docreview.REPO_ROOT` is patched to it
-    for the test's duration."""
+    file layout happens to be. Tests pass ``self.repo`` as the resolver's
+    ``repo_root`` (issue #125: the target repo is an explicit argument, no
+    module-level root to patch)."""
 
     def _init_repo(self):
         self.repo = tempfile.mkdtemp(prefix="forge-docreview-repo-")
@@ -1106,9 +1107,6 @@ class TempGitRepoMixin:
         ):
             subprocess.run(["git", *args], cwd=self.repo, check=True,
                             capture_output=True, text=True)
-        patcher = mock.patch.object(d, "REPO_ROOT", self.repo)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def _track(self, relpath, content="x\n"):
         full = os.path.join(self.repo, relpath)
@@ -1188,7 +1186,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         # The companion case: over-tightening word-boundary matching so a
         # legitimate whole-symbol claim is wrongly rejected would be the
         # worse defect. REPO_ROOT is the whole identifier, not a substring.
-        found, found_at = d._resolve_symbol("REPO_ROOT", pathspec="scripts/forge_common.py")
+        found, found_at = d._resolve_symbol("REPO_ROOT", str(REPO_ROOT), pathspec="scripts/forge_common.py")
         self.assertTrue(found)
         self.assertIsNotNone(found_at)
 
@@ -1409,7 +1407,7 @@ class ExtensionSetDerivedTests(TempGitRepoMixin, unittest.TestCase):
 
     def test_span_ending_in_newly_tracked_extension_classifies_as_path(self):
         self._track("widget.zzzqqqext123", "content\n")
-        refs = d.extract_references("A span ending in `thing.zzzqqqext123`.")
+        refs = d.extract_references("A span ending in `thing.zzzqqqext123`.", self.repo)
         self.assertEqual(refs[0].shape, "path")
 
     def test_hardcoding_the_extension_set_makes_that_check_fail(self):
@@ -1422,7 +1420,7 @@ class ExtensionSetDerivedTests(TempGitRepoMixin, unittest.TestCase):
         self._track("widget.zzzqqqext123", "content\n")
         hardcoded = {".py", ".md", ".json", ".txt", ".sh"}
         with mock.patch.object(d, "_extension_set", return_value=hardcoded):
-            refs = d.extract_references("A span ending in `thing.zzzqqqext123`.")
+            refs = d.extract_references("A span ending in `thing.zzzqqqext123`.", self.repo)
         self.assertNotEqual(refs[0].shape, "path")
 
 
@@ -1436,25 +1434,25 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
         self._init_repo()
 
     def test_metavariable_span_is_dropped_not_unresolved(self):
-        refs = d.extract_references("Named `docs/specs/<system>.md` per system.")
+        refs = d.extract_references("Named `docs/specs/<system>.md` per system.", self.repo)
         self.assertEqual(refs[0].shape, "other")
-        table = d.reference_table("Named `docs/specs/<system>.md` per system.")
+        table = d.reference_table("Named `docs/specs/<system>.md` per system.", self.repo)
         self.assertEqual(table, [])
 
     def test_span_with_no_alphanumeric_character_is_dropped(self):
-        table = d.reference_table("Syntax example: `/`")
+        table = d.reference_table("Syntax example: `/`", self.repo)
         self.assertEqual(table, [])
 
     def test_bare_basename_matching_exactly_one_tracked_path_resolves(self):
         self._track("skills/brainstorming/design-anti-patterns.md")
-        refs = d.extract_references("See `design-anti-patterns.md` for the list.")
+        refs = d.extract_references("See `design-anti-patterns.md` for the list.", self.repo)
         self.assertEqual(refs[0].shape, "path")
         self.assertTrue(refs[0].resolved)
         self.assertEqual(refs[0].found_at, "skills/brainstorming/design-anti-patterns.md")
 
     def test_relative_directory_fragment_matching_exactly_one_tracked_directory_resolves(self):
         self._track("docs/forge/specs/pipeline.md")
-        refs = d.extract_references("See the `forge/specs` directory.")
+        refs = d.extract_references("See the `forge/specs` directory.", self.repo)
         self.assertEqual(refs[0].shape, "path")
         self.assertTrue(refs[0].resolved)
         self.assertEqual(refs[0].found_at, "docs/forge/specs")
@@ -1462,7 +1460,7 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
     def test_bare_basename_matching_two_tracked_paths_is_ambiguous_never_a_silent_pick(self):
         self._track("docs/forge/specs/pipeline.md")
         self._track("tests/fixtures/specs/pipeline.md")
-        refs = d.extract_references("See `pipeline.md` for details.")
+        refs = d.extract_references("See `pipeline.md` for details.", self.repo)
         self.assertEqual(refs[0].shape, "path")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
@@ -1471,7 +1469,7 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
 
     def test_basename_matching_no_tracked_path_is_still_unresolved(self):
         self._track("docs/forge/specs/pipeline.md")
-        refs = d.extract_references("See `nowhere-to-be-found.md` for details.")
+        refs = d.extract_references("See `nowhere-to-be-found.md` for details.", self.repo)
         self.assertEqual(refs[0].shape, "path")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
@@ -1483,14 +1481,14 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
 
     def test_reference_table_symbol_substring_of_longer_identifier_does_not_resolve(self):
         self._track("scripts/example.py", content="LONGER_IDENTIFIER = 1\n")
-        refs = d.extract_references("Calls `LONGER` somewhere.")
+        refs = d.extract_references("Calls `LONGER` somewhere.", self.repo)
         self.assertEqual(refs[0].shape, "symbol")
         self.assertFalse(refs[0].resolved)
         self.assertIsNone(refs[0].found_at)
 
     def test_reference_table_symbol_whole_identifier_still_resolves(self):
         self._track("scripts/example.py", content="LONGER_IDENTIFIER = 1\n")
-        refs = d.extract_references("Calls `LONGER_IDENTIFIER` somewhere.")
+        refs = d.extract_references("Calls `LONGER_IDENTIFIER` somewhere.", self.repo)
         self.assertEqual(refs[0].shape, "symbol")
         self.assertTrue(refs[0].resolved)
         self.assertIsNotNone(refs[0].found_at)
@@ -1507,7 +1505,7 @@ class PipelineSpecClassificationPrecisionTests(unittest.TestCase):
         text = (pathlib.Path(REPO_ROOT) / "docs/forge/specs/pipeline.md").read_text(
             encoding="utf-8"
         )
-        unresolved = [r.ref for r in d.reference_table(text) if not r.resolved]
+        unresolved = [r.ref for r in d.reference_table(text, str(REPO_ROOT)) if not r.resolved]
         bad = [x for x in unresolved if "<" in x or not any(c.isalnum() for c in x)]
         self.assertEqual(bad, [])
         # design-anti-patterns.md and testing-anti-patterns.md are real,
@@ -1526,7 +1524,7 @@ class OtherSpecsClassificationPrecisionTests(unittest.TestCase):
 
     def _table_refs(self, relpath):
         text = (pathlib.Path(REPO_ROOT) / relpath).read_text(encoding="utf-8")
-        return [r.ref for r in d.reference_table(text)]
+        return [r.ref for r in d.reference_table(text, str(REPO_ROOT))]
 
     def test_codex_runner_spec_drops_json_fragment_with_quotes_and_slash(self):
         refs = self._table_refs("docs/forge/specs/codex-runner.md")
@@ -1561,7 +1559,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
             )
 
     def test_reference_table_distinguishes_ambiguous_from_plain_unresolved(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, self.repo)
         table_section = packet.split("# Reference table")[1].split("# Unresolved")[0]
         ambiguous_line = next(
             line for line in table_section.splitlines() if "`dup.md`" in line
@@ -1575,7 +1573,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIn("unresolved", plain_line)
 
     def test_ambiguous_entry_names_its_candidate_paths(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, self.repo)
         table_section = packet.split("# Reference table")[1].split("# Unresolved")[0]
         ambiguous_line = next(
             line for line in table_section.splitlines() if "`dup.md`" in line
@@ -1584,7 +1582,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIn("docs/two/dup.md", ambiguous_line)
 
     def test_unresolved_disposition_list_also_distinguishes_ambiguous(self):
-        packet = d.build_packet(self.spec_path)
+        packet = d.build_packet(self.spec_path, self.repo)
         unresolved_section = packet.split("# Unresolved references")[1].split(
             "# Required verdict fields"
         )[0]
@@ -1607,3 +1605,84 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepoRootTests(unittest.TestCase):
+    """Issue #125: installed as a plugin, forge_docreview.py resolved every
+    reference against the plugin's own checkout (``forge_common.REPO_ROOT``)
+    instead of the repository under review. ``--repo-root`` names the target
+    repository; absent, it is the current working directory — the same
+    default ``forge_lint.py`` and ``forge-run.py`` use. These run the real
+    CLI from a directory that is *not* the target repo, so the script's own
+    location and the target can never coincide the way they do in-repo."""
+
+    # Built at runtime so this file's own tracked bytes never contain the
+    # symbol — otherwise `git grep` against the forge checkout finds it here
+    # and the test passes for the wrong reason.
+    MARKER = "zq_target_only" + "_marker_fn"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = os.path.join(self.tmp, "target-repo")
+        self.elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(os.path.join(self.repo, "pkg"))
+        os.makedirs(self.elsewhere)
+        with open(os.path.join(self.repo, "pkg", "thing.py"), "w", encoding="utf-8") as f:
+            f.write("def {}():\n    pass\n".format(self.MARKER))
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        self.spec_path = os.path.join(self.elsewhere, "spec.md")
+        with open(self.spec_path, "w", encoding="utf-8") as f:
+            f.write("# Target\n\nUses `pkg/thing.py` and `{}`.\n".format(self.MARKER))
+        self.packet_path = os.path.join(self.elsewhere, "packet.md")
+
+    def _run(self, *args, cwd):
+        return subprocess.run(
+            [sys.executable, SCRIPT, *args], cwd=cwd, capture_output=True, text=True,
+        )
+
+    def _unresolved_section(self, packet):
+        start = packet.index("# Unresolved references requiring disposition")
+        end = packet.index("# Required verdict fields")
+        return packet[start:end]
+
+    def test_repo_root_flag_resolves_references_against_target_repo(self):
+        proc = self._run(
+            "--spec", self.spec_path, "--repo-root", self.repo, "--out", self.packet_path,
+            cwd=self.elsewhere,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(self.packet_path, encoding="utf-8") as f:
+            packet = f.read()
+        self.assertIn("(none)", self._unresolved_section(packet))
+        self.assertIn("`pkg/thing.py` (path, resolved", packet)
+        self.assertIn("`{}` (symbol, resolved".format(self.MARKER), packet)
+
+    def test_repo_root_defaults_to_current_directory(self):
+        proc = self._run(
+            "--spec", self.spec_path, "--out", self.packet_path, cwd=self.repo,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(self.packet_path, encoding="utf-8") as f:
+            packet = f.read()
+        self.assertIn("(none)", self._unresolved_section(packet))
+
+    def test_verdict_dependency_in_target_repo_is_accepted(self):
+        verdict_path = os.path.join(self.elsewhere, "verdict.json")
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "verdict": "pass",
+                "references": [],
+                "dependencies_read": [
+                    {"symbol": self.MARKER, "file": "pkg/thing.py", "behavior": "a stub"}
+                ],
+                "dependencies_waiver": None,
+                "replaced_system": {"applies": False, "guarantees": []},
+                "findings": [],
+            }, f)
+        proc = self._run(
+            "--spec", self.spec_path, "--verdict", verdict_path, "--repo-root", self.repo,
+            cwd=self.elsewhere,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
