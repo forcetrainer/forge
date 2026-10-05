@@ -550,8 +550,8 @@ review-packet.py <plan.md> <task-number> --base <git-ref> [--spec <spec.md>] [--
 
 ## Agent files
 
-Reviewer-facing conduct lives only in `agents/` — review is read-only and never
-modifies files; "can't verify from diff" is a valid verdict, reported as such;
+Reviewer-facing conduct lives only in `agents/` — review mutates only in a scratch
+copy, never the repository (`execution` spec: Reviewer write discipline); "can't verify from diff" is a valid verdict, reported as such;
 implementer rationales never suppress a finding. `forge-deep.md` and
 `forge-standard.md` each carry the final-integration-reviewer role for a plan whose
 highest tier is theirs; `forge-light.md` never reviews. Orchestrator-facing rules —
@@ -568,6 +568,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-05: Agent files — review mutates only in a scratch copy, per execution spec Reviewer write discipline (#127)
 2026-10-03: a Codex session is told how to start a spec or plan reviewer — one `codex exec` command at the standard tier, read-only, with standard input closed — and the planning skill's routing table gains a Codex column, both test-guarded against `TIER_MAP`. Until now the review steps said only "a fresh agent", the skills named Claude models alone, and Codex sessions dispatched reviewers as `sonnet`, then fell back to reviewing their own document. A session that cannot start a cold reviewer now stops; it never self-reviews
 2026-10-03: a plan declares its spec files in a `**Spec files:**` header and its tasks name sections as `[<spec id>] <heading>`, so one plan implements any number of specs and every tool reads them from the plan; `--spec` remains for legacy plans only. An exact heading match now wins over a prefix match. Until now a run took one `--spec`, and a plan amending two specs got coverage checking on one and silence on the other (#62)
 2026-10-03: plan review — a cold reviewer validates a plan against its spec before execution is offered: no plan element contradicts the spec, every requirement in a named section is covered by a plan promise, and plan lint runs before the packet and on the amended plan. Until now the only checks were the author's self-review and a lint rule satisfied by naming a section, so a spec obligation dropped at planning surfaced only at the final review (#97, #113)

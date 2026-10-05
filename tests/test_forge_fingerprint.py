@@ -278,5 +278,66 @@ class RestoreRefsTests(RepoCase):
         self.assertEqual(self.head(), fp["head"])
 
 
+class FreezeCliTests(RepoCase):
+    REF = "refs/forge/freeze/r/task-1"
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, CLI, *args], cwd=self.d, capture_output=True, text=True
+        )
+
+    def snapshot(self):
+        return self.run_cli("snapshot").stdout.strip()
+
+    def test_after_reviewer_commit_branch_returns_and_ref_holds_recorded_tree(self):
+        self.write("worker.txt", "work\n")
+        fp = self.snapshot()
+        rec = json.loads(fp)
+        self.write("reviewer.txt", "late\n")
+        _git(self.d, "add", "-A")
+        _git(self.d, "commit", "-m", "reviewer commit")
+        rogue = self.head()
+        p = self.run_cli("freeze", fp, "--ref", self.REF)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        sha = p.stdout.strip()
+        self.assertEqual(_git(self.d, "rev-parse", self.REF).strip(), sha)
+        self.assertEqual(_git(self.d, "rev-parse", sha + "^{tree}").strip(), rec["tree"])
+        self.assertEqual(_git(self.d, "rev-parse", sha + "^").strip(), rec["head"])
+        self.assertEqual(self.head(), rec["head"])
+        files = _git(self.d, "ls-tree", "-r", "--name-only", sha)
+        self.assertIn("worker.txt", files)
+        self.assertNotIn("reviewer.txt", files)
+        self.assertEqual(_git(self.d, "branch", "--contains", rogue).strip(), "")
+        self.assertEqual(self.status(), "")
+
+    def test_after_branch_switch_head_is_reattached(self):
+        self.write("worker.txt", "work\n")
+        fp = self.snapshot()
+        _git(self.d, "checkout", "-b", "other")
+        p = self.run_cli("freeze", fp, "--ref", self.REF)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(_git(self.d, "symbolic-ref", "HEAD").strip(), "refs/heads/main")
+        self.assertEqual(self.status(), "")
+
+    def test_prints_none_when_recorded_tree_equals_head_tree(self):
+        fp = self.snapshot()
+        self.write("reviewer.txt", "late\n")
+        p = self.run_cli("freeze", fp, "--ref", self.REF)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "none")
+        self.assertNotEqual(
+            subprocess.run(["git", "rev-parse", "-q", "--verify", self.REF],
+                           cwd=self.d, capture_output=True).returncode, 0)
+        self.assertEqual(self.status(), "")
+
+    def test_git_failure_exits_1_naming_the_command(self):
+        fp = self.snapshot()
+        bad = json.loads(fp)
+        bad["head"] = "0" * 40
+        p = self.run_cli("freeze", json.dumps(bad), "--ref", self.REF)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("git", p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

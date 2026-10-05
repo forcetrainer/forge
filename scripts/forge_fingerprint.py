@@ -11,6 +11,15 @@ Claude dispatch loop (the Codex runner calls forge_git in-process).
       printing one line per change when not; exit 1 on a git failure or a
       malformed fingerprint (the cause on stderr).
 
+  forge_fingerprint.py freeze <json-or-path> --ref <ref-name>
+      The reviewer-wrote halt path. Point the recorded branch back at the
+      recorded HEAD sha and re-attach HEAD (forge_git.restore_refs), then park
+      the recorded pre-review tree as a commit under --ref, parented on the
+      recorded HEAD (forge_git.freeze_tree), returning the working tree to the
+      checkpoint. Prints the freeze sha, or `none` when the recorded tree
+      equals the recorded HEAD's tree (nothing to freeze; the working tree is
+      still returned to HEAD). Exit 1 naming the git command on a failure.
+
 Imported helpers live in forge_git; stdlib only.
 """
 import argparse
@@ -55,6 +64,9 @@ def main(argv=None):
     sub.add_parser("snapshot", help="print the repository fingerprint as JSON")
     v = sub.add_parser("verify", help="compare the repository to a fingerprint")
     v.add_argument("fingerprint", help="fingerprint JSON, or a path to a file holding it")
+    f = sub.add_parser("freeze", help="restore refs and freeze the recorded tree")
+    f.add_argument("fingerprint", help="fingerprint JSON, or a path to a file holding it")
+    f.add_argument("--ref", required=True, help="ref name to park the freeze commit under")
     args = parser.parse_args(argv)
     cwd = os.getcwd()
     try:
@@ -62,6 +74,21 @@ def main(argv=None):
             print(json.dumps(forge_git.repo_fingerprint(cwd)))
             return 0
         before = _load_fingerprint(args.fingerprint)
+        if args.cmd == "freeze":
+            forge_git.restore_refs(cwd, before)
+            head_tree = forge_git._git(
+                cwd, ["rev-parse", before["head"] + "^{tree}"],
+                "git rev-parse for freeze",
+            ).strip()
+            if before["tree"] == head_tree:
+                forge_git._git(cwd, ["reset", "--hard", before["head"]],
+                               "git reset --hard for freeze")
+                forge_git._git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
+                print("none")
+            else:
+                print(forge_git.freeze_tree(
+                    cwd, before["tree"], args.ref, before["head"]))
+            return 0
         changes = forge_git.fingerprint_diff(
             cwd, before, forge_git.repo_fingerprint(cwd)
         )

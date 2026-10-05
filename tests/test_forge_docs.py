@@ -614,3 +614,75 @@ def test_both_review_steps_point_codex_at_the_document_review_section():
     planning = PLANNING_SKILL_PATH.read_text()
     plan_review = planning[planning.index("## Plan review"):planning.index("## Execution")]
     assert pointer in plan_review
+
+
+# --- Task 6: reviewer write discipline prose (mechanical greps, no behavior) ---
+
+AGENT_PATHS = [REPO_ROOT / "agents" / "forge-standard.md", REPO_ROOT / "agents" / "forge-deep.md"]
+
+
+def test_agent_contracts_carry_the_break_the_code_step_and_no_read_only_claim():
+    for path in AGENT_PATHS:
+        text = path.read_text()
+        for phrase in ("scratch copy", "git stash", "baseline", "one mutant",
+                       "restore", "attributable", "stays green"):
+            assert phrase in text, (path.name, phrase)
+        assert "never modify files" not in text, path.name
+
+
+def _claude_loop_bullet():
+    text = PLANNING_SKILL_PATH.read_text()
+    start = text.index("  - **Claude (Workflow tool available):**")
+    end = text.index("\n", start)
+    return text[start:end]
+
+
+def test_claude_loop_fingerprints_around_every_reviewer_spawn():
+    loop = _claude_loop_bullet()
+    snap = loop.index("forge_fingerprint.py snapshot")
+    ver = loop.index("forge_fingerprint.py verify")
+    assert snap < ver
+    assert "before the spawn" in loop[snap:ver]
+    for phrase in ("verdict returned, crash, timeout, and the validation retry's resume or fresh spawn alike",
+                   "no fallback spawn, no coverage retry, no commit, no further reviewer dispatch",
+                   "on task and final reviews alike",
+                   "is a **`reviewer-wrote` halt**",
+                   "Exit 1 (git failed, no fingerprint) is a **contract error**",
+                   "forge_fingerprint.py freeze <that file> --ref",
+                   "records the change lines `verify` printed in the halt"):
+        assert phrase in loop, phrase
+
+
+def test_claude_loop_hands_acceptance_results_by_json_path():
+    loop = _claude_loop_bullet()
+    for phrase in ("writes the acceptance command-clause records",
+                   "as JSON to the scratch directory",
+                   "the prompt names that path with the do-not-re-run assertion",
+                   "the obligation to check prose clauses itself"):
+        assert phrase in loop, phrase
+
+
+def test_close_out_gate_records_a_call_per_unverified_entry():
+    text = PLANNING_SKILL_PATH.read_text()
+    start = text.index("**Deferral rule:**")
+    gate = text[start:text.index("\n", start)]
+    for phrase in ("**and every open unverified entry**",
+                   "presented together, each with its reason",
+                   "a call is recorded per entry before filing or completion",
+                   "**accept** (with evidence), **defer** or **repair**",
+                   "halts as unverified before any doc-sync"):
+        assert phrase in gate, phrase
+
+
+def test_codex_runner_paragraph_does_not_claim_read_only_reviewers():
+    text = CODEX_EXECUTION_PATH.read_text()
+    runner = text[:text.index("## Document reviews on Codex")]
+    assert 'sandbox_mode="read-only"' not in runner
+    assert "CODEX_REVIEWER_SANDBOX_ARGS" not in runner
+    assert "reviewer-wrote" in runner
+    assert "accept:<evidence>" in runner
+    for phrase in ("`accept` requires non-empty evidence",
+                   "`repair` and `defer` reject evidence text",
+                   "`accept` against any halt that is not `unverified` is a contract error",
+                   "qualify it `finding:ID` or `coverage:ID`"):
+        assert phrase in runner, phrase
