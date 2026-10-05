@@ -103,6 +103,51 @@ over the work already done and rationalize its defects — not a stronger model.
 A reviewer finding an issue is not a failure and never triggers escalation; it is the
 loop working. Only a halt is a failure, and a halt is a human's call.
 
+### Reviewer write discipline
+
+A reviewer verifies by executing, not only by reading — and execution needs writes
+(test harnesses create temp files and sockets; breaking a behavior means editing it).
+The guarantee forge keeps is **the tree the orchestrator commits is the tree the worker
+left**, enforced by the orchestrator, not by a sandbox.
+
+- **No read-only sandbox.** Reviewer dispatches carry no sandbox override on either
+  harness. Codex reviewers run under the `codex exec` default (workspace-write, network
+  off); Claude reviewers run as any agent does.
+- **Mutate only in a scratch copy.** Every mutation a reviewer makes for verification
+  happens in a copy of the tree it makes itself in a temporary directory — never in the
+  repository. `git stash` in any form is forbidden. The reviewer chooses the copy
+  mechanism; it knows what its harness needs.
+- **Break the code.** For each behavior the task's tests claim to cover, the reviewer
+  mutates that behavior in the scratch copy and confirms a named test fails. Evidence
+  rules: the scratch baseline passes before any mutant; one behavior-specific mutant at
+  a time, baseline restored between mutants; the failure must be attributable to the
+  assertion that checks the behavior — a collection error, an import failure or an
+  unrelated failure is inconclusive, not a kill. A test that stays green on a broken
+  behavior is a finding; the mutation is its evidence. This is a standing review step
+  in the shared agent contracts, not a per-prompt addition.
+- **Never re-run acceptance against the worker's tree.** The orchestrator has already
+  run every acceptance **command clause** and hands the results to the reviewer
+  (Reviewer input, below); repeating them on the unchanged tree is waste. Running a
+  test command in the scratch copy — baseline or mutant — is verification, not a
+  re-run, even when that command also appears in Acceptance. Prose acceptance clauses
+  have no execution and remain the reviewer's checklist obligation.
+- **Unchanged-repository check.** The orchestrator fingerprints the repository before
+  each reviewer dispatch (cold or resumed, task or final) and again on every exit —
+  verdict returned, crash or timeout alike. The fingerprint covers the working tree
+  (tracked and untracked non-ignored content, captured via a temporary index), the
+  real index, HEAD and the current branch ref, so a reviewer that commits, stages,
+  checks out or moves a ref is caught as surely as one that edits a file. The
+  fingerprint covers exactly what a commit would record, no more: a change a commit
+  cannot record — bytes a clean filter normalizes away, a dirty working tree inside a
+  submodule — is outside it by design, because the guarantee is about the tree the
+  orchestrator commits. A mismatch is
+  a **contract error halt** naming the changed state; the verdict is discarded whatever
+  it said. The halt is non-recoverable: no restore, no retry, and it propagates through
+  the resume wrappers without a cold fallback or coverage retry — a reviewer that wrote
+  to the repository broke its contract, and silently recovering would hide that. One
+  helper, in `forge_git`, shared by both harnesses (the Claude loop calls its CLI, as it
+  calls `forge_dispose`); it fails as a packet-generation-class halt when git errors.
+
 ## Execution mode — inline or dispatch
 
 The **mode** is chosen first and is harness-independent; the harness only determines
@@ -268,8 +313,8 @@ named-evidence rule downgrades it to an improvement and a genuine defect is defe
 instead of halting. Observed 2026-09-06 — a reviewer correctly identified a
 `pre-existing` contract-breaking defect, had no citable id for it, emitted
 `contract_ref: null`, and the finding dispositioned to `defer` rather than reaching the
-human gate it was written for. In the final review the two sets coincide, since spec
-sections are coverage items there.
+human gate it was written for. In the final review, citable refs are every final coverage item plus every
+task's test-case id, so a seeded finding keeps the citation it was written with.
 
 **Citable ids are printed, never derived.** Every reviewer input — the Codex review
 packet and the Claude reviewer prompt alike; task and final, discovery and verification
@@ -766,9 +811,10 @@ them do.
 for later) — exempts that canonical finding id from the `scope-decision` halt for the
 remainder of the run, so a resumed run does not stop again on a question already
 answered. On Codex it arrives as `--resolve` on the resumed invocation (`codex-runner`
-spec); on Claude the human states it in the conversation. **Regression still applies:** a
-finding claimed fixed that silently did not take is caught by rule 3, so the exemption
-never becomes a blind spot.
+spec); on Claude the human states it in the conversation. **Regression is narrower than the
+exemption:** rule 3 catches a finding already recorded as resolved; an approved
+finding is exempted, not recorded as resolved, so approval alone does not verify that
+the human's repair took. The approver owns that verification.
 
 **The human is the bound.** Because no repair is dispatched autonomously, the
 fix-resume-find-another loop cannot run away on its own: every round trip costs a human
@@ -871,7 +917,9 @@ the orchestrator's role there. Per task, in order:
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
-   prompt so the reviewer can label `resolved`/`carried`/`new`.
+   prompt so the reviewer can label `resolved`/`carried`/`new`. Fingerprint the tree
+   before the dispatch and after it returns; a mismatch halts as a contract error
+   (Reviewer write discipline).
 5. **Decide** — `forge_dispose` over the verdict, base, state, attempt, acceptance result
    and autofix mode. Persist the returned state for the next attempt.
 6. **Act** on the decision: `rework` re-dispatches the implementer with the fix findings
@@ -887,13 +935,22 @@ holds it in its own, `forge_dispose` holds it in its process.
 input, so the diff is computed once, by the runner, against the right base; the packet
 is Codex-path-only machinery. A per-task packet pastes the spec sections the task
 names, as context; the final-review packet lists spec paths instead, and the reviewer
-reads those files itself (`codex-runner` spec: Runner). On **Claude** the reviewer is an agent that self-serves its own
+reads those files itself (`codex-runner` spec: Runner). A per-task **discovery** packet
+also carries an `## Acceptance results` section: one row per acceptance **command**
+clause — command, stated outcome, exit code, passed, output tail — opened by the
+assertion that these clauses have already been run and are not to be re-run on this
+tree, and that prose clauses remain the reviewer's to check. The runner passes its
+in-memory results. Verification and final-review packets carry no acceptance section. On **Claude** the reviewer is an agent that self-serves its own
 `git diff <prior commit>` **plus every untracked file** (`git ls-files --others
 --exclude-standard`, each rendered via `git diff --no-index /dev/null <path>` — plain
 `git diff` never sees a new file, and a task's new files are only staged by the commit
 *after* review, so a task built entirely from new files would otherwise review as an
 empty diff) and reads the spec itself. Thin-orchestrator is preserved on Claude by
 subagent self-service plus `forge_dispose` self-computing the diff, not by a packet.
+Acceptance results reach a Claude reviewer the same way everything else does: the
+orchestrator writes them as JSON — the same records — to the scratch directory and the
+reviewer prompt names that path with the do-not-re-run assertion; no packet, no pasted
+output.
 
 ### Serial by design
 
@@ -1154,6 +1211,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as a contract error on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 

@@ -94,8 +94,7 @@ forge-run.py --status --run-dir DIR
   brief list each declared spec's path and the sections the plan's tasks name; neither
   carries spec text. A per-task review packet is unchanged: it still pastes the sections
   that task's `**Spec:**` line names, as context, each labeled `[<spec id>] <heading>`
-  when the plan declares more than one spec file. A reviewer or doc-sync dispatch opens the files itself — reviewers
-  run read-only and can. The diff is still assembled into the packet. This holds for a
+  when the plan declares more than one spec file. A reviewer or doc-sync dispatch opens the files itself. The diff is still assembled into the packet. This holds for a
   one-spec plan too, and keeps packet size independent of how many specs a plan
   declares.
 - A plan with no spec — no header and no `--spec` — runs: its final-review packet lists
@@ -197,9 +196,24 @@ forge-run.py --status --run-dir DIR
   GPT-6 catalog entries declare a backend, so the feature flag alone is ignored.
   `multi_agent_v2` is disabled because it outranks `agents.enabled`. Verified live
   against codex-cli 0.154.0.
-- **Reviewers read-only** — task and final reviewer dispatches add
-  `-c sandbox_mode="read-only"` (`-c`, because `codex exec resume` has no `-s`). Writer
-  dispatches carry no sandbox override.
+- **No sandbox override on any dispatch** — reviewers included. Under the `codex exec`
+  default (workspace-write, network off) a reviewer can run a test harness and break
+  code in its scratch copy; the read-only sandbox denied every write, `/tmp` and
+  sockets included, so harnesses died before a test ran. The write guarantee is the
+  unchanged-repository check (`execution` spec: Reviewer write discipline), not the
+  sandbox: the runner takes `forge_git.repo_fingerprint(cwd)` before every reviewer
+  dispatch — task and final, cold and resume — and again on every exit, verdict, crash
+  or timeout, and a mismatch is a contract error halt whose reason names the changed
+  state; the verdict is discarded. The fingerprint is the working tree via the
+  temporary-index capture `freeze_attempt` already uses, factored out (tracked and
+  untracked non-ignored content, the real index untouched), plus the real index's
+  tree, HEAD and the current branch ref — what a commit would record, and nothing a
+  commit could not (`execution` spec: Reviewer write discipline). The mismatch and a fingerprint failure are
+  distinct from the `RuntimeError` the resume wrappers recover from: they propagate
+  through `execute_task` and `run_final_review_loop` with no cold fallback and no
+  coverage retry. `repo_fingerprint` also ships as a CLI (`snapshot` prints the
+  fingerprint; `verify <fingerprint>` exits non-zero naming the changed state) for the
+  Claude loop.
 - One definition in `forge_common` for each argument group — the single update point,
   as `TIER_MAP` is for models.
 - Other user config (provider, profile, instructions) still applies.
@@ -539,8 +553,27 @@ staleness is never an exit condition.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
-  resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
-  carry `sandbox_mode="read-only"`; the five writer shapes do not.
+  resume, final-review fixer cold and resume, doc-sync cold. No shape carries a
+  `sandbox_mode` override.
+- Unchanged-repository check: the fingerprint changes on a tracked edit, a new
+  untracked file, a tracked deletion, a `git add`, a commit and a branch switch, and is
+  stable across a write to an ignored path; it never touches the real index (`git
+  status` identical before and after). A reviewer stub that writes one file halts the
+  run with `contract-error` and that path in the halt reason, on each of the four
+  reviewer shapes, with no further reviewer dispatch and no commit; a resumed reviewer
+  stub that writes and then succeeds, crashes, or times out terminates the same way —
+  no cold fallback, no coverage retry; a stub that writes nothing passes through. The
+  CLI's `verify` exits non-zero and names the changed state.
+- Acceptance in the packet: a task discovery packet contains `## Acceptance results`
+  with the do-not-re-run assertion and the prose-clause note, and one row per command
+  clause carrying command, stated outcome, exit code, passed and output tail; a task
+  whose acceptance is prose-only renders the section with no rows; verification and
+  final-review packets contain no such section.
+- Agent contracts: `agents/forge-standard.md` and `agents/forge-deep.md` each state the
+  scratch-copy rule, forbid `git stash`, and carry the break-the-code step; neither
+  says "never modify files".
+- A workspace-write reviewer actually running a harness is deferred verification on a
+  Codex install, like stream texture below.
 - Spec sets: a plan declaring two spec files runs with no `--spec`, and every brief,
   checklist, packet and lint call receives both; `--spec` alongside a header is a
   contract error (exit 1) with no run dir; a legacy plan with `--spec` runs as before;
@@ -549,7 +582,7 @@ staleness is never an exit condition.
   contract error naming the difference; a legacy `run.json` with `"spec"` is read as a
   one-element set; the final-review packet and doc-sync brief contain spec paths and
   named sections and no spec text.
-- A read-only reviewer opening a spec file by path is deferred verification on a Codex
+- A reviewer opening a spec file by path is deferred verification on a Codex
   install, like stream texture below.
 - Live `codex exec` stream texture is deferred verification on a Codex install, not a
   unit test; the format contract is the phase headers plus verbatim passthrough, which
@@ -595,6 +628,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-05: reviewer dispatches drop `sandbox_mode="read-only"`; the write guarantee moves to `forge_git.repo_fingerprint` — working tree, index, HEAD, branch — taken before every reviewer dispatch and on every exit, a mismatch halting non-recoverably as a contract error; task discovery packets carry command-clause acceptance results (#127)
 2026-10-03: amended by [pipeline] — `TIER_MAP` gains one guarded mirror: the Codex column of the planning skill's routing table and the document-review command in `codex-execution.md`, kept equal by test, because spec and plan reviewers are started by the session and never pass through the runner. Verified live on codex-cli 0.160.0: the command runs with `gpt-6.1-sol`, and a read-only reviewer opens a file given only its path (`tests/live/check_codex_spec_by_path.sh` passes)
 2026-10-03: amended by [pipeline] — `--spec` is optional: the runner reads a plan's specs from its `**Spec files:**` header and passes that set to every brief, checklist, packet and lint call; `--spec` remains for legacy plans. The final-review packet and doc-sync brief carry spec paths, not spec text; `run.json` records `specs` as a list and a resumed run's spec set must match it (#62)
 2026-10-03: the Claude marketplace drops the `forge-beta` channel — it had tracked stable since 0.13.0; `forge` is the single sha-pinned entry
