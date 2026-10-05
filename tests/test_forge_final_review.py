@@ -323,6 +323,41 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
+    def _reraised_halt_msg(self):
+        # Line 99 is outside the reviewed diff -> pre-existing x
+        # contract-breaking, the scope-decision cell.
+        return _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            contract_ref="spec:Alpha section",
+            repair_task={
+                "title": "Fix the legacy guard", "files": ["f1.txt"],
+                "spec": "Alpha section", "tests": ["the guard holds"],
+                "acceptance": "`true`", "tier": "standard",
+            },
+        )
+
+    def test_unapproved_preexisting_finding_halts_scope_decision(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_approved_id_reraised_by_final_reviewer_passes(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"h1"}),
+        )
+        self.assertEqual(outcome.status, "passed")
+
     def test_reviewer_cold_at_discovery_resumed_at_verification(self):
         run_base = self._init_repo_with_task_work()
         plan = self._plan()

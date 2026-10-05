@@ -148,6 +148,7 @@ from forge_receipts import (  # noqa: F401
     write_final_review_receipt,
     write_receipt,
     write_run_json,
+    _read_approved,
     write_watch_launcher,
 )
 
@@ -1647,7 +1648,8 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None):
 def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
                           plan_path=None, seeded_findings=None,
-                          named_sections=None, halt_out=None):
+                          named_sections=None, halt_out=None,
+                          approved_ids=frozenset()):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1661,7 +1663,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     dispatch_final_review_fix call scoped to the outstanding ``fix`` findings — a
     fix-dispatch crash/timeout preempts the re-review as an implicit
     execution-failure finding, exactly like ``execute_task``. Halt carries the
-    drafted ``repair_task``. ``plan_path`` (optional; omitted -> no checklist
+    drafted ``repair_task``. ``approved_ids`` (the run-level human-approved
+    canonical finding ids) threads into every ``convergence_decision`` call, so
+    a final reviewer re-raising an answered scope finding does not halt the run
+    again. ``plan_path`` (optional; omitted -> no checklist
     generated, coverage validation skipped) is required to build the final
     contract checklist (the union of every task's Spec/acceptance clauses +
     integration items) — built once up front (the plan/spec don't change
@@ -1902,7 +1907,8 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # worker crash — never a spurious green->red regression (regression here
         # is only a resolved reviewer finding reappearing).
         action, halt_reason = convergence_decision(
-            findings, state, True, attempt, autofix_mode
+            findings, state, True, attempt, autofix_mode,
+            approved_ids=approved_ids,
         )
         advance_state(state, findings, True)
 
@@ -2349,6 +2355,16 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     halt_state = halt_record
     resolve = dict(resolve or {})
     approved = dict((halt_record or {}).get("approved") or {})
+    # Only the halt record's own approvals count as already-answered for
+    # `--resolve` validation: a run-level-only id has no outstanding question
+    # left to resolve, so naming it later (no halt record) must still raise.
+    record_approved = frozenset(approved)
+    # The run-level `approved` ids outlive the halt record (cleared when the
+    # reconciled task passes), so they are read back on every invocation and
+    # merged under the record's richer id -> resolution map. An id known only
+    # at run level has no resolution to restate; it stays an exemption.
+    for approved_id in _read_approved(run_dir):
+        approved.setdefault(approved_id, "approved")
     if resolve:
         # Canonical ids (carried_from else id) — the same identity
         # convergence_decision matches on, so a finding re-issued under a new
@@ -2366,7 +2382,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         known = {
             (f.get("carried_from") or f.get("id")): f for f in record_findings
         }
-        unknown = sorted(set(resolve) - set(known) - set(approved))
+        unknown = sorted(set(resolve) - set(known) - record_approved)
         if unknown:
             raise RuntimeError(
                 "--resolve names finding id(s) {} that no halt record in {} "
@@ -2463,7 +2479,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # along so a resume still reads it; started_at/pid feed the monitor.
     write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries, run_base,
                    started_at=run_started, pid=run_pid, threads=threads,
-                   seeded_findings=seeded_findings or None, halt=halt_state)
+                   seeded_findings=seeded_findings or None, halt=halt_state,
+                   deferrals=deferrals or None, approved=approved_ids or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -2496,7 +2513,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         summary.update({"status": "running", "started_at": task_started})
         write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
-                       seeded_findings=seeded_findings or None, halt=halt_state)
+                       seeded_findings=seeded_findings or None, halt=halt_state,
+                       deferrals=deferrals or None, approved=approved_ids or None)
         # Resume a frozen scope-decision halt on the task it names: replay the
         # paused attempt onto the fixed tree, then hand execute_task the
         # reconciliation context. `restore_freeze`'s own return value decides
@@ -2584,6 +2602,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 run_dir, plan_path, spec_paths, "running", task_summaries, run_base,
                 started_at=run_started, pid=run_pid, threads=threads,
                 seeded_findings=seeded_findings or None, halt=halt_state,
+                deferrals=deferrals or None, approved=approved_ids or None,
             )
         else:
             reviewer_wrote = halt_out.get("reviewer_wrote")
@@ -2669,7 +2688,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     if not escalated:
         write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
-                       seeded_findings=seeded_findings or None, halt=halt_state)
+                       seeded_findings=seeded_findings or None, halt=halt_state,
+                       deferrals=deferrals or None, approved=approved_ids or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -2688,7 +2708,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 codex_bin, cwd, final_tier,
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
                 seeded_findings=seeded_findings, named_sections=named_sections,
-                halt_out=final_halt_out,
+                halt_out=final_halt_out, approved_ids=approved_ids,
             )
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
@@ -2739,7 +2759,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    started_at=run_started, pid=run_pid,
                    deferrals=deferrals or None, autofix_mode=autofix_mode,
                    doc_sync=doc_sync_record, threads=threads,
-                   seeded_findings=seeded_findings or None, halt=halt_state)
+                   seeded_findings=seeded_findings or None, halt=halt_state,
+                   approved=approved_ids or None)
     return 0 if overall == "passed" else 2
 
 
@@ -2915,6 +2936,12 @@ def main(argv=None):
                     prior_halt = _read_halt(run_dir)
                 except RuntimeError:
                     prior_halt = None
+                # A malformed `approved` value must not discard the halt
+                # record read above, so the two reads are separate.
+                try:
+                    prior_approved = _read_approved(run_dir)
+                except RuntimeError:
+                    prior_approved = []
                 # The recorded spec set is preserved, not replaced by this
                 # invocation's: a spec-set mismatch is itself a contract error,
                 # and overwriting the record with the mismatching set would let
@@ -2937,7 +2964,7 @@ def main(argv=None):
                     _read_run_tasks(run_dir) or [], _read_base_commit(run_dir),
                     contract_error=str(e),
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
-                    halt=prior_halt,
+                    halt=prior_halt, approved=prior_approved or None,
                 )
             except OSError:
                 pass

@@ -154,6 +154,52 @@ class HaltRecordTests(unittest.TestCase):
         self.assertNotIn("halt", data)
 
 
+class ApprovedRunStateTests(unittest.TestCase):
+    def _dir(self):
+        d = tempfile.mkdtemp(prefix="forge-approved-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_approved_is_written_as_a_sorted_list_and_read_back(self):
+        d = self._dir()
+        forge_run.write_run_json(
+            d, "/p/plan.md", "/p/spec.md", "running", [], "base",
+            approved={"h2": "defer", "h1": "repair"},
+        )
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertEqual(json.load(f)["approved"], ["h1", "h2"])
+        self.assertEqual(forge_receipts._read_approved(d), ["h1", "h2"])
+
+    def test_approved_none_is_omitted_and_reads_empty(self):
+        d = self._dir()
+        forge_run.write_run_json(d, "/p/plan.md", "/p/spec.md", "running", [], "base")
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertNotIn("approved", json.load(f))
+        self.assertEqual(forge_receipts._read_approved(d), [])
+
+    def test_read_approved_empty_for_missing_run_json(self):
+        self.assertEqual(forge_receipts._read_approved(self._dir()), [])
+
+    def test_read_approved_raises_on_non_string_or_empty_element(self):
+        for bad in ([1], [""], ["h1", None]):
+            d = self._dir()
+            path = os.path.join(d, "run.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"approved": bad}, f)
+            with self.assertRaises(RuntimeError, msg=bad) as cm:
+                forge_receipts._read_approved(d)
+            self.assertIn(path, str(cm.exception))
+
+    def test_read_approved_raises_naming_file_on_malformed_value(self):
+        d = self._dir()
+        path = os.path.join(d, "run.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"approved": {"h1": "repair"}}, f)
+        with self.assertRaises(RuntimeError) as cm:
+            forge_receipts._read_approved(d)
+        self.assertIn(path, str(cm.exception))
+
+
 class WriteFinalReviewReceiptTests(unittest.TestCase):
     def test_carries_finding_classification(self):
         d = tempfile.mkdtemp(prefix="forge-final-review-")

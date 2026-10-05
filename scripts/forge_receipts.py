@@ -172,11 +172,41 @@ def _read_halt(run_dir):
     return data.get("halt")
 
 
+def _read_approved(run_dir):
+    """The run-level ``approved`` finding ids from an existing ``run.json``
+    (every human resolution so far), or ``[]`` when there is no run.json or
+    no such key. It lives beside, never inside, ``halt``: the halt record is
+    cleared when the reconciled task passes, and an approval must outlive
+    that. Unlike its tolerant siblings, a present-but-malformed value raises
+    naming the file (parsers-fail-loud) — silently dropping an approval would
+    halt the run again on a question the human already answered."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError("{}: malformed JSON ({})".format(path, e))
+    approved = data.get("approved")
+    if approved is None:
+        return []
+    if (not isinstance(approved, list)
+            or not all(isinstance(i, str) and i for i in approved)):
+        raise RuntimeError(
+            "{}: `approved` must be a list of finding id strings, got "
+            "{!r}".format(path, approved)
+        )
+    return list(approved)
+
+
 def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
-                   seeded_findings=None, halt=None):
+                   seeded_findings=None, halt=None, approved=None):
     """Write ``run.json``. ``spec_paths`` is the run's spec set (a list of
     paths, possibly empty), recorded absolute under ``specs``; None records
     nothing, for a caller that could not determine the set. The progress
@@ -209,7 +239,11 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
     resumed run's terminal write that passes ``halt=None`` after the human's
     fix has been folded in correctly clears the record rather than preserving
     it — each call rebuilds ``run.json`` from scratch, so omitting the key is
-    already sufficient to erase a prior invocation's value."""
+    already sufficient to erase a prior invocation's value. ``approved`` is the
+    run-level set of human-approved canonical finding ids (any iterable of ids,
+    e.g. the ``{id: resolution}`` map's keys), written as a sorted list and
+    omitted on None. Every write must pass it: each call rebuilds ``run.json``,
+    so a write that omitted it would drop approvals the human already gave."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -237,6 +271,8 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
     ):
         if value is not None:
             data[key] = value
+    if approved is not None:
+        data["approved"] = sorted(approved)
     path = os.path.join(run_dir, "run.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

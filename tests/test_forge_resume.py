@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from _forge_support import *  # noqa: F401,F403
 
@@ -704,3 +705,218 @@ class ReconcileResumeTests(unittest.TestCase):
         self.assertFalse(
             os.path.exists(os.path.join(self.run_dir, "task-1-attempt-1.json"))
         )
+
+
+PLAN_APPROVED = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `grep -q FROZENWORK f1.txt` passes
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+
+class ApprovalsOutliveHaltTests(unittest.TestCase):
+    """An approval is run-level state: it is written to run.json's own
+    `approved` field, survives the halt record being cleared, and is read back
+    on every later invocation without restating `--resolve` (Halt resolution /
+    Receipts and run state). End-to-end through the CLI."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-approved-resume-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.run_dir = os.path.join(self.d, "run")
+        self.log = os.path.join(self.d, "fakelog")
+        self.f1 = os.path.join(self.d, "f1.txt")
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        with open(self.f1, "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fake_codex.py\nfakelog*\nresponses.json\nrun/\n.forge/\n")
+        self.plan = os.path.join(self.d, "plan.md")
+        with open(self.plan, "w") as f:
+            f.write(PLAN_APPROVED)
+        for args in (("init",), ("config", "user.email", "t@example.com"),
+                     ("config", "user.name", "Test"), ("add", "-A"),
+                     ("commit", "-m", "base")):
+            subprocess.run(["git", *args], cwd=self.d, check=True,
+                           capture_output=True, text=True)
+
+    def _run(self, responses, extra_args=()):
+        for suffix in ("", ".prompts"):
+            if os.path.exists(self.log + suffix):
+                os.remove(self.log + suffix)
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.log + ".prompts"
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        env["FORGE_FAKE_RESPONSES"] = resp_path
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), self.plan, "--spec", self.spec,
+             "--run-dir", self.run_dir, "--codex-bin", self.fake, *extra_args],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+
+    def _run_json(self):
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            return json.load(f)
+
+    def _halt_msg(self, ref="Acceptance: `true`"):
+        return _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            contract_ref=ref,
+            repair_task={
+                "title": "Fix the legacy guard", "files": ["f1.txt"],
+                "spec": "Halt resolution", "tests": ["the guard holds"],
+                "acceptance": "`true`", "tier": "standard",
+            },
+        )
+
+    def _halt_then_resolve(self):
+        res = self._run([
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "FROZENWORK\n"},
+            {"exit": 0, "msg": self._halt_msg()},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_resolve_survives_the_halt_record_being_cleared(self):
+        self._halt_then_resolve()
+        run = self._run_json()
+        self.assertIsNone(run.get("halt"))
+        self.assertEqual(run["approved"], ["h1"])
+
+    def test_second_resume_keeps_first_approval_without_restating_resolve(self):
+        self._halt_then_resolve()
+        res = self._run([{"exit": 0, "msg": _pass_msg()}])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._run_json()["approved"], ["h1"])
+
+    # --- rework lap: every write site, final-review wiring, defer, validation
+
+    def _halt(self):
+        res = self._run([
+            {"exit": 0, "msg": "", "append_file": self.f1,
+             "append_text": "FROZENWORK\n"},
+            {"exit": 0, "msg": self._halt_msg()},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+
+    def _env_for(self, responses):
+        for suffix in ("", ".prompts"):
+            if os.path.exists(self.log + suffix):
+                os.remove(self.log + suffix)
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        patcher = mock.patch.dict(os.environ, {
+            "FORGE_FAKE_LOG": self.log, "FORGE_FAKE_RESPONSES": resp_path,
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _in_process(self, responses, **kw):
+        self._env_for(responses)
+        return forge_run.run_plan(
+            self.plan, self.spec, self.run_dir, self.fake, self.d, **kw)
+
+    def test_final_review_of_a_later_resume_honors_the_run_level_approval(self):
+        self._halt_then_resolve()
+        # The final reviewer re-raises the already-approved pre-existing
+        # finding; only the runner threading approved_ids into the final
+        # review's convergence lets that pass instead of halting again.
+        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1")}])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_every_run_json_write_of_a_resumed_run_carries_approved(self):
+        self._halt()
+        real = forge_run.write_run_json
+        seen = []
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("approved"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(forge_run, "write_run_json", side_effect=spy):
+            rc = self._in_process(
+                [{"exit": 0, "msg": ""},
+                 {"exit": 0, "msg": self._halt_msg()},
+                 {"exit": 0, "msg": _pass_msg()}],
+                resolve={"h1": "repair"})
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(len(seen), 4)
+        for approved in seen:
+            self.assertEqual(sorted(approved or []), ["h1"], seen)
+
+    def test_contract_error_write_keeps_run_level_approved_and_halt(self):
+        self._halt()
+        path = os.path.join(self.run_dir, "run.json")
+        run = self._run_json()
+        run["approved"] = ["h0"]
+        with open(path, "w") as f:
+            json.dump(run, f)
+        res = self._run([], extra_args=["--resolve", "nope9=repair"])
+        self.assertEqual(res.returncode, 1, res.stderr)
+        after = self._run_json()
+        self.assertEqual(after["approved"], ["h0"])
+        self.assertEqual(after["halt"]["task"], 1)
+
+    def test_malformed_approved_never_discards_the_halt_record(self):
+        self._halt()
+        path = os.path.join(self.run_dir, "run.json")
+        run = self._run_json()
+        halt = run["halt"]
+        run["approved"] = {"h1": "repair"}
+        with open(path, "w") as f:
+            json.dump(run, f)
+        res = self._run([], extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn(path, res.stderr)
+        self.assertEqual(self._run_json().get("halt"), halt)
+
+    def test_defer_resolution_survives_a_kill_after_the_halt_clears(self):
+        self._halt()
+        with mock.patch.object(
+            forge_run, "run_final_review_loop",
+            side_effect=RuntimeError("simulated kill"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._in_process(
+                    [{"exit": 0, "msg": ""},
+                     {"exit": 0, "msg": self._halt_msg()}],
+                    resolve={"h1": "defer"})
+        run = self._run_json()
+        self.assertIsNone(run.get("halt"))
+        self.assertEqual(run["approved"], ["h1"])
+        self.assertEqual(
+            [d.get("id") for d in run.get("deferrals") or []], ["h1"])
+        # The next resume neither re-halts nor loses the deferral.
+        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1")}])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(
+            [d.get("id") for d in self._run_json().get("deferrals") or []],
+            ["h1"])
+
+    def test_resolve_of_a_run_level_only_id_still_errors_without_a_halt(self):
+        self._halt_then_resolve()
+        res = self._run([], extra_args=["--resolve", "h1=defer"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("h1", res.stderr)
+        self.assertIn("no halt record", res.stderr)
+        self.assertEqual(self._run_json()["approved"], ["h1"])
