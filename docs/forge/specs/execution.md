@@ -142,12 +142,30 @@ left**, enforced by the orchestrator, not by a sandbox.
   cannot record — bytes a clean filter normalizes away, a dirty working tree inside a
   submodule — is outside it by design, because the guarantee is about the tree the
   orchestrator commits. A mismatch is
-  a **contract error halt** naming the changed state; the verdict is discarded whatever
-  it said. The halt is non-recoverable: no restore, no retry, and it propagates through
-  the resume wrappers without a cold fallback or coverage retry — a reviewer that wrote
-  to the repository broke its contract, and silently recovering would hide that. One
+  a halt of class **`reviewer-wrote`** — a task escalation on a task review, a stage
+  escalation on the final review — naming the changed state; the verdict is discarded
+  whatever it said. Like every halt class it **freezes** — but what it parks under the task's or
+  stage's ref is the **pre-review capture**: the tree as it stood when the review began,
+  which is exactly the worker's work and nothing of the reviewer's. The fingerprint
+  already holds that tree, so the freeze is a commit of it; the reviewer's changes are
+  recorded in the halt record as the fingerprint diff and then discarded from the
+  working tree, which returns to the checkpoint. Reconcile therefore restores the
+  worker's attempt alone, never re-injecting a reviewer write as task work, and the
+  class-aware brief names the reviewer write as the cause of the halt. Because the
+  fingerprint also records HEAD and the branch, the halt path restores them too — the
+  branch ref is pointed back at the recorded HEAD sha and HEAD re-attached to that
+  branch — the one place the orchestrator ever moves a ref, so a reviewer-made commit
+  or branch switch cannot survive into the resumed run; such a commit's sha is named in
+  the halt record and otherwise left unreachable, never deleted. It is not a contract error (which writes no receipt and
+  freezes nothing). The freeze, the ref restore and the tree's return to the checkpoint
+  *are* the halt path; what the halt forbids is continuing: no retry, no resume within
+  the same invocation, and it propagates through the resume wrappers without a cold
+  fallback or coverage retry — a reviewer that wrote to the repository broke its
+  contract, and silently carrying on would hide that. Reconcile happens only on a later
+  invocation, as for every halt. A fingerprint that cannot be taken (git failed) is the
+  packet-generation-class contract error it always was. One
   helper, in `forge_git`, shared by both harnesses (the Claude loop calls its CLI, as it
-  calls `forge_dispose`); it fails as a packet-generation-class halt when git errors.
+  calls `forge_dispose`).
 
 ## Execution mode — inline or dispatch
 
@@ -759,8 +777,12 @@ Net progress each round is **not** required — a round may resolve one finding 
 surface another — and converging work runs to completion. The backstop is a seatbelt
 against slow oscillation, not the primary stop. The runner owns the authoritative
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
-still caught. Halt reasons are exactly `scope-decision`, `regression`, `stuck`,
-`backstop`, `gate`.
+still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
+`backstop`, `gate` — `forge_common.HALT_REASONS`, what `convergence_decision` can
+return. Two further halt **classes** are raised outside it and never appear in
+`decision.json`: `reviewer-wrote` (Reviewer write discipline) and `unverified` (The
+disposition matrix). The receipt and halt-record `halt_reason` field accepts all
+seven.
 
 ## Halt resolution — freeze, resolve, reconcile
 
@@ -914,6 +936,9 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
 {
   "action": "pass" | "rework" | "halt",
   "halt_reason": "scope-decision" | "regression" | "stuck" | "backstop" | "gate" | null,
+                 // convergence's five; `reviewer-wrote` and `unverified` are halt classes
+                 // raised outside `convergence_decision` and appear only on receipts and
+                 // the halt record, never in decision.json
   "findings": {
     "fix":    [ {"id": "…", "summary": "…", "file": "…", "lines": "…"} ],
     "defer":  [ {"…": "…", "why_harmless": "reviewer improvement rationale"} ],
@@ -957,9 +982,9 @@ the orchestrator's role there. Per task, in order:
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
-   prompt so the reviewer can label `resolved`/`carried`/`new`. Fingerprint the tree
-   before the dispatch and after it returns; a mismatch halts as a contract error
-   (Reviewer write discipline).
+   prompt so the reviewer can label `resolved`/`carried`/`new`. Fingerprint the repository
+   before the dispatch and after it returns; a mismatch halts as a `reviewer-wrote`
+   escalation — the attempt frozen, the verdict discarded (Reviewer write discipline).
 5. **Decide** — `forge_dispose` over the verdict, base, state, attempt, acceptance result
    and autofix mode. Persist the returned state for the next attempt.
 6. **Act** on the decision: `rework` re-dispatches the implementer with the fix findings
@@ -1266,7 +1291,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
-2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as a contract error on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
+2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as `reviewer-wrote` (a freezing escalation, not a contract error) on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 

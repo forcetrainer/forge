@@ -79,6 +79,7 @@ ad-hoc review. No forge machinery uses them.
 ```
 forge-run.py <plan.md> [--spec <spec.md>] [--effort N=LEVEL ...] [--timeout SECONDS]
              [--autofix auto|gate] [--run-dir DIR] [--codex-bin PATH]
+             [--resolve ID=repair|defer|accept:EVIDENCE ...]
 forge-run.py --status --run-dir DIR
 ```
 
@@ -203,15 +204,23 @@ forge-run.py --status --run-dir DIR
   unchanged-repository check (`execution` spec: Reviewer write discipline), not the
   sandbox: the runner takes `forge_git.repo_fingerprint(cwd)` before every reviewer
   dispatch — task and final, cold and resume — and again on every exit, verdict, crash
-  or timeout, and a mismatch is a contract error halt whose reason names the changed
-  state; the verdict is discarded. The fingerprint is the working tree via the
+  or timeout, and a mismatch is a `reviewer-wrote` halt — task escalation on a task review,
+  stage escalation on the final review, exit 2 — whose reason names the changed state;
+  the verdict is discarded. The freeze is a commit of the **pre-review capture** (the
+  worker's work exactly, which the fingerprint already holds — `forge_git.freeze_tree`,
+  parented on the fingerprint's recorded HEAD), the reviewer's changes go into the halt
+  record as the fingerprint diff, and the working tree, HEAD and branch return to the
+  recorded checkpoint: the branch ref is reset to the recorded HEAD sha and HEAD
+  re-attached to it, the one place the runner moves a ref; a reviewer-made commit is
+  named by sha in the halt record and left unreachable, never deleted. The fingerprint is the working tree via the
   temporary-index capture `freeze_attempt` already uses, factored out (tracked and
   untracked non-ignored content, the real index untouched), plus the real index's
   tree, HEAD and the current branch ref — what a commit would record, and nothing a
   commit could not (`execution` spec: Reviewer write discipline). The mismatch and a fingerprint failure are
   distinct from the `RuntimeError` the resume wrappers recover from: they propagate
   through `execute_task` and `run_final_review_loop` with no cold fallback and no
-  coverage retry. `repo_fingerprint` also ships as a CLI (`snapshot` prints the
+  coverage retry; the mismatch is handled as a halt, the fingerprint failure as a
+  contract error (exit 1). `repo_fingerprint` also ships as a CLI (`snapshot` prints the
   fingerprint; `verify <fingerprint>` exits non-zero naming the changed state) for the
   Claude loop.
 - One definition in `forge_common` for each argument group — the single update point,
@@ -343,7 +352,7 @@ record names a task or a stage), contract error is exit 1.
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
   orchestrator relays the receipt's contents to the user. Which conditions escalate is
-  the `execution` spec's halt taxonomy. Every halt class freezes the task's in-progress
+  the `execution` spec's halt taxonomy, `reviewer-wrote` among them (Worker isolation). Every halt class freezes the task's in-progress
   attempt so the run resumes rather than restarts; `--resolve` applies only to the two
   classes that pose a question needing an answer — `scope-decision`, and the final
   review's `unverified` stage halt below.
@@ -514,7 +523,10 @@ bottom banner is painted; the semantic fill carries the state before a word is p
 - Halted (`escalated` / `escalated-final-review` / `escalated-doc-sync`): red-orange,
   two lines — `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
   from the receipt (from `final-review.json` for a final-review halt) ·
-  `press q to exit`.
+  `press q to exit`. An `unverified` halt writes `escalated-final-review` and renders
+  `■ HALTED — final review: N unverified entries` plus the first open entry's id and
+  reason from `run.json`'s `unverified`, not from a receipt finding; `--status` prints
+  the same line and every open entry.
 - Contract error: red-orange — `■ CONTRACT ERROR — <reason>` · `press q to exit`. A
   task left mid-flight by a contract error renders `interrupted`, not a frozen spinner.
 - Banner ≤ 2 lines; a gentle pulse on the halt/error fill is allowed, respecting
@@ -573,10 +585,15 @@ staleness is never an exit condition.
   untracked file, a tracked deletion, a `git add`, a commit and a branch switch, and is
   stable across a write to an ignored path; it never touches the real index (`git
   status` identical before and after). A reviewer stub that writes one file halts the
-  run with `contract-error` and that path in the halt reason, on each of the four
-  reviewer shapes, with no further reviewer dispatch and no commit; a resumed reviewer
-  stub that writes and then succeeds, crashes, or times out terminates the same way —
-  no cold fallback, no coverage retry; a stub that writes nothing passes through. The
+  run with halt class `reviewer-wrote` (exit 2) and that path in the halt reason, on
+  each of the four reviewer shapes, with no further reviewer dispatch and no commit, the
+  pre-review capture frozen under the task or stage ref (the stray file absent from the
+  freeze commit and named in the halt record) and the tree clean; a
+  resumed reviewer stub that writes and then succeeds, crashes, or times out terminates
+  the same way — no cold fallback, no coverage retry; a stub that commits, and one that
+  switches branch, each halt `reviewer-wrote` with HEAD and the branch restored to the
+  recorded sha and the stub's commit sha in the halt record; a stub that writes nothing
+  passes through; a fingerprint git failure is a contract error (exit 1). The
   CLI's `verify` exits non-zero and names the changed state.
 - Acceptance in the packet: a task discovery packet contains `## Acceptance results`
   with the do-not-re-run assertion and the prose-clause note, and one row per command
@@ -642,6 +659,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
 2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)
 2026-10-05: reviewer dispatches drop `sandbox_mode="read-only"`; the write guarantee moves to `forge_git.repo_fingerprint` — working tree, index, HEAD, branch — taken before every reviewer dispatch and on every exit, a mismatch halting non-recoverably as a contract error; task discovery packets carry command-clause acceptance results (#127)
 2026-10-03: amended by [pipeline] — `TIER_MAP` gains one guarded mirror: the Codex column of the planning skill's routing table and the document-review command in `codex-execution.md`, kept equal by test, because spec and plan reviewers are started by the session and never pass through the runner. Verified live on codex-cli 0.160.0: the command runs with `gpt-6.1-sol`, and a read-only reviewer opens a file given only its path (`tests/live/check_codex_spec_by_path.sh` passes)

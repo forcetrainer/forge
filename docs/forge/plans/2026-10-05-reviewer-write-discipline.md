@@ -32,6 +32,8 @@
 - `forge_git.tree_diff(cwd, old_tree, new_tree) -> str` — `git diff <old_tree> <new_tree>` text.
 - `class forge_git.RepositoryChangedError(Exception)` — carries `changes: list[str]`.
 - `class forge_git.FingerprintError(Exception)` — raised when any git call inside `capture_tree` or `repo_fingerprint` fails, naming the command.
+- `forge_git.freeze_tree(cwd, tree, ref_name, parent) -> str` — commits an already-captured tree with `parent` as its parent under `ref_name`, then resets the working tree to `parent` plus `git clean -fd`, the tail of `freeze_attempt` factored out; `freeze_attempt` becomes `capture_tree` followed by it with `parent` = HEAD.
+- `forge_git.restore_refs(cwd, fingerprint) -> None` — points the recorded branch at the recorded HEAD sha and re-attaches HEAD to it (detached when `branch` is `null`); the only ref-moving call outside `freeze_tree`.
 - `forge_git.repair_delta(cwd, snapshot_tree) -> str` — `tree_diff(cwd, snapshot_tree, capture_tree(cwd))`; the only delta the task and final verification packets use.
 - `forge_git.snapshot_tree(cwd) -> str | None` — now returns `capture_tree(cwd)`; `None` outside a git repo.
 - `forge_fingerprint.py snapshot` prints the fingerprint as one JSON object; `forge_fingerprint.py verify <json-or-path>` exits 0 when equal, exits 2 printing each change line when not, exits 1 on a git failure.
@@ -45,6 +47,8 @@
 - `verify` exits 2 and prints the changed path after an edit, exits 0 when unchanged
 - `snapshot_tree` captures an untracked file so `tree_diff` against a later capture shows its edit as a hunk, its deletion as a deletion, and an unchanged formerly-untracked file as no hunk
 - `freeze_attempt` behavior is unchanged: a task of only new files freezes non-empty
+- `freeze_tree` given a captured tree parks exactly that content under the ref and leaves the tree clean, with a file created after the capture absent from the freeze commit
+- `restore_refs` after a commit on the branch moves the branch back to the recorded sha and leaves the commit unreachable but present; after a branch switch it re-attaches HEAD to the recorded branch
 - a git failure inside `repo_fingerprint` raises `FingerprintError`, not `RuntimeError`
 - a task verification packet and a final verification packet built after a repair that edited one formerly-untracked file, deleted another, added a third and left a fourth unchanged contain exactly one hunk each for the edit, the deletion and the addition, and nothing for the unchanged file
 
@@ -88,7 +92,7 @@
 
 **Files:**
 - Modify: `scripts/forge_common.py` (remove `CODEX_REVIEWER_SANDBOX_ARGS`)
-- Modify: `scripts/forge-run.py` (reviewer argv carries no sandbox override; fingerprint before and after every reviewer dispatch; `RepositoryChangedError` halts as `contract-error`; `_packet_for` passes acceptance results)
+- Modify: `scripts/forge-run.py` (reviewer argv carries no sandbox override; fingerprint before and after every reviewer dispatch; `RepositoryChangedError` halts as `reviewer-wrote` with a freeze; `FingerprintError` is a contract error; `_packet_for` passes acceptance results)
 - Modify: `tests/test_forge_isolation_flags.py`
 - Modify: `tests/test_forge_review.py`
 - Modify: `tests/test_forge_final_review.py`
@@ -99,17 +103,20 @@
 **Interface:**
 - `forge-run._dispatch_review_call(...)` — takes `repo_fingerprint` before spawning and compares on every exit (verdict, non-zero exit, timeout); raises `RepositoryChangedError` on a mismatch before any other failure is reported, and lets `FingerprintError` propagate; `forge_common.CODEX_REVIEWER_SANDBOX_ARGS` no longer exists.
 - `forge-run.dispatch_final_review(...)` — same wrap.
-- The `except RuntimeError` resume fallbacks and the coverage-retry path in `execute_task` and `run_final_review_loop` leave `RepositoryChangedError` and `FingerprintError` uncaught; `run_plan` maps either to `contract-error` with the change lines or the failed git command in the reason, with no further reviewer dispatch and no commit.
+- The `except RuntimeError` resume fallbacks and the coverage-retry path in `execute_task` and `run_final_review_loop` leave `RepositoryChangedError` and `FingerprintError` uncaught. `execute_task` turns `RepositoryChangedError` into an `escalated` receipt with `halt_reason: "reviewer-wrote"` and the change lines in the halt record, freezing the pre-review capture's tree via `freeze_tree` under the task ref; `run_final_review_loop` returns `escalated` with the same class and the stage freeze uses `freeze_tree` on the pre-review capture the same way. `FingerprintError` reaches `run_plan` as a contract error naming the failed git command. Neither path dispatches another reviewer or commits.
 - `_packet_for(..., acceptance_results=None)` — forwards to `build_packet`; `execute_task` passes the attempt's acceptance results on discovery and `None` on verification.
 
 **Tests:**
 - no recorded `codex exec` argv carries `sandbox_mode`, on all nine shapes
-- a task reviewer stub that writes one file halts the run as `contract-error` naming that path, with no second reviewer dispatch and no task commit, on cold and on resume
-- a final reviewer stub that writes one file halts the same way, cold and resume
-- a resumed task reviewer stub that writes then exits non-zero halts as `contract-error`, not a resume fallback
-- a resumed task reviewer stub that writes then times out halts as `contract-error`
+- a task reviewer stub that writes one file halts the run with exit 2, receipt `escalated`, `halt_reason: "reviewer-wrote"` naming that path, the pre-review capture frozen under the task ref with the stray file absent from the freeze commit and named in the halt record, the tree clean, no second reviewer dispatch and no task commit, on cold and on resume
+- a final reviewer stub that writes one file halts the same way as a `final-review` stage halt, cold and resume
+- a resumed task reviewer stub that writes then exits non-zero halts as `reviewer-wrote`, not a resume fallback
+- a resumed task reviewer stub that writes then times out halts as `reviewer-wrote`
+- a task reviewer stub that commits halts as `reviewer-wrote` with the branch and HEAD restored to the recorded sha and the stub's commit sha in the halt record
+- a task reviewer stub that switches branch halts as `reviewer-wrote` with HEAD re-attached to the recorded branch
+- a `reviewer-wrote` halt resumes: the next invocation reconciles the frozen worker attempt as any task halt does, and the class-aware brief names the reviewer write as the cause
 - a reviewer stub that writes nothing passes through unchanged
-- a `FingerprintError` injected before a cold task reviewer dispatch, and one injected on its exit, each halt as `contract-error` with no fallback dispatch, no coverage retry and no commit
+- a `FingerprintError` injected before a cold task reviewer dispatch, and one injected on its exit, each end the run as `contract-error` (exit 1) naming the git command, with no fallback dispatch, no coverage retry and no commit
 - the same two injections on a resumed task reviewer and on a cold and resumed final reviewer halt the same way
 - the task discovery packet the runner writes contains `## Acceptance results` with that task's clauses; the verification packet does not
 
@@ -159,8 +166,10 @@
 - Modify: `tests/test_forge_resume.py`
 - Modify: `tests/test_forge_status.py`
 - Modify: `tests/test_forge_receipts.py`
+- Modify: `scripts/forge-monitor.py` (unverified banner)
+- Modify: `tests/test_forge_monitor.py`
 
-**Spec:** [execution] The disposition matrix, [execution] Receipts and run state, [execution] Deferral handling, [execution] Halt resolution, [codex-runner] Halt / escalation, [codex-runner] Resume
+**Spec:** [execution] The disposition matrix, [execution] Receipts and run state, [execution] Deferral handling, [execution] Halt resolution, [codex-runner] Halt / escalation, [codex-runner] Resume, [codex-runner] Terminal-state banner, [codex-runner] Runner
 
 **Interface:**
 - `forge_receipts.write_run_json(..., unverified=None)` — list of entries `{kind: "finding"|"coverage", id, reason, call: null|{verb: "accept"|"defer"|"repair", evidence: str|null}}`; omitted on `None`.
@@ -170,7 +179,8 @@
 - After a final-review pass, when any entry's `call` is `null`: `overall = "escalated-final-review"`, `halt_reason: "unverified"`, stage `final-review`, frozen via the existing stage-freeze helper, outstanding = the open entries with reasons, doc-sync skipped.
 - `--resolve <id>=accept:<evidence>|defer|repair` — parsed by the existing `--resolve` parser extended for the `accept:` form; on an `unverified` halt the id must name an entry (absent raises naming it); `accept` requires non-empty evidence and is a contract error on a `scope-decision` id; `defer` additionally stages a deferral from the entry; `repair` and `defer` carrying evidence text are a contract error. The call is written onto the entry before the final review re-runs.
 - A resumed run after an `unverified` halt re-runs the final review from scratch and halts again only on an entry whose `call` is still `null`; with none open it continues to doc-sync.
-- `--status` prints `HALTED — unverified` and one line per open entry with kind, id and reason.
+- `--status` prints `HALTED — final review: N unverified entries` and one line per open entry with kind, id and reason; `run.json` status is `escalated-final-review`.
+- `scripts/forge-monitor.py` renders the same banner line plus the first open entry from run.json's `unverified`.
 
 **Tests:**
 - a final review whose verdict carries an unverifiable coverage entry and no findings halts as `unverified` with that entry's id and reason, frozen under the stage ref helper, doc-sync not dispatched
@@ -182,10 +192,11 @@
 - a resume that resolves one of two open entries halts again naming only the other
 - `--resolve f1=accept` with empty evidence, `--resolve f1=repair:text`, and `accept` on a `scope-decision` id are each a contract error naming the form
 - the final-review receipt lists every unverified entry with kind, id and reason
-- `--status` on the halted run prints `HALTED — unverified` and each open entry
+- `--status` on the halted run prints `HALTED — final review: 2 unverified entries` and each open entry
+- the monitor banner on that run dir reads `HALTED — final review: 2 unverified entries` with the first entry's id and reason
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_final_review tests.test_forge_resume tests.test_forge_status tests.test_forge_receipts` passes
+- `python3 -m unittest tests.test_forge_final_review tests.test_forge_resume tests.test_forge_status tests.test_forge_receipts tests.test_forge_monitor` passes
 
 **Tier:** standard
 
@@ -216,7 +227,7 @@
 **Acceptance:**
 - `python3 -m unittest tests.test_forge_docs` passes
 - `grep -c 'never modify files' agents/forge-standard.md agents/forge-deep.md` prints `0`
-- The Claude dispatch loop in `skills/planning/SKILL.md` states that a `verify` mismatch or failure is a halt with no fallback spawn, no coverage retry and no commit, on task and final reviews alike.
+- The Claude dispatch loop in `skills/planning/SKILL.md` states that a `verify` mismatch is a `reviewer-wrote` halt with no fallback spawn, no coverage retry and no commit, on task and final reviews alike, and that a `verify` failure is a contract error.
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that the orchestrator writes the acceptance result records as JSON to the scratch directory and names that path in the reviewer prompt with the do-not-re-run assertion.
 - The Claude close-out gate in `skills/planning/SKILL.md` presents staged deferrals and open unverified entries together, each with its reason, and records a call per entry before filing or completion.
 - The document-review command in `skills/planning/codex-execution.md` under Document reviews on Codex keeps its read-only flag; this task does not change it.
