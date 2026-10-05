@@ -567,7 +567,8 @@ def _retry_defects_path(defects, run_dir, label):
     return path
 
 
-def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
+def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
+                     classify_ctx=None):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
     empty-checklist skip case, Contract checklist spec — OR when
@@ -602,12 +603,21 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
     function itself is the presence gate: it returns no defects when
     ``citable`` is falsy, exactly like ``validate_coverage``'s
     empty-checklist skip, so calling it unconditionally here is safe on a
-    checklist-less task too."""
+    checklist-less task too.
+
+    ``validate_repair_tasks`` is checked on both kinds as well: a finding the
+    runner will classify pre-existing x contract-breaking must carry its
+    ``repair_task``. ``classify_ctx`` is a callable returning the keyword
+    arguments ``classify_findings`` will be given (``diff_text``, ``run_diff``,
+    ``carried_ids``), so the rule reads the runner-derived provenance rather
+    than the reviewer's claim; without it the emitted provenance is used."""
     defects = (
         list(forge_dispose.validate_coverage(verdict, checklist, citable))
         if checklist and review_kind == "discovery" else []
     )
     defects += forge_dispose.validate_locations(verdict)
+    ctx = classify_ctx() if classify_ctx is not None else {}
+    defects += forge_dispose.validate_repair_tasks(verdict, **ctx)
     defects += forge_dispose.validate_finding_ids(verdict)
     defects += forge_dispose.validate_contract_refs(
         verdict, citable if citable is not None else checklist
@@ -617,7 +627,7 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None):
 
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
                            review_kind="discovery", citable=None,
-                           arm_retry_resume=None):
+                           arm_retry_resume=None, classify_ctx=None):
     """Dispatch a review and validate its verdict against ``checklist``
     (coverage, discovery only), its findings' locations (both kinds), and its
     findings' ``contract_ref`` membership against ``citable`` (both kinds;
@@ -637,7 +647,9 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
     Without it, the retry is a cold dispatch of the coverage-retry packet.
     Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
-    defects = _verdict_defects(verdict, checklist, review_kind, citable)
+    defects = _verdict_defects(
+        verdict, checklist, review_kind, citable, classify_ctx
+    )
     if not defects:
         return verdict, False
     retry_path = _coverage_retry_packet_path(packet_path, defects, run_dir, label)
@@ -648,7 +660,9 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
         verdict = dispatch_call(
             _retry_defects_path(defects, run_dir, label), fallback_path=retry_path
         )
-    defects = _verdict_defects(verdict, checklist, review_kind, citable)
+    defects = _verdict_defects(
+        verdict, checklist, review_kind, citable, classify_ctx
+    )
     if defects:
         raise RuntimeError(
             "reviewer verdict still invalid after one retry: {}".format(
@@ -1250,6 +1264,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     packet_path, checklist, run_dir, "task-{}".format(task.number),
                     review_kind=packet_review_kind, citable=citable,
                     arm_retry_resume=_arm_reviewer_retry_resume,
+                    classify_ctx=lambda: {
+                        "diff_text": _git_diff(cwd, review_base),
+                        "run_diff": _git_diff(cwd, run_base) if run_base else None,
+                        "carried_ids": state.carried_ids,
+                    },
                 )
             except forge_git.RepositoryChangedError as e:
                 reviewer_wrote = e
@@ -1948,6 +1967,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     packet_path, packet_checklist, run_dir, "final",
                     review_kind=packet_review_kind, citable=final_citable,
                     arm_retry_resume=_arm_final_reviewer_retry_resume,
+                    classify_ctx=lambda: {
+                        "diff_text": diff, "run_diff": diff,
+                        "carried_ids": state.carried_ids,
+                    },
                 )
             except forge_git.RepositoryChangedError as e:
                 # Verdict discarded; the stage freezes the pre-review capture.

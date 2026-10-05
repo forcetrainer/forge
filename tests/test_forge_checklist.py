@@ -592,6 +592,16 @@ class FinalCitableRefsTests(unittest.TestCase):
              fc.build_final_checklist(plan_path, self.spec_path)},
         )
 
+    def test_equals_final_checklist_ids_plus_every_task_test_case_id(self):
+        # Contract checklist spec: in the final review, citable refs are every
+        # final coverage item plus every task's t<N>.t<M> id, exactly.
+        final_ids = {it.id for it in
+                     fc.build_final_checklist(self.plan_path, self.spec_path)}
+        test_ids = {"t1.t1", "t1.t2"}
+        refs = fc.final_citable_refs(self.plan_path, self.spec_path)
+        self.assertEqual(refs, final_ids | test_ids)
+        self.assertTrue(final_ids < refs)  # strict: a task declares tests
+
 
 class RenderCitableSectionTests(unittest.TestCase):
     ROLE = ("Ids a finding's contract_ref may cite. Not coverage items "

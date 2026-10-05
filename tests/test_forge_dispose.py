@@ -164,7 +164,9 @@ class ForgeDisposeCLITests(unittest.TestCase):
             {"id": "f1", "summary": "spurious",
              "location": {"file": "src.txt", "lines": "50-51"},
              "provenance": "in-diff", "impact": "contract-breaking",
-             "contract_ref": "AC-3"},
+             "contract_ref": "AC-3",
+             "repair_task": {"title": "fix", "files": ["src.txt"], "spec": "x",
+                              "tests": [], "acceptance": [], "tier": "standard"}},
         ]})
         result = self.run_dispose(self._base_args(v))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -602,6 +604,260 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]})
         result = self.run_dispose(self._base_args(v))
         self.assertNotEqual(result.returncode, 0)
+
+
+class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
+    """Execution spec, Reviewer verdict contract: `repair_task` is required only
+    in the scope-decision cell, optional on any other verifiable finding and
+    null on an unverifiable one; gate mode halts on every finding and does not
+    widen that requirement."""
+
+    def setUp(self):
+        self.repo_dir = tempfile.mkdtemp(prefix="forge-gate-repo-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        with open(os.path.join(self.repo_dir, "src.txt"), "w") as f:
+            f.write("line1\nline2\nline3\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "base")
+        self.base = self._git("rev-parse", "HEAD").strip()
+        with open(os.path.join(self.repo_dir, "src.txt"), "w") as f:
+            f.write("line1\nCHANGED\nline3\n")
+        self.workdir = tempfile.mkdtemp(prefix="forge-gate-work-")
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git"] + list(args), cwd=self.repo_dir,
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def _dispose(self, verdict_obj, autofix):
+        path = os.path.join(self.workdir, "verdict.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(verdict_obj, f)
+        return subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.base,
+             "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix],
+            cwd=self.repo_dir, capture_output=True, text=True,
+        )
+
+    def _all_defects(self, verdict_obj):
+        verdict = forge_dispose._verdict_from_obj(verdict_obj)
+        return forge_run._verdict_defects(verdict, [], "verification", None)
+
+    def test_gate_mode_in_diff_improvement_halts_gate_with_null_repair_task(self):
+        verdict_obj = {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "extract a helper",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "provenance": "in-diff", "impact": "improvement",
+             "contract_ref": None, "repair_task": None},
+        ]}
+        self.assertEqual(self._all_defects(verdict_obj), [])
+        result = self._dispose(verdict_obj, "gate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "halt")
+        self.assertEqual(decision["halt_reason"], "gate")
+        reported = [f for group in decision["findings"].values() for f in group]
+        self.assertEqual([f["id"] for f in reported], ["f1"])
+        self.assertTrue(all(f["repair_task"] is None for f in reported))
+
+    def test_gate_mode_unverifiable_finding_halts_gate_with_null_repair_task(self):
+        verdict_obj = {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "cannot settle this from the diff alone",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "provenance": "in-diff", "impact": "unverifiable",
+             "contract_ref": None, "repair_task": None},
+        ]}
+        self.assertEqual(self._all_defects(verdict_obj), [])
+        result = self._dispose(verdict_obj, "gate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["action"], "halt")
+        self.assertEqual(decision["halt_reason"], "gate")
+        reported = [f for group in decision["findings"].values() for f in group]
+        self.assertEqual([f["id"] for f in reported], ["f1"])
+        self.assertTrue(all(f["repair_task"] is None for f in reported))
+
+    def test_pre_existing_contract_breaking_without_repair_task_is_a_defect(self):
+        # Spec: "required on a finding in the scope-decision cell". The
+        # validation entry point takes no autofix mode, so this holds in both.
+        verdict_obj = {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "race condition",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "provenance": "pre-existing", "impact": "contract-breaking",
+             "contract_ref": "AC-2", "repair_task": None},
+        ]}
+        defects = self._all_defects(verdict_obj)
+        self.assertTrue(
+            any("f1" in d and "repair_task" in d for d in defects), defects
+        )
+        self.assertIn(
+            "f1: repair_task is required on a pre-existing contract-breaking "
+            "finding", defects,
+        )
+
+    def test_in_diff_contract_breaking_without_repair_task_is_not_a_defect(self):
+        self.assertEqual(self._all_defects({"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "broken", "provenance": "in-diff",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1",
+             "repair_task": None},
+        ]}), [])
+
+    def test_unverifiable_without_repair_task_is_not_a_defect(self):
+        self.assertEqual(self._all_defects({"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "cannot settle from this diff",
+             "provenance": "pre-existing",
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "unverifiable", "contract_ref": None,
+             "repair_task": None},
+        ]}), [])
+
+    # --- repair_task rule on runner-derived provenance (f2) and via the CLI (f1)
+
+    def _claimed(self, claimed, lines, repair_task=None, impact="contract-breaking"):
+        return {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "breaks the contract",
+             "location": {"file": "src.txt", "lines": lines},
+             "provenance": claimed, "impact": impact, "contract_ref": "AC-1",
+             "repair_task": repair_task},
+        ]}
+
+    _REPAIR = {"title": "t", "files": ["src.txt"], "spec": "x", "tests": [],
+               "acceptance": [], "tier": "standard"}
+
+    def _derived_defects(self, verdict_obj):
+        verdict = forge_dispose._verdict_from_obj(verdict_obj)
+        diff = self._git("diff", self.base)
+        return forge_run._verdict_defects(
+            verdict, [], "verification", None,
+            classify_ctx=lambda: {"diff_text": diff, "run_diff": diff,
+                                  "carried_ids": set()},
+        )
+
+    def test_claimed_in_diff_but_derived_pre_existing_without_repair_task_is_a_defect(self):
+        defects = self._derived_defects(self._claimed("in-diff", "50-51"))
+        self.assertIn(
+            "f1: repair_task is required on a pre-existing contract-breaking "
+            "finding", defects,
+        )
+
+    def test_claimed_in_diff_but_derived_pre_existing_with_repair_task_is_clean(self):
+        self.assertEqual(self._derived_defects(
+            self._claimed("in-diff", "50-51", repair_task=self._REPAIR)), [])
+
+    def test_claimed_pre_existing_but_derived_in_diff_is_not_a_defect(self):
+        self.assertEqual(
+            self._derived_defects(self._claimed("pre-existing", "2-2")), [])
+
+    def test_validation_does_not_mutate_the_verdict(self):
+        verdict = forge_dispose._verdict_from_obj(
+            self._claimed("in-diff", "50-51"))
+        diff = self._git("diff", self.base)
+        forge_dispose.validate_repair_tasks(verdict, diff)
+        self.assertEqual(verdict.findings[0].provenance, "in-diff")
+        self.assertIsNone(verdict.findings[0].disposition)
+
+    def test_cli_rejects_pre_existing_contract_breaking_without_repair_task(self):
+        result = self._dispose(self._claimed("pre-existing", "50-51"), "auto")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("f1: repair_task is required on a pre-existing "
+                      "contract-breaking finding", result.stderr)
+
+    def test_cli_rejects_claimed_in_diff_derived_pre_existing_without_repair_task(self):
+        result = self._dispose(self._claimed("in-diff", "50-51"), "auto")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("repair_task is required", result.stderr)
+
+    def test_cli_accepts_the_same_finding_with_a_repair_task(self):
+        result = self._dispose(
+            self._claimed("in-diff", "50-51", repair_task=self._REPAIR), "auto")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["halt_reason"], "scope-decision")
+
+
+class RunDiffParityGapTests(unittest.TestCase):
+    """Execution spec, The shared decision helper: the CLI computes only the
+    review diff and has no run diff, so a finding on a line an earlier task of
+    the run changed is `pre-existing` through the CLI and `in-run` in-process
+    when the caller supplies `run_diff`."""
+
+    def setUp(self):
+        self.repo_dir = tempfile.mkdtemp(prefix="forge-parity-repo-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        self.src = os.path.join(self.repo_dir, "src.txt")
+        with open(self.src, "w") as f:
+            f.write(self._body())
+        self._git("add", ".")
+        self._git("commit", "-m", "run base")
+        self.run_base = self._git("rev-parse", "HEAD").strip()
+        # Earlier task of the run changes line 2 and is committed.
+        with open(self.src, "w") as f:
+            f.write(self._body(earlier=True))
+        self._git("commit", "-am", "task 1")
+        self.task_base = self._git("rev-parse", "HEAD").strip()
+        # This task changes line 11 only, uncommitted — far enough from line 2
+        # that no hunk's context reaches it.
+        with open(self.src, "w") as f:
+            f.write(self._body(earlier=True, this=True))
+        self.workdir = tempfile.mkdtemp(prefix="forge-parity-work-")
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+        self.verdict_obj = {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "breaks the contract",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "provenance": "in-diff", "impact": "contract-breaking",
+             "contract_ref": "AC-1",
+             "repair_task": {"title": "t", "files": ["src.txt"], "spec": "x",
+                              "tests": [], "acceptance": [], "tier": "standard"}},
+        ]}
+
+    @staticmethod
+    def _body(earlier=False, this=False):
+        lines = ["line{}".format(n) for n in range(1, 13)]
+        if earlier:
+            lines[1] = "EARLIER"
+        if this:
+            lines[10] = "THIS"
+        return "\n".join(lines) + "\n"
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git"] + list(args), cwd=self.repo_dir,
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def test_cli_has_no_run_diff_so_classifies_pre_existing(self):
+        path = os.path.join(self.workdir, "verdict.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.verdict_obj, f)
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base,
+             "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto"],
+            cwd=self.repo_dir, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["halt_reason"], "scope-decision")
+        halted = decision["findings"]["halt"]
+        self.assertEqual([f["id"] for f in halted], ["f1"])
+        self.assertEqual(halted[0]["provenance"], "pre-existing")
+
+    def test_in_process_run_diff_classifies_in_run(self):
+        verdict = forge_dispose._verdict_from_obj(self.verdict_obj)
+        review_diff = self._git("diff", self.task_base)
+        run_diff = self._git("diff", self.run_base)
+        forge_dispose.classify_findings(verdict, review_diff, run_diff=run_diff)
+        finding = verdict.findings[0]
+        self.assertEqual(finding.provenance, "in-run")
+        self.assertEqual(finding.disposition, "seed")
 
 
 class UnverifiableDispositionTests(unittest.TestCase):

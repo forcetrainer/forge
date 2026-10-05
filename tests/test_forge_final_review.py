@@ -673,6 +673,44 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             receipt = json.load(f)
         self.assertEqual(receipt["halt_reason"], "scope-decision")
 
+    # --- repair_task rule judged on runner-derived provenance (classify_ctx) ---
+
+    _REPAIR = {
+        "title": "Fix the legacy guard", "files": ["f1.txt"], "spec": "x",
+        "tests": ["the guard holds"], "acceptance": "`true`", "tier": "standard",
+    }
+
+    def _final_claimed_in_diff_outside_diff(self, first_repair_task, retry_repair_task):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        msg = lambda rt: _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            contract_ref="spec:Alpha section", repair_task=rt)
+        responses = [{"exit": 0, "msg": msg(first_repair_task)}]
+        if first_repair_task is None:
+            responses.append({"exit": 0, "msg": msg(retry_repair_task)})
+        self._responses(responses)
+        return forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+
+    def test_final_review_retries_on_missing_repair_task_for_derived_pre_existing(self):
+        outcome = self._final_claimed_in_diff_outside_diff(None, self._REPAIR)
+        retry = os.path.join(self.run_dir, "final-coverage-retry.md")
+        self.assertTrue(os.path.exists(retry), "no verdict-validation retry fired")
+        with open(retry) as f:
+            self.assertIn(
+                "h1: repair_task is required on a pre-existing "
+                "contract-breaking finding", f.read())
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_final_review_does_not_retry_when_repair_task_supplied(self):
+        outcome = self._final_claimed_in_diff_outside_diff(self._REPAIR, None)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.run_dir, "final-coverage-retry.md")))
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
 
 # Same fixture plus a **Tests:** block, so the plan has real t<N>.t<M>
 # grammar — the coverage source `build_final_checklist` deliberately does not

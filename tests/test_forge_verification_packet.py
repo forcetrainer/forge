@@ -563,6 +563,50 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
             receipt = json.load(f)
         self.assertFalse(receipt["coverage_retry"])
 
+    # --- repair_task rule judged on runner-derived provenance (classify_ctx) ---
+
+    _REPAIR = {
+        "title": "Fix the legacy guard", "files": ["f1.txt"], "spec": "x",
+        "tests": ["the guard holds"], "acceptance": "`true`", "tier": "standard",
+    }
+
+    def _run_outside_diff_claimed_in_diff(self, first_repair_task, retry_repair_task):
+        # Line 99 is outside the reviewed diff, so the runner derives
+        # pre-existing x contract-breaking although the reviewer claims in-diff.
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        responses = [
+            {"exit": 0, "msg": ""},  # worker
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "99", "legacy guard is wrong", contract_ref="t1.a1",
+                repair_task=first_repair_task)},
+        ]
+        if first_repair_task is None:
+            responses.append({"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "99", "legacy guard is wrong", contract_ref="t1.a1",
+                repair_task=retry_repair_task)})
+        self._set_responses(responses)
+        return forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
+        )
+
+    def test_task_review_retries_on_missing_repair_task_for_derived_pre_existing(self):
+        outcome = self._run_outside_diff_claimed_in_diff(None, self._REPAIR)
+        retry = os.path.join(self.run_dir, "task-1-coverage-retry.md")
+        self.assertTrue(os.path.exists(retry), "no verdict-validation retry fired")
+        with open(retry) as f:
+            self.assertIn(
+                "f1: repair_task is required on a pre-existing "
+                "contract-breaking finding", f.read())
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_task_review_does_not_retry_when_repair_task_supplied(self):
+        outcome = self._run_outside_diff_claimed_in_diff(self._REPAIR, None)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.run_dir, "task-1-coverage-retry.md")))
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
 
 def _worker_event_stream_local(thread_id, text="ok"):
     events = [
