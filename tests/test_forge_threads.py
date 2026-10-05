@@ -243,7 +243,8 @@ class DispatchJsonArgvTests(unittest.TestCase):
         task = forge_run.Task(number=1, title="t", tier="standard")
         threads = {}
         verdict = forge_run.dispatch_reviewer(
-            task, self.packet, self.fake, self.run_dir, threads
+            task, self.packet, self.fake, self.run_dir, threads,
+            cwd=scratch_repo(self),
         )
         self.assertEqual(verdict.kind, "pass")
         argvs = _log_argvs(self.log)
@@ -259,7 +260,8 @@ class DispatchJsonArgvTests(unittest.TestCase):
         ])
         threads = {}
         verdict = forge_run.dispatch_final_review(
-            self.packet, self.fake, self.run_dir, "standard", threads
+            self.packet, self.fake, self.run_dir, "standard", threads,
+            cwd=scratch_repo(self),
         )
         self.assertEqual(verdict.kind, "pass")
         self.assertEqual(threads, {"final-reviewer": "th-f"})

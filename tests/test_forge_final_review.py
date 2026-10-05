@@ -809,3 +809,117 @@ class FinalPacketCitableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- reviewer write discipline: the final review ----------------------------
+
+_FR_WORKER = {"exit": 0, "msg": ""}
+_FR_TASK_PASS = {"exit": 0, "msg": '{"verdict": "pass"}'}
+
+
+class FinalReviewerWroteTests(ReviewerWroteCase):
+    """A final reviewer that changes the repository halts the run as a
+    `final-review` stage escalation, class `reviewer-wrote` (exit 2)."""
+
+    def _assert_stage_halt(self, res, final_reviews):
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.run_json()["status"], "escalated-final-review")
+        halt = self.halt_record()
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        sha = halt["freeze_commit"]
+        self.assertTrue(sha)
+        self.assertEqual(
+            self.git("rev-parse", "--verify", halt_ref(self, "final-review")).strip(),
+            sha)
+        self.assertIn("NEEDFIX", self.git("show", sha + ":f1.txt"))
+        self.assertFalse(self.in_commit(sha, "stray.txt"))
+        self.assertEqual(self.porcelain(), "")
+        self.assertFalse(os.path.exists(self.stray))
+        self.assertEqual(len(self.dispatches("final-review-last")), final_reviews)
+        self.assertEqual(self.commit_count(), 2)  # base + the passed task only
+        self.assertEqual(self.git("symbolic-ref", "HEAD").strip(), "refs/heads/main")
+
+    def test_cold_final_reviewer_write_halts(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [self.stray_op()]},
+        ])
+        self._assert_stage_halt(res, final_reviews=1)
+
+    def test_resumed_final_reviewer_write_halts_without_fallback(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-final1")},
+            {"exit": 1, "msg": "", "file_ops": [self.stray_op()]},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},  # a cold fallback would land here
+        ])
+        self._assert_stage_halt(res, final_reviews=2)
+
+    def test_final_reviewer_commit_is_restored(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [
+                self.stray_op(),
+                {"op": "git", "args": ["add", "-A"]},
+                {"op": "git", "args": ["commit", "-m", "reviewer commit"]},
+            ]},
+        ])
+        self._assert_stage_halt(res, final_reviews=1)
+        halt = self.halt_record()
+        self.assertEqual(
+            self.git("log", "-1", "--format=%s", halt["reviewer_head"]).strip(),
+            "reviewer commit")
+
+    def test_final_reviewer_that_writes_nothing_passes_through(self):
+        res = self.run_cli([_FR_WORKER, _FR_TASK_PASS,
+                            {"exit": 0, "msg": '{"verdict": "pass"}'}])
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+def halt_ref(case, stage):
+    run_id = os.path.basename(os.path.normpath(case.run_dir))
+    return forge_run.freeze_stage_ref_name(run_id, stage)
+
+
+class FingerprintErrorFinalTests(ReviewerWroteCase):
+    """The task review spends calls 1 and 2; the final reviewer's first
+    dispatch is calls 3 and 4, a resumed retry's 5 and 6."""
+
+    def _assert_contract_error(self, rc, err, final_reviews):
+        self.assertEqual(rc, 1, err)
+        self.assertIn("git rev-parse HEAD", err)
+        self.assertEqual(self.run_json()["status"], "contract-error")
+        self.assertEqual(len(self.dispatches("final-review-last")), final_reviews)
+        self.assertEqual(self.commit_count(), 2)  # base + the passed task
+        self.assertNotIn("final-review", self.git("log", "--format=%s"))
+
+    def _cold(self):
+        return [_FR_WORKER, _FR_TASK_PASS, {"exit": 0, "msg": '{"verdict": "pass"}'}]
+
+    def _resumed(self):
+        return [
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-final1")},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+        ]
+
+    def test_failure_before_cold_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._cold(), 3)
+        self._assert_contract_error(rc, err, final_reviews=0)
+
+    def test_failure_on_exit_of_cold_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._cold(), 4)
+        self._assert_contract_error(rc, err, final_reviews=1)
+
+    def test_failure_before_resumed_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._resumed(), 5)
+        self._assert_contract_error(rc, err, final_reviews=1)
+
+    def test_failure_on_exit_of_resumed_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._resumed(), 6)
+        self._assert_contract_error(rc, err, final_reviews=2)

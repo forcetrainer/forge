@@ -582,7 +582,10 @@ def test_codex_doc_review_command_uses_the_runners_model_and_flags():
     assert "model_reasoning_effort={}".format(effort) in section
     isolation = " ".join(forge_common.CODEX_ISOLATION_ARGS)
     assert isolation in section, isolation
-    for arg in forge_common.CODEX_REVIEWER_SANDBOX_ARGS:
+    # The runner's reviewers no longer carry a sandbox override (the constant is
+    # gone); this document-review command is not a runner dispatch and keeps
+    # its own read-only flags until the docs task rewrites it.
+    for arg in ("-c", 'sandbox_mode="read-only"'):
         assert arg in section, arg
     assert "--output-last-message" in section
     # Without a closed stdin, `codex exec` given a prompt argument waits for

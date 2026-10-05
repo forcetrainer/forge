@@ -111,7 +111,8 @@ def _git_diff(cwd, base):
 
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
-                 checklist=None, spec_path=None, citable=None):
+                 checklist=None, spec_path=None, citable=None,
+                 acceptance_results=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -130,7 +131,12 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     the label ``[<spec id>] <heading>`` when the plan declares more than one
     spec file. Context the reviewer reads for understanding, not a checklist
     item (Contract checklist spec). A task declaring no ``**Spec:**`` gets no
-    spec-context section."""
+    spec-context section.
+
+    ``acceptance_results`` (a list of result dicts, or None) is forwarded to
+    ``build_packet``, which renders the ``## Acceptance results`` section for
+    a non-None value — an empty list renders it with no rows (a prose-only
+    task). None leaves the packet without the section."""
     with open(plan_path, "r", encoding="utf-8") as f:
         plan_text = f.read()
     block = rp.extract_task_block(plan_text, task.number)
@@ -152,7 +158,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
         review_kind="discovery", spec_sections=spec_sections,
-        citable=citable,
+        citable=citable, acceptance_results=acceptance_results,
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:

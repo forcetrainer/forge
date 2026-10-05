@@ -795,6 +795,10 @@ class IncrementalRunJsonTests(unittest.TestCase):
                 json.dump([{"exit": 0, "msg": ""},
                            {"exit": 0, "msg": "totally not a verdict"}], f)
             fake = write_fake_codex(d)
+            # Harness files written during the review must not look like a
+            # reviewer write to the unchanged-repository check.
+            with open(os.path.join(d, ".gitignore"), "w") as f:
+                f.write("run/\ncodex.log\nresponses.json\n.forge/\n")
             # Commit everything so the working tree is clean at run start (else the
             # clean-tree precondition trips before the run dir is created).
             subprocess.run(["git", "add", "-A"], cwd=d, check=True)

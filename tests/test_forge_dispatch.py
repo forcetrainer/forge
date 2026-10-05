@@ -600,7 +600,7 @@ class OversizedPromptTests(unittest.TestCase):
             "gpt-6-luna", "low", "review preamble", self.brief, self.fake,
             last_msg, os.path.join(self.run_dir, "live.log"),
             os.path.join(self.run_dir, "events.jsonl"), "-- header --",
-            "task-1-reviewer", {},
+            "task-1-reviewer", {}, cwd=scratch_repo(self),
         )
         self.assertEqual(v.kind, "pass")
 

@@ -1,4 +1,4 @@
-"""Worker isolation flags: every runner `codex exec` argv carries the shared isolation group; reviewers add a read-only sandbox override."""
+"""Worker isolation flags: every runner `codex exec` argv carries the shared isolation group; no dispatch, reviewers included, carries a sandbox override."""
 import json
 import os
 import shutil
@@ -8,14 +8,13 @@ import unittest
 from unittest import mock
 
 from _forge_support import *  # noqa: F401,F403
-from _forge_support import _log_argvs
+from _forge_support import _log_argvs, scratch_repo
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import forge_common  # noqa: E402
 
 DISABLES = ("multi_agent_v2", "memories")
 AGENTS_OFF = "agents.enabled=false"
-SANDBOX = 'sandbox_mode="read-only"'
 PASS_MSG = json.dumps({"verdict": "pass", "findings": []})
 
 
@@ -52,6 +51,9 @@ class IsolationFlagsTests(unittest.TestCase):
         os.environ["FORGE_FAKE_LOG"] = self.log
         os.environ["FORGE_FAKE_RESPONSES"] = self.responses
         self.task = forge_run.Task(number=1, title="t", tier="standard")
+        # Reviewer dispatches fingerprint their cwd, so they need a repository
+        # of their own that no harness file lands in.
+        self.repo = scratch_repo(self)
 
     def _restore_env(self):
         for k, v in self._old.items():
@@ -68,13 +70,15 @@ class IsolationFlagsTests(unittest.TestCase):
             "worker-resume": lambda: forge_run.dispatch_worker(
                 self.task, self.brief, self.fake, self.run_dir, resume_thread="th-1"),
             "reviewer-cold": lambda: forge_run.dispatch_reviewer(
-                self.task, self.packet, self.fake, self.run_dir),
+                self.task, self.packet, self.fake, self.run_dir, cwd=self.repo),
             "reviewer-resume": lambda: forge_run.dispatch_reviewer(
-                self.task, self.packet, self.fake, self.run_dir, resume_thread="th-1"),
+                self.task, self.packet, self.fake, self.run_dir, resume_thread="th-1",
+                cwd=self.repo),
             "final-cold": lambda: forge_run.dispatch_final_review(
-                self.packet, self.fake, self.run_dir, "standard"),
+                self.packet, self.fake, self.run_dir, "standard", cwd=self.repo),
             "final-resume": lambda: forge_run.dispatch_final_review(
-                self.packet, self.fake, self.run_dir, "standard", resume_thread="th-1"),
+                self.packet, self.fake, self.run_dir, "standard", resume_thread="th-1",
+                cwd=self.repo),
             "fixer-cold": lambda: forge_run.dispatch_final_review_fix(
                 self.brief, self.fake, self.run_dir, "standard", 1),
             "fixer-resume": lambda: forge_run.dispatch_final_review_fix(
@@ -103,7 +107,9 @@ class IsolationFlagsTests(unittest.TestCase):
         # outranks the feature flag); agents.enabled=false is the real switch.
         self.assertIn(AGENTS_OFF, forge_common.CODEX_ISOLATION_ARGS)
         self.assertNotIn("multi_agent", forge_common.CODEX_ISOLATION_ARGS)
-        self.assertEqual(forge_common.CODEX_REVIEWER_SANDBOX_ARGS, ("-c", SANDBOX))
+        # The read-only reviewer sandbox is gone: the write guarantee is the
+        # runner's unchanged-repository check, not a sandbox.
+        self.assertFalse(hasattr(forge_common, "CODEX_REVIEWER_SANDBOX_ARGS"))
 
     def test_every_shape_carries_all_disable_pairs(self):
         for name, argv in self._all_shapes().items():
@@ -111,24 +117,20 @@ class IsolationFlagsTests(unittest.TestCase):
             for feat in DISABLES:
                 self.assertTrue(_has_pair(argv, "--disable", feat), (name, feat))
 
-    def test_reviewers_read_only_writers_no_sandbox_override(self):
-        for name, argv in self._all_shapes().items():
-            if name.startswith(("reviewer", "final-")) and not name.startswith("fixer"):
-                self.assertTrue(_has_pair(argv, "-c", SANDBOX), name)
-            else:
-                self.assertEqual(_sandbox_overrides(argv), [], name)
+    def test_no_shape_carries_a_sandbox_override(self):
+        shapes = self._all_shapes()
+        self.assertEqual(len(shapes), 9)
+        for name, argv in shapes.items():
+            self.assertEqual(_sandbox_overrides(argv), [], name)
+            self.assertNotIn("sandbox_mode", " ".join(argv), name)
 
-    def test_flags_built_from_the_two_constants(self):
+    def test_flags_built_from_the_isolation_constant(self):
         iso = ("--disable", "sentinel_feature")
-        sbx = ("-c", 'sandbox_mode="sentinel"')
-        with mock.patch.object(forge_common, "CODEX_ISOLATION_ARGS", iso), \
-                mock.patch.object(forge_common, "CODEX_REVIEWER_SANDBOX_ARGS", sbx):
+        with mock.patch.object(forge_common, "CODEX_ISOLATION_ARGS", iso):
             shapes = self._all_shapes()
         for name, argv in shapes.items():
             self.assertTrue(_has_pair(argv, "--disable", "sentinel_feature"), name)
             self.assertFalse(_has_pair(argv, "--disable", "memories"), name)
-            is_reviewer = name.startswith(("reviewer", "final-"))
-            self.assertEqual(_has_pair(argv, "-c", 'sandbox_mode="sentinel"'), is_reviewer, name)
 
     def test_ultra_never_emitted(self):
         for name, argv in self._all_shapes().items():

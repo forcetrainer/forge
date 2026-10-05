@@ -334,7 +334,7 @@ def run_acceptance(task, cwd, live_path=None):
 
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
                            live_path, events_path, header, role, threads,
-                           timeout=DEFAULT_TIMEOUT, resume_thread=None):
+                           timeout=DEFAULT_TIMEOUT, resume_thread=None, cwd=None):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
     prompt = review preamble + verdict instruction + packet; returns the parsed
     Verdict. Fail-loud on a crashed reviewer, a timed-out reviewer, or an
@@ -354,7 +354,17 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
     preserved exactly as on a cold spawn. The prompt (preamble + verdict
     instruction + packet) is unchanged by resuming — only the dispatch
     mechanics differ; scoping the packet itself down for a resumed verification
-    lap is a separate concern (Delta-scoped verification packets)."""
+    lap is a separate concern (Delta-scoped verification packets).
+
+    No sandbox override (Reviewer write discipline): the repository is
+    fingerprinted (``forge_git.repo_fingerprint`` of ``cwd``, default the
+    process cwd the child inherits) before the spawn and again on EVERY exit —
+    verdict, non-zero exit or timeout — and a mismatch raises
+    ``RepositoryChangedError`` before any other failure is reported, carrying
+    the pre-review fingerprint as ``before`` and the post-review one as
+    ``after``. A ``FingerprintError`` (git failed) propagates untouched. Neither
+    is a RuntimeError, so the resume wrappers' fallback never swallows them."""
+    cwd = cwd or os.getcwd()
     with open(packet_path, "r", encoding="utf-8") as f:
         packet = f.read()
     prompt = preamble + "\n\n" + REVIEW_VERDICT_INSTRUCTION + "\n\n" + packet
@@ -386,13 +396,21 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
             "--output-last-message",
             last_msg_path,
         ]
-    argv += forge_common.CODEX_REVIEWER_SANDBOX_ARGS  # reviewers never write
     if os.path.exists(last_msg_path):
         os.remove(last_msg_path)  # never re-read a prior attempt's message
+    before = forge_git.repo_fingerprint(cwd)
     result = run_json_teed(
         argv, timeout=timeout, live_path=live_path, events_path=events_path,
         header=header, render_line=_render_event_line, stdin_text=prompt,
     )
+    after = forge_git.repo_fingerprint(cwd)
+    if after != before:
+        changed = forge_git.RepositoryChangedError(
+            forge_git.fingerprint_diff(cwd, before, after)
+        )
+        changed.before = before
+        changed.after = after
+        raise changed
     if result.thread_id:
         threads[role] = result.thread_id
     if result.timed_out:
@@ -421,7 +439,7 @@ def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_
 
 
 def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
-                       timeout=DEFAULT_TIMEOUT, resume_thread=None):
+                       timeout=DEFAULT_TIMEOUT, resume_thread=None, cwd=None):
     """Per-task reviewer via ``codex exec`` — fresh context at the *same tier as
     the task it reviews* (routed by TIER_MAP[task.tier]; reviewer strength never
     escalates past the task's own tier). Preamble = the tier agent's review
@@ -431,7 +449,8 @@ def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
     continuity spec), when set, resumes that prior thread instead of spawning
     cold — the caller is responsible for the discovery-cold /
     verification-resumed rule; this function only carries out whichever mode
-    it is asked for."""
+    it is asked for. ``cwd`` is the repository fingerprinted around the
+    dispatch (default: the process cwd)."""
     if threads is None:
         threads = {}
     model, effort = TIER_MAP[task.tier]
@@ -445,12 +464,12 @@ def dispatch_reviewer(task, packet_path, codex_bin, run_dir, threads=None,
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
         live_path, events_path, header, "task-{}-reviewer".format(task.number),
-        threads, timeout=timeout, resume_thread=resume_thread,
+        threads, timeout=timeout, resume_thread=resume_thread, cwd=cwd,
     )
 
 
 def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
-                          timeout=DEFAULT_TIMEOUT, resume_thread=None):
+                          timeout=DEFAULT_TIMEOUT, resume_thread=None, cwd=None):
     """Whole-plan final review: one ``codex exec`` call at ``tier`` (TIER_MAP[tier]
     — the plan's highest task tier, not a pinned ceiling) with that tier's
     contract preamble against the whole-plan diff + spec. Returns the parsed
@@ -460,7 +479,8 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
     accepted for interface parity with ``dispatch_reviewer`` (Session
     continuity spec); wiring it into ``run_final_review_loop`` is a later
     task's concern — this runner still dispatches this call cold unless a
-    caller explicitly passes one."""
+    caller explicitly passes one. ``cwd`` is the repository fingerprinted
+    around the dispatch (default: the process cwd)."""
     if threads is None:
         threads = {}
     model, effort = TIER_MAP[tier]
@@ -474,7 +494,7 @@ def dispatch_final_review(packet_path, codex_bin, run_dir, tier, threads=None,
     return _dispatch_review_call(
         model, effort, preamble, packet_path, codex_bin, last_msg_path,
         live_path, events_path, header, "final-reviewer", threads, timeout=timeout,
-        resume_thread=resume_thread,
+        resume_thread=resume_thread, cwd=cwd,
     )
 
 
@@ -697,6 +717,11 @@ HALT_CAUSE_FOR_WORKER = {
     "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
             "where any reviewer finding stops it for a human rather than "
             "being auto-fixed.",
+    "reviewer-wrote": "The run stopped on a `reviewer-wrote` halt: the "
+                      "reviewer changed the repository during its review, so "
+                      "its verdict was discarded. The tree you are resuming "
+                      "holds only your own earlier work; nothing the "
+                      "reviewer wrote was kept.",
 }
 
 
@@ -1080,6 +1105,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         coverage_skipped = None  # None: no review this attempt (unchanged)
         coverage_retry = False
         reviewer_resume_fallback = False
+        reviewer_wrote = None  # RepositoryChangedError when the reviewer wrote
         failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
         if worker.timed_out:
@@ -1181,6 +1207,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     prior_findings=prior_findings or None, checklist=checklist,
                     spec_path=spec_path,
                     citable=citable,
+                    acceptance_results=[asdict(r) for r in acceptance],
                 )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
@@ -1197,7 +1224,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     try:
                         return dispatch_reviewer(
                             task, p, codex_bin, run_dir, threads, timeout=timeout,
-                            resume_thread=resume_thread,
+                            resume_thread=resume_thread, cwd=cwd,
                         )
                     except RuntimeError:
                         reviewer_resume_fallback = True
@@ -1207,33 +1234,47 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     reviewer_resume_fallback = True
                 return dispatch_reviewer(
                     task, fallback_path or p, codex_bin, run_dir, threads,
-                    timeout=timeout,
+                    timeout=timeout, cwd=cwd,
                 )
 
-            verdict, coverage_retry = _review_with_coverage(
-                _reviewer_dispatch_call,
-                packet_path, checklist, run_dir, "task-{}".format(task.number),
-                review_kind=packet_review_kind, citable=citable,
-                arm_retry_resume=_arm_reviewer_retry_resume,
-            )
-            review_attempts += 1
-            run_diff_text = _git_diff(cwd, run_base) if run_base else None
-            classify_findings(
-                verdict, _git_diff(cwd, review_base), run_diff=run_diff_text,
-                carried_ids=state.carried_ids,
-            )
-            review_verdict = verdict_to_dict(verdict)
-            findings = verdict.findings
-            if seeded_findings is not None:
-                seeded_findings.extend(
-                    finding_to_dict(f) for f in findings if f.disposition == "seed"
+            # A reviewer that changed the repository is a `reviewer-wrote` halt
+            # (Reviewer write discipline): the verdict is discarded unread and
+            # nothing below classifies, advances state or dispatches again.
+            # RepositoryChangedError is deliberately not a RuntimeError, so the
+            # resume fallback and the coverage retry never see it.
+            try:
+                verdict, coverage_retry = _review_with_coverage(
+                    _reviewer_dispatch_call,
+                    packet_path, checklist, run_dir, "task-{}".format(task.number),
+                    review_kind=packet_review_kind, citable=citable,
+                    arm_retry_resume=_arm_reviewer_retry_resume,
                 )
+            except forge_git.RepositoryChangedError as e:
+                reviewer_wrote = e
+            else:
+                review_attempts += 1
+                run_diff_text = _git_diff(cwd, run_base) if run_base else None
+                classify_findings(
+                    verdict, _git_diff(cwd, review_base), run_diff=run_diff_text,
+                    carried_ids=state.carried_ids,
+                )
+                review_verdict = verdict_to_dict(verdict)
+                findings = verdict.findings
+                if seeded_findings is not None:
+                    seeded_findings.extend(
+                        finding_to_dict(f) for f in findings if f.disposition == "seed"
+                    )
 
-        action, halt_reason = convergence_decision(
-            findings, state, acc_ok, attempt, autofix_mode,
-            approved_ids=approved_ids, failed_acceptance=failed_acceptance,
-        )
-        advance_state(state, findings, acc_ok, failed_acceptance)
+        if reviewer_wrote is not None:
+            # Not a convergence class: the attempt's verdict was discarded, so
+            # the state is not advanced and no finding exists to disposition.
+            action, halt_reason = "halt", "reviewer-wrote"
+        else:
+            action, halt_reason = convergence_decision(
+                findings, state, acc_ok, attempt, autofix_mode,
+                approved_ids=approved_ids, failed_acceptance=failed_acceptance,
+            )
+            advance_state(state, findings, acc_ok, failed_acceptance)
 
         fix_findings = [f for f in findings if f.disposition == "fix"]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
@@ -1251,6 +1292,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         repair_task = halted[0].repair_task if halted else None
         status = {"pass": "passed", "rework": "rework", "halt": "escalated"}[action]
         outstanding = [f.summary for f in findings] if action == "halt" else []
+        if reviewer_wrote is not None:
+            outstanding = list(reviewer_wrote.changes)
 
         receipt = {
             "task_number": task.number,
@@ -1304,6 +1347,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     "repair_task": repair_task,
                     "convergence_state": state.to_dict(),
                 })
+                if reviewer_wrote is not None:
+                    halt_out["reviewer_wrote"] = _reviewer_wrote_record(reviewer_wrote)
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,
@@ -1518,7 +1563,41 @@ def _git_commit_final_review_fixes(cwd):
     return _git_head(cwd)
 
 
-def _freeze_stage_halt(cwd, run_dir, stage, halt_reason):
+def _reviewer_wrote_record(error):
+    """The halt-record fields a ``RepositoryChangedError`` contributes: the
+    fingerprint diff lines (``changes``), the pre- and post-review
+    fingerprints (``before``/``after``, which the freeze and the ref restore
+    consume and which are not persisted) and ``reviewer_head`` — the sha HEAD
+    held after the review when the reviewer moved it (a commit or branch
+    switch), else None. The commit stays unreachable once the refs are
+    restored; naming it here is how a human finds it."""
+    after_head = error.after["head"]
+    return {
+        "changes": list(error.changes),
+        "before": error.before,
+        "after": error.after,
+        "reviewer_head": (
+            after_head if after_head != error.before["head"] else None
+        ),
+    }
+
+
+def _freeze_reviewer_wrote(cwd, ref_name, record):
+    """The `reviewer-wrote` halt path (Reviewer write discipline): the one
+    place the runner moves a ref. Point the recorded branch back at the
+    recorded HEAD sha and re-attach HEAD (``restore_refs`` first — the freeze's
+    ``reset --hard`` moves whatever HEAD is attached to), then commit the
+    PRE-REVIEW capture under ``ref_name`` parented on the recorded HEAD and
+    return the working tree to that checkpoint (``freeze_tree``). Returns the
+    freeze sha. The reviewer's own changes are in ``record['changes']`` and
+    are discarded from the tree; a reviewer-made commit is left unreachable,
+    never deleted."""
+    before = record["before"]
+    forge_git.restore_refs(cwd, before)
+    return forge_git.freeze_tree(cwd, before["tree"], ref_name, before["head"])
+
+
+def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None):
     """Freeze a halted whole-run stage (``final-review`` | ``doc-sync``) and
     return its halt record.
 
@@ -1541,6 +1620,20 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason):
     reason it is on the task path, and a null ``freeze_commit`` means the
     tree already equalled the checkpoint (a halt that edited nothing)."""
     run_id = os.path.basename(os.path.normpath(run_dir))
+    if reviewer_wrote is not None:
+        # `reviewer-wrote` (``halt_out['reviewer_wrote']`` from the loop): the
+        # freeze is the pre-review capture, not whatever the tree holds now.
+        freeze_commit = _freeze_reviewer_wrote(
+            cwd, freeze_stage_ref_name(run_id, stage), reviewer_wrote
+        )
+        return {
+            "stage": stage,
+            "freeze_commit": freeze_commit,
+            "freeze_base": reviewer_wrote["before"]["head"],
+            "halt_reason": halt_reason,
+            "changes": reviewer_wrote["changes"],
+            "reviewer_head": reviewer_wrote["reviewer_head"],
+        }
     freeze_base = _git_head(cwd)
     freeze_commit = freeze_attempt(cwd, freeze_stage_ref_name(run_id, stage))
     return {
@@ -1554,7 +1647,7 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason):
 def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
                           plan_path=None, seeded_findings=None,
-                          named_sections=None):
+                          named_sections=None, halt_out=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1598,7 +1691,13 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     loop's own bottom-of-loop reassignment runs after attempt 1. In the final
     review ``run_base`` **is** the diff base, so a caller never needs a
     separate ``run_diff`` — ``in-run`` is unreachable here by construction
-    (In-run provenance and the seed disposition spec)."""
+    (In-run provenance and the seed disposition spec).
+
+    A reviewer that changed the repository ends the loop at once as an
+    ``escalated`` outcome with ``halt_reason`` ``reviewer-wrote`` (Reviewer
+    write discipline) — no further dispatch, no commit; ``halt_out`` (a dict,
+    or None) receives ``reviewer_wrote`` (``_reviewer_wrote_record``) so the
+    caller can freeze the pre-review capture under the stage ref."""
     if threads is None:
         threads = {}
     state = ConvergenceState()
@@ -1757,7 +1856,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     try:
                         return dispatch_final_review(
                             p, codex_bin, run_dir, tier, threads, timeout=timeout,
-                            resume_thread=resume_thread,
+                            resume_thread=resume_thread, cwd=cwd,
                         )
                     except RuntimeError:
                         reviewer_resume_fallback = True
@@ -1767,15 +1866,28 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     reviewer_resume_fallback = True
                 return dispatch_final_review(
                     fallback_path or p, codex_bin, run_dir, tier, threads,
-                    timeout=timeout,
+                    timeout=timeout, cwd=cwd,
                 )
 
-            verdict, coverage_retry = _review_with_coverage(
-                _final_reviewer_dispatch_call,
-                packet_path, packet_checklist, run_dir, "final",
-                review_kind=packet_review_kind, citable=final_citable,
-                arm_retry_resume=_arm_final_reviewer_retry_resume,
-            )
+            try:
+                verdict, coverage_retry = _review_with_coverage(
+                    _final_reviewer_dispatch_call,
+                    packet_path, packet_checklist, run_dir, "final",
+                    review_kind=packet_review_kind, citable=final_citable,
+                    arm_retry_resume=_arm_final_reviewer_retry_resume,
+                )
+            except forge_git.RepositoryChangedError as e:
+                # Verdict discarded; the stage freezes the pre-review capture.
+                record = _reviewer_wrote_record(e)
+                if halt_out is not None:
+                    halt_out["reviewer_wrote"] = record
+                return TaskOutcome(
+                    status="escalated",
+                    attempts=attempt,
+                    summary="reviewer-wrote: {}".format("; ".join(record["changes"])),
+                    findings=list(record["changes"]),
+                    halt_reason="reviewer-wrote",
+                )
             review_attempts += 1
             # run_diff=diff: the final review's own diff base *is* the run
             # base, so in-run is unreachable here (In-run provenance and the
@@ -2474,7 +2586,15 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 seeded_findings=seeded_findings or None, halt=halt_state,
             )
         else:
-            annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
+            reviewer_wrote = halt_out.get("reviewer_wrote")
+            if reviewer_wrote is None:
+                annotate_ledger(
+                    plan_path, task, "escalated: {}".format(outcome.summary)
+                )
+            # A `reviewer-wrote` halt writes no ledger annotation: its freeze
+            # is the pre-review capture, which cannot carry an edit made after
+            # the review, and an annotation left in the tree would be the one
+            # dirty path at exit. The receipt and halt record carry the halt.
             # Every halt class freezes the paused attempt under a
             # forge-owned ref, leaving the tree at the checkpoint, so the
             # human's fix (or re-tier, or defer, or --gate reconsideration)
@@ -2506,10 +2626,16 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # freeze_commit — the tree already equals the checkpoint — is a
             # different state entirely.
             run_id = os.path.basename(os.path.normpath(run_dir))
-            freeze_base = _git_head(cwd)
-            freeze_commit = freeze_attempt(
-                cwd, freeze_ref_name(run_id, task.number)
-            )
+            if reviewer_wrote is not None:
+                freeze_base = reviewer_wrote["before"]["head"]
+                freeze_commit = _freeze_reviewer_wrote(
+                    cwd, freeze_ref_name(run_id, task.number), reviewer_wrote
+                )
+            else:
+                freeze_base = _git_head(cwd)
+                freeze_commit = freeze_attempt(
+                    cwd, freeze_ref_name(run_id, task.number)
+                )
             halt_state = {
                 "task": task.number,
                 "attempt": halt_out.get("attempt", outcome.attempts),
@@ -2521,6 +2647,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 "repair_task": outcome.repair_task,
                 "approved": approved,
             }
+            if reviewer_wrote is not None:
+                halt_state["changes"] = reviewer_wrote["changes"]
+                halt_state["reviewer_head"] = reviewer_wrote["reviewer_head"]
             overall = "escalated"
             escalated = True
             break
@@ -2553,11 +2682,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         diff = _git_diff(cwd, run_base)
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
+            final_halt_out = {}
             final_outcome = run_final_review_loop(
                 spec_paths, run_base, run_dir,
                 codex_bin, cwd, final_tier,
                 autofix_mode, threads, timeout=timeout, plan_path=plan_path,
                 seeded_findings=seeded_findings, named_sections=named_sections,
+                halt_out=final_halt_out,
             )
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
@@ -2568,7 +2699,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 # freeze them so the run exits clean and the next invocation
                 # is not refused by the clean-tree precondition.
                 halt_state = _freeze_stage_halt(
-                    cwd, run_dir, "final-review", final_outcome.halt_reason
+                    cwd, run_dir, "final-review", final_outcome.halt_reason,
+                    reviewer_wrote=final_halt_out.get("reviewer_wrote"),
                 )
             else:
                 # Terminal doc-sync: reconcile existing docs to the shipped diff,
@@ -2755,7 +2887,11 @@ def main(argv=None):
             effort_overrides=effort_overrides, timeout=args.timeout,
             autofix_mode=args.autofix, resolve=parse_resolutions(args.resolve),
         )
-    except RuntimeError as e:
+    except (RuntimeError, forge_git.FingerprintError) as e:
+        # A FingerprintError (a git call inside a fingerprint, snapshot or
+        # delta capture failed) is a packet-generation-class contract error:
+        # its message names the git command. It is not a RuntimeError so the
+        # resume fallbacks never absorb it; it is caught here and nowhere else.
         print("error: {}".format(e), file=sys.stderr)
         # Persist a contract-error marker when the run dir already exists, so
         # --status reports it. Errors before the run dir exists (dirty tree,

@@ -6,6 +6,8 @@ helpers every split test file uses. Named with a leading underscore so pytest
 does not collect it as a test module. Import with ``from _forge_support import *``.
 """
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "forge-run.py"
@@ -49,7 +52,7 @@ _spec.loader.exec_module(forge_run)
 # the empty-checklist skip case), or a message that isn't a JSON verdict
 # object: passed through untouched.
 FAKE_CODEX_SRC = '''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 argv = sys.argv[1:]
 log = os.environ.get("FORGE_FAKE_LOG")
 idx = 0
@@ -78,6 +81,7 @@ err = ""
 append_file = None
 append_text = ""
 file_ops = []
+ops_first = False
 resp = os.environ.get("FORGE_FAKE_RESPONSES")
 if resp and os.path.exists(resp):
     with open(resp) as f:
@@ -92,6 +96,7 @@ if resp and os.path.exists(resp):
         append_file = r.get("append_file")
         append_text = r.get("append_text", "")
         file_ops = r.get("file_ops", [])
+        ops_first = r.get("ops_first", False)
 if msg:
     if "## Contract checklist" in prompt:
         try:
@@ -119,6 +124,22 @@ if msg:
                     for cid in ids
                 ]
                 msg = json.dumps(obj)
+def run_ops():
+    # {"op": "write"|"append"|"delete", "path": abs path, "text": str} or
+    # {"op": "git", "args": [...]} (run in the child's cwd, the repository).
+    for op in file_ops:
+        if op["op"] == "delete":
+            os.remove(op["path"])
+        elif op["op"] == "git":
+            r = subprocess.run(["git"] + op["args"], capture_output=True, text=True)
+            if r.returncode != 0:
+                sys.stderr.write("fake git op failed: %s\\n" % r.stderr)
+                sys.exit(97)
+        else:
+            with open(op["path"], "w" if op["op"] == "write" else "a") as f:
+                f.write(op.get("text", ""))
+if ops_first:
+    run_ops()
 if sleep_s:
     time.sleep(sleep_s)
 if out:
@@ -130,13 +151,8 @@ if err:
 if append_file:
     with open(append_file, "a") as f:
         f.write(append_text)
-for op in file_ops:
-    # {"op": "write"|"append"|"delete", "path": abs path, "text": str}
-    if op["op"] == "delete":
-        os.remove(op["path"])
-    else:
-        with open(op["path"], "w" if op["op"] == "write" else "a") as f:
-            f.write(op.get("text", ""))
+if not ops_first:
+    run_ops()
 if "--output-last-message" in argv:
     p = argv[argv.index("--output-last-message") + 1]
     with open(p, "w") as f:
@@ -518,6 +534,170 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 """
 
 
+def scratch_repo(testcase, prefix="forge-scratch-repo-"):
+    """A throwaway git repository for tests that call a reviewer dispatch
+    directly: the unchanged-repository check fingerprints ``cwd``, so a
+    dispatch needs a repository of its own that no harness file lands in."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    testcase.addCleanup(shutil.rmtree, d, ignore_errors=True)
+    with open(os.path.join(d, "f1.txt"), "w") as f:
+        f.write("base\n")
+    for args in (["init", "-b", "main"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "Test"], ["add", "-A"],
+                 ["commit", "-m", "base"]):
+        subprocess.run(["git", *args], cwd=d, check=True, capture_output=True,
+                       text=True)
+    return d
+
+
+def thread_stream(thread_id):
+    events = [
+        {"type": "thread.started", "thread_id": thread_id},
+        {"type": "turn.started"},
+        {"type": "turn.completed"},
+    ]
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+# A contract-breaking finding whose location has no line range: a location
+# defect, so the verdict is invalid and drives the one validation retry (which
+# resumes the reviewer's recorded thread).
+INVALID_LOCATION_MSG = json.dumps({
+    "verdict": "findings",
+    "findings": [{
+        "id": "f1", "summary": "BADLOC", "location": {"file": "f1.txt"},
+        "provenance": "in-diff", "impact": "contract-breaking",
+        "contract_ref": "Acceptance: `true`", "convergence": None,
+        "carried_from": None, "repair_task": None,
+    }],
+})
+
+
+class ReviewerWroteCase(unittest.TestCase):
+    """Shared harness for the reviewer-write-discipline runner tests: a git
+    repository at ``self.repo`` holding one tracked file, with the fake codex,
+    plan, spec, run dir and logs OUTSIDE it so only a reviewer's own write can
+    change the fingerprint. ``run_cli`` drives the shipped CLI in a
+    subprocess; ``responses`` is the fake codex script."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="forge-rw-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.repo = os.path.join(self.root, "repo")
+        os.makedirs(self.repo)
+        self.fake = write_fake_codex(self.root)
+        self.run_dir = os.path.join(self.root, "run")
+        self.log = os.path.join(self.root, "fakelog")
+        self.spec = os.path.join(self.root, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        self.plan = os.path.join(self.root, "plan.md")
+        with open(self.plan, "w") as f:
+            f.write(PLAN_STD_TRACKED)
+        with open(os.path.join(self.repo, "f1.txt"), "w") as f:
+            f.write("base\n")
+        with open(os.path.join(self.repo, ".gitignore"), "w") as f:
+            f.write(".forge/\n")
+        self.git("init", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "Test")
+        self.git("add", "-A")
+        self.git("commit", "-m", "base")
+        self.base_sha = self.git("rev-parse", "HEAD").strip()
+        self.stray = os.path.join(self.repo, "stray.txt")
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, check=True, capture_output=True,
+            text=True,
+        ).stdout
+
+    def porcelain(self):
+        return self.git("status", "--porcelain").strip()
+
+    def write_responses(self, responses):
+        for p in (self.log, self.log + ".prompts"):
+            if os.path.exists(p):
+                os.remove(p)
+        path = os.path.join(self.root, "responses.json")
+        with open(path, "w") as f:
+            json.dump(responses, f)
+        return path
+
+    def run_cli(self, responses, extra_args=()):
+        env = os.environ.copy()
+        env["FORGE_FAKE_LOG"] = self.log
+        env["FORGE_FAKE_PROMPT_LOG"] = self.log + ".prompts"
+        env["FORGE_FAKE_RESPONSES"] = self.write_responses(responses)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), self.plan, "--spec", self.spec,
+             "--run-dir", self.run_dir, "--codex-bin", self.fake, *extra_args],
+            cwd=self.repo, capture_output=True, text=True, env=env,
+        )
+
+    def dispatches(self, marker):
+        """argvs whose --output-last-message path contains ``marker``."""
+        out = []
+        for a in _log_argvs(self.log):
+            if "--output-last-message" in a:
+                if marker in a[a.index("--output-last-message") + 1]:
+                    out.append(a)
+        return out
+
+    def run_json(self):
+        with open(os.path.join(self.run_dir, "run.json")) as f:
+            return json.load(f)
+
+    def halt_record(self):
+        return self.run_json().get("halt")
+
+    def commit_count(self):
+        return int(self.git("rev-list", "--count", "HEAD").strip())
+
+    def in_commit(self, sha, path):
+        """True when ``path`` exists in commit ``sha``'s tree."""
+        return subprocess.run(
+            ["git", "cat-file", "-e", "{}:{}".format(sha, path)], cwd=self.repo,
+            capture_output=True,
+        ).returncode == 0
+
+    def main_failing_fingerprint(self, responses, fail_on):
+        """Run ``forge_run.main`` in-process with ``repo_fingerprint`` raising
+        ``FingerprintError`` on its ``fail_on``-th call; returns (rc, stderr)."""
+        from unittest import mock
+        import forge_git
+        real = forge_git.repo_fingerprint
+        calls = {"n": 0}
+
+        def flaky(cwd):
+            calls["n"] += 1
+            if calls["n"] == fail_on:
+                raise forge_git.FingerprintError(
+                    "fingerprint (git rev-parse HEAD) failed in {}: boom".format(cwd))
+            return real(cwd)
+
+        env = {
+            "FORGE_FAKE_LOG": self.log,
+            "FORGE_FAKE_PROMPT_LOG": self.log + ".prompts",
+            "FORGE_FAKE_RESPONSES": self.write_responses(responses),
+        }
+        old_cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, old_cwd)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(forge_git, "repo_fingerprint", flaky), \
+                contextlib.redirect_stderr(err):
+            rc = forge_run.main([
+                self.plan, "--spec", self.spec, "--run-dir", self.run_dir,
+                "--codex-bin", self.fake,
+            ])
+        return rc, err.getvalue()
+
+    def stray_op(self, text="stray\n"):
+        return {"op": "write", "path": self.stray, "text": text}
+
+
 def _log_prompts(log_path):
     """Prompts received by the fake codex, one per dispatch, in call order.
     Set FORGE_FAKE_PROMPT_LOG to that path first. The prompt no longer rides in
@@ -575,4 +755,8 @@ __all__ = [
     "_log_argvs",
     "_log_prompts",
     "_find_dispatch",
+    "scratch_repo",
+    "thread_stream",
+    "INVALID_LOCATION_MSG",
+    "ReviewerWroteCase",
 ]

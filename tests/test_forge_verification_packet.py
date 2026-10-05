@@ -358,7 +358,7 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
 
     def _init_repo(self):
         with open(os.path.join(self.d, ".gitignore"), "w") as f:
-            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\nprompts.log\n")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
             f.write("base\n")
         self._git("init")

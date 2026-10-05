@@ -334,6 +334,10 @@ class FinalReviewSeedPacketTests(_GitFixtureCase):
         self._git("config", "user.name", "Test")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
             f.write("base\n")
+        # Harness files written during a review must not look like a reviewer
+        # write to the unchanged-repository check.
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n*.log\n*.prompts\n")
         self._git("add", "-A")
         self._git("commit", "-m", "base")
         run_base = forge_run._git_head(self.d)

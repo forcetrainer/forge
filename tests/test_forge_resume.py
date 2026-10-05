@@ -160,7 +160,7 @@ class DispatchResumeArgvTests(unittest.TestCase):
         last_msg_path = os.path.join(self.run_dir, "task-1-review-last.txt")
         forge_run.dispatch_reviewer(
             task, self.packet, self.fake, self.run_dir, threads,
-            resume_thread="th-reviewer-1",
+            resume_thread="th-reviewer-1", cwd=scratch_repo(self),
         )
         argvs = _log_argvs(self.log)
         argv = argvs[-1]
@@ -175,13 +175,15 @@ class DispatchResumeArgvTests(unittest.TestCase):
             "-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="medium"',
         ])
         self.assertEqual(rest[6], "th-reviewer-1")
-        self.assertEqual(rest[7:], list(forge_common.CODEX_REVIEWER_SANDBOX_ARGS))
+        # No sandbox override: the unchanged-repository check is the guarantee.
+        self.assertEqual(rest[7:], [])
 
     def test_resume_output_last_message_still_captures_verdict(self):
         self._set_responses([{"exit": 0, "msg": _pass_msg()}])
         task = forge_run.Task(number=1, title="t", tier="standard")
         verdict = forge_run.dispatch_reviewer(
             task, self.packet, self.fake, self.run_dir, {}, resume_thread="th-1",
+            cwd=scratch_repo(self),
         )
         self.assertEqual(verdict.kind, "pass")
 
