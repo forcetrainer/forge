@@ -55,7 +55,8 @@
 - no verification-packet site in `scripts/forge-run.py` calls `_git_diff` with the repair snapshot
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_fingerprint tests.test_forge_verification_packet` passes
+- `python3 -m unittest discover -s tests -p test_forge_fingerprint.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_verification_packet.py` passes
 - `python3 scripts/forge_fingerprint.py snapshot` prints `"tree"`
 
 **Tier:** standard
@@ -83,7 +84,7 @@
 - a final-review packet never contains `## Acceptance results`
 
 **Acceptance:**
-- `python3 -m unittest tests.test_review_packet` passes
+- `python3 -m unittest discover -s tests -p test_review_packet.py` passes
 
 **Tier:** standard
 
@@ -123,7 +124,10 @@
 - the task discovery packet the runner writes contains `## Acceptance results` with that task's clauses; the verification packet does not
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_isolation_flags tests.test_forge_review tests.test_forge_final_review tests.test_forge_resume` passes
+- `python3 -m unittest discover -s tests -p test_forge_isolation_flags.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_review.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_final_review.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_resume.py` passes
 - `grep -c CODEX_REVIEWER_SANDBOX_ARGS scripts/forge_common.py scripts/forge-run.py` prints `0`
 
 **Tier:** standard
@@ -152,7 +156,9 @@
 - a final reviewer that re-raises an approved canonical id as pre-existing contract-breaking passes instead of halting
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_resume tests.test_forge_final_review tests.test_forge_receipts` passes
+- `python3 -m unittest discover -s tests -p test_forge_resume.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_final_review.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_receipts.py` passes
 
 **Tier:** standard
 
@@ -199,7 +205,11 @@
 - the monitor banner on that run dir reads `HALTED — final review: 2 unverified entries` with the first entry's id and reason
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_final_review tests.test_forge_resume tests.test_forge_status tests.test_forge_receipts tests.test_forge_monitor` passes
+- `python3 -m unittest discover -s tests -p test_forge_final_review.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_resume.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_status.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_receipts.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_monitor.py` passes
 
 **Tier:** standard
 
@@ -228,7 +238,7 @@
 - `skills/planning/codex-execution.md` does not say reviewers carry `sandbox_mode="read-only"` in its runner dispatch paragraph
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_docs` passes
+- `python3 -m unittest discover -s tests -p test_forge_docs.py` passes
 - `grep -c 'never modify files' agents/forge-standard.md agents/forge-deep.md` prints `0`
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that a `verify` mismatch is a `reviewer-wrote` halt with no fallback spawn, no coverage retry and no commit, on task and final reviews alike, and that a `verify` failure is a contract error.
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that the orchestrator writes the acceptance result records as JSON to the scratch directory and names that path in the reviewer prompt with the do-not-re-run assertion.
@@ -258,7 +268,8 @@
 - the `forge_dispose` CLI given a verdict on a line changed by an earlier task of the run, with no run diff, classifies it `pre-existing`; the in-process call with `run_diff` classifies it `in-run`
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_dispose tests.test_forge_checklist` passes
+- `python3 -m unittest discover -s tests -p test_forge_dispose.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_checklist.py` passes
 
 **Tier:** standard
 
