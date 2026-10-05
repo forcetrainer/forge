@@ -238,7 +238,7 @@
 - `skills/planning/codex-execution.md` does not say reviewers carry `sandbox_mode="read-only"` in its runner dispatch paragraph
 
 **Acceptance:**
-- `python3 -m unittest discover -s tests -p test_forge_docs.py` passes
+- `python3 -m pytest tests/test_forge_docs.py -q` passes
 - `grep -c 'never modify files' agents/forge-standard.md agents/forge-deep.md` prints `0`
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that a `verify` mismatch is a `reviewer-wrote` halt with no fallback spawn, no coverage retry and no commit, on task and final reviews alike, and that a `verify` failure is a contract error.
 - The Claude dispatch loop in `skills/planning/SKILL.md` states that the orchestrator writes the acceptance result records as JSON to the scratch directory and names that path in the reviewer prompt with the do-not-re-run assertion.
@@ -268,8 +268,8 @@
 - the `forge_dispose` CLI given a verdict on a line changed by an earlier task of the run, with no run diff, classifies it `pre-existing`; the in-process call with `run_diff` classifies it `in-run`
 
 **Acceptance:**
-- `python3 -m unittest discover -s tests -p test_forge_dispose.py` passes
-- `python3 -m unittest discover -s tests -p test_forge_checklist.py` passes
+- `python3 -m pytest tests/test_forge_dispose.py -q` passes
+- `python3 -m pytest tests/test_forge_checklist.py -q` passes
 
 **Tier:** standard
 
