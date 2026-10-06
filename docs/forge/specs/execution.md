@@ -462,9 +462,14 @@ identical contract.
   runner stamps every classified finding with an `identity` of the form
   `<scope>:<canonical id>` — scope `t<N>` for task N's review and `final` for the
   final review, canonical id `carried_from` else `id`. A `carried_from` that already
-  carries a scope prefix (`t<N>:` or `final:`) is taken verbatim: that is how a seeded
-  per-task finding replayed into the final review keeps the identity it was raised
-  under. One identity serves every comparison — the carried/resolved sets within a
+  carries a scope prefix (`t<N>:` or `final:`) is taken verbatim **only when it names a
+  prior finding this review was given** — a seed replayed into the final discovery
+  packet, or an outstanding finding on a verification lap; that is how a seeded
+  per-task finding keeps the identity it was raised under. A scoped `carried_from`
+  naming anything else is a validation defect (one retry naming it, then a contract
+  error), never prefixed and never kept: otherwise a reviewer could borrow an approved
+  identity on a finding it invented and dodge the scope-decision halt, the same
+  escape hatch the honored-`resolved` guard closes. One identity serves every comparison — the carried/resolved sets within a
   review, the honored `resolved` label, and every run-wide set (`approved`,
   `seeded_findings`, `unverified`, a halt record's outstanding findings). Reviewers
   may reuse `f1` in every review; the runner never confuses task 2's `f1` with task
@@ -946,7 +951,8 @@ python3 forge_dispose.py \
   --failed-acceptance <command> \ # first failing command clause's command; only with --execution-failure for an acceptance failure
   --autofix <auto|gate> \
   --scope <t<N>|final> \          # the review's identity scope (Reviewer verdict contract); required
-  [--approved <identity> ...]      # human-resolved finding identities (Halt resolution)
+  [--approved <identity> ...] \   # human-resolved finding identities (Halt resolution)
+  [--prior-identities <json>]     # identities of the prior findings this review's packet carried; omitted = none, so any scoped carried_from is a defect
 ```
 
 The CLI computes the authoritative diff itself and writes `decision.json` to stdout:
@@ -1318,6 +1324,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-05: a scoped `carried_from` is kept only when it names a prior finding supplied to the review; any other is a validation defect — closes the identity-borrowing hole a security review of Task 1 found (#128)
 2026-10-05: Finding identity is runner-owned and review-scoped — `<scope>:<canonical id>`, `t<N>` or `final`; a scoped `carried_from` is kept verbatim; `approved`, `seeded_findings`, `unverified` and halt-record findings are keyed by identity; `--resolve` and the decision helper's `--approved` take identities and the helper requires `--scope`; a reviewer id containing `:` is a validation defect. Replaces the "never namespaced across a run" rule, under which approving `f1` in one task exempted an unrelated `f1` later (#128)
 2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as `reviewer-wrote` (a freezing escalation, not a contract error) on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
