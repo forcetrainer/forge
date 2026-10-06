@@ -18,6 +18,7 @@ def _fix(id="f1", carried_from=None):
         id=id, summary="fix me", file="foo.py", lines="10",
         provenance="in-diff", impact="contract-breaking", contract_ref="AC1",
         carried_from=carried_from, disposition="fix",
+        identity="t1:" + (carried_from or id),
     )
 
 
@@ -26,6 +27,7 @@ def _defer(id="d1"):
     return forge_common.Finding(
         id=id, summary="nit", file="foo.py", lines="10",
         provenance="in-diff", impact="improvement", disposition="defer",
+        identity="t1:" + id,
     )
 
 
@@ -35,7 +37,7 @@ def _halt(id="h1"):
     return forge_common.Finding(
         id=id, summary="scope", file="foo.py", lines="99",
         provenance="pre-existing", impact="contract-breaking", contract_ref="AC2",
-        disposition="halt",
+        disposition="halt", identity="t1:" + id,
     )
 
 
@@ -47,6 +49,7 @@ def _exec_fail():
     return forge_common.Finding(
         id="exec-failure", summary="worker timed out", file=None, lines=None,
         provenance=None, impact=None, disposition="fix",
+        identity="exec-failure",
     )
 
 
@@ -73,7 +76,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("f1")], True)   # attempt 1: f1 seen
         forge_run.advance_state(state, [_fix("f2")], True)   # attempt 2: f1 resolved
-        self.assertIn("f1", state.resolved_ids)
+        self.assertIn("t1:f1", state.resolved_ids)
         # Attempt 3: a fix undid an earlier fix — f1 comes back.
         self.assertEqual(
             forge_run.convergence_decision([_fix("f1")], state, True, 3, "auto"),
@@ -209,7 +212,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
             ("rework", None),
         )
         forge_run.advance_state(state, [_exec_fail()], True)
-        self.assertNotIn("f1", state.resolved_ids)  # the crash never resolved f1
+        self.assertNotIn("t1:f1", state.resolved_ids)  # the crash never resolved f1
         self.assertEqual(
             forge_run.convergence_decision([_fix("f1")], state, True, 3, "auto"),
             ("halt", "stuck"),
@@ -232,7 +235,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
         state = forge_run.ConvergenceState()
         self.assertEqual(
             forge_run.convergence_decision(
-                [_halt("h1")], state, True, 1, "auto", approved_ids={"h1"}),
+                [_halt("h1")], state, True, 1, "auto", approved_ids={"t1:h1"}),
             ("pass", None),
         )
 
@@ -241,7 +244,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
         self.assertEqual(
             forge_run.convergence_decision(
                 [_halt("h1"), _halt("h2")], state, True, 1, "auto",
-                approved_ids={"h1"}),
+                approved_ids={"t1:h1"}),
             ("halt", "scope-decision"),
         )
 
@@ -252,10 +255,10 @@ class ConvergenceDecisionTests(unittest.TestCase):
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("h1")], True)
         forge_run.advance_state(state, [_fix("f2")], True)
-        self.assertIn("h1", state.resolved_ids)
+        self.assertIn("t1:h1", state.resolved_ids)
         self.assertEqual(
             forge_run.convergence_decision(
-                [_halt("h1")], state, True, 3, "auto", approved_ids={"h1"}),
+                [_halt("h1")], state, True, 3, "auto", approved_ids={"t1:h1"}),
             ("halt", "regression"),
         )
 
@@ -267,10 +270,11 @@ class ConvergenceDecisionTests(unittest.TestCase):
             id="h2", summary="scope", file="foo.py", lines="99",
             provenance="pre-existing", impact="contract-breaking",
             contract_ref="AC2", carried_from="h1", disposition="halt",
+            identity="t1:h1",
         )
         self.assertEqual(
             forge_run.convergence_decision(
-                [reissued], state, True, 1, "auto", approved_ids={"h1"}),
+                [reissued], state, True, 1, "auto", approved_ids={"t1:h1"}),
             ("pass", None),
         )
 
@@ -280,7 +284,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
         state = forge_run.ConvergenceState()
         self.assertEqual(
             forge_run.convergence_decision(
-                [_halt("h1")], state, True, 1, "gate", approved_ids={"h1"}),
+                [_halt("h1")], state, True, 1, "gate", approved_ids={"t1:h1"}),
             ("halt", "gate"),
         )
 
@@ -304,13 +308,13 @@ class AdvanceStateTests(unittest.TestCase):
     def test_records_resolved_carried_and_acceptance(self):
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("f1")], True)
-        self.assertEqual(state.carried_ids, {"f1"})
+        self.assertEqual(state.carried_ids, {"t1:f1"})
         self.assertEqual(state.resolved_ids, set())
         self.assertTrue(state.prev_acceptance_ok)
         # f1 disappears (resolved), f2 appears; acceptance now red.
         forge_run.advance_state(state, [_fix("f2")], False)
-        self.assertIn("f1", state.resolved_ids)
-        self.assertEqual(state.carried_ids, {"f2"})
+        self.assertIn("t1:f1", state.resolved_ids)
+        self.assertEqual(state.carried_ids, {"t1:f2"})
         self.assertFalse(state.prev_acceptance_ok)
 
     def test_carried_ids_retains_persisting_fix(self):
@@ -318,9 +322,9 @@ class AdvanceStateTests(unittest.TestCase):
         # set (membership is what the stuck rule reads — no per-finding count).
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("f1")], True)
-        self.assertEqual(state.carried_ids, {"f1"})
+        self.assertEqual(state.carried_ids, {"t1:f1"})
         forge_run.advance_state(state, [_fix("f1")], True)
-        self.assertEqual(state.carried_ids, {"f1"})
+        self.assertEqual(state.carried_ids, {"t1:f1"})
         self.assertEqual(state.resolved_ids, set())
 
     def test_execution_failure_preserves_carried_and_resolved(self):
@@ -331,9 +335,9 @@ class AdvanceStateTests(unittest.TestCase):
         # false regression.
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("f1")], True)   # f1 outstanding
-        self.assertEqual(state.carried_ids, {"f1"})
+        self.assertEqual(state.carried_ids, {"t1:f1"})
         forge_run.advance_state(state, [_exec_fail()], True)  # worker crash
-        self.assertEqual(state.carried_ids, {"f1"})           # unchanged
+        self.assertEqual(state.carried_ids, {"t1:f1"})           # unchanged
         self.assertEqual(state.resolved_ids, set())           # f1 NOT resolved
         self.assertTrue(state.prev_acceptance_ok)
 
@@ -416,6 +420,50 @@ class AcceptanceStuckTests(unittest.TestCase):
         old = {"resolved_ids": [], "carried_ids": [], "prev_acceptance_ok": True}
         self.assertIsNone(
             forge_run.ConvergenceState.from_dict(old).prev_failed_acceptance)
+
+
+
+class IdentityStateTests(unittest.TestCase):
+    def test_identity_none_raises_naming_the_finding_id(self):
+        f = forge_common.Finding(
+            id="f7", summary="s", file="foo.py", lines="1",
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="AC1", disposition="fix")
+        with self.assertRaises(ValueError) as cm:
+            forge_run.convergence_decision(
+                [f], forge_run.ConvergenceState(), True, 1, "auto")
+        self.assertIn("f7", str(cm.exception))
+
+    def test_identity_none_raises_in_advance_state_too(self):
+        f = forge_common.Finding(
+            id="f8", summary="s", file="foo.py", lines="1",
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="AC1", disposition="fix")
+        with self.assertRaises(ValueError) as cm:
+            forge_run.advance_state(forge_run.ConvergenceState(), [f], True)
+        self.assertIn("f8", str(cm.exception))
+
+    def test_advance_state_records_identities(self):
+        state = forge_run.ConvergenceState()
+        forge_run.advance_state(state, [_fix("f1"), _fix("f2")], True)
+        self.assertEqual(state.carried_ids, {"t1:f1", "t1:f2"})
+        forge_run.advance_state(state, [_fix("f2")], True)
+        self.assertEqual(state.resolved_ids, {"t1:f1"})
+        self.assertEqual(state.carried_ids, {"t1:f2"})
+
+    def test_state_round_trips_identities_as_sorted_lists(self):
+        state = forge_run.ConvergenceState(
+            resolved_ids={"t2:f1", "final:f1"}, carried_ids={"t3:f2"})
+        d = state.to_dict()
+        self.assertEqual(d["resolved_ids"], ["final:f1", "t2:f1"])
+        back = forge_run.ConvergenceState.from_dict(d)
+        self.assertEqual(back.resolved_ids, {"t2:f1", "final:f1"})
+        self.assertEqual(back.carried_ids, {"t3:f2"})
+
+    def test_execution_failure_finding_carries_exec_failure_identity(self):
+        import forge_dispose
+        f = forge_dispose.execution_failure_finding("boom")
+        self.assertEqual(f.identity, "exec-failure")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@
 - docs/forge/specs/project-memory.md
 
 ### Task 1: Identity in the decision helper
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (`Finding.identity` field; `finding_to_dict` emits it)
@@ -53,7 +53,9 @@
 - decision.json findings and state carry identities
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_classify tests.test_forge_convergence tests.test_forge_dispose` passes
+- `python3 -m unittest discover -s tests -p test_forge_classify.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_convergence.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_dispose.py` passes
 - `python3 scripts/forge_dispose.py --help` prints `--scope`
 
 **Tier:** standard
@@ -99,7 +101,10 @@
 - --resolve on an unverified stage halt resolves a bare id to the one open entry carrying it and raises listing candidates when two do
 
 **Acceptance:**
-- `python3 -m unittest tests.test_forge_resume tests.test_forge_final_review tests.test_forge_seed tests.test_forge_status` passes
+- `python3 -m unittest discover -s tests -p test_forge_resume.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_final_review.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_seed.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_status.py` passes
 - `python3 -m unittest discover -s tests -p 'test_*.py'` passes
 
 **Tier:** standard

@@ -94,7 +94,6 @@ from forge_common import (  # noqa: F401
 )
 from forge_dispose import (  # noqa: F401
     ConvergenceState,
-    _canon,
     _finding_from_obj,
     _is_execution_failure,
     _parse_lines,
@@ -1309,7 +1308,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # resolution: repair_task is null on halt classes that draft none).
         halted = [
             f for f in findings
-            if f.disposition == "halt" and _canon(f) not in approved_ids
+            if f.disposition == "halt" and f.identity not in approved_ids
         ]
         repair_task = halted[0].repair_task if halted else None
         status = {"pass": "passed", "rework": "rework", "halt": "escalated"}[action]
@@ -1746,7 +1745,7 @@ def _collect_unverified(verdict):
     for f in verdict.findings:
         if f.disposition == "seed":
             entries.append({
-                "kind": "finding", "id": _canon(f), "reason": f.summary,
+                "kind": "finding", "id": f.identity, "reason": f.summary,
                 "call": None,
             })
     for c in verdict.coverage:

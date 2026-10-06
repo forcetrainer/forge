@@ -225,6 +225,7 @@ class Finding:
     carried_from: str | None = None
     repair_task: dict | None = None
     disposition: str | None = None  # "fix" | "defer" | "halt" — set by the runner
+    identity: str | None = None  # "<scope>:<canonical id>" — set by the runner, never the reviewer
 
 
 @dataclass
@@ -276,6 +277,7 @@ def finding_to_dict(finding):
         "carried_from": finding.carried_from,
         "repair_task": finding.repair_task,
         "disposition": finding.disposition,
+        "identity": finding.identity,
     }
 
 
