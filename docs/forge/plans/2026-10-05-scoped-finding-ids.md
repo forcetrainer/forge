@@ -94,6 +94,9 @@
 - the status resume command round-trips into --resolve without error
 - a task receipt's findings each carry their runner-stamped identity
 - a final-review receipt's findings each carry their runner-stamped identity
+- --resolve t2:f1=defer stages exactly task 2's f1 deferral with its task_number, not task 5's f1, and records t2:f1 in run.json approved
+- --resolve on an unverified stage halt records the call on the entry matching a full identity
+- --resolve on an unverified stage halt resolves a bare id to the one open entry carrying it and raises listing candidates when two do
 
 **Acceptance:**
 - `python3 -m unittest tests.test_forge_resume tests.test_forge_final_review tests.test_forge_seed tests.test_forge_status` passes
