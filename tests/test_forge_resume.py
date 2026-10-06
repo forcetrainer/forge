@@ -630,21 +630,22 @@ class ReconcileResumeTests(unittest.TestCase):
             restored=True,
             resolution_delta="--- a/f1.txt\n+++ b/f1.txt\n+HUMANFIXMARKER\n",
             frozen_diff="",
-            findings=[{"id": "h1", "summary": "the legacy guard is wrong",
+            findings=[{"id": "h1", "identity": "t1:h1",
+                       "summary": "the legacy guard is wrong",
                        "disposition": "halt"}],
             attempt=1,
             state=forge_run.ConvergenceState(),
         )
         outcome = forge_run.execute_task(
             self._task1(), self.plan, self.spec, self.run_dir, self.fake,
-            self.d, {}, approved_ids=frozenset({"h1"}), resume=resume,
+            self.d, {}, approved_ids=frozenset({"t1:h1"}), resume=resume,
         )
         self.assertEqual(outcome.status, "passed")
         brief_path = os.path.join(self.run_dir, "task-1-attempt-2-brief.md")
         with open(brief_path) as f:
             brief = f.read()
         self.assertIn("HUMANFIXMARKER", brief)
-        self.assertIn("h1", brief)
+        self.assertIn("- t1:h1 (", brief)
         self.assertIn("the legacy guard is wrong", brief)
         prompts = _log_prompts(self.plog)
         self.assertTrue(any("HUMANFIXMARKER" in p for p in prompts), prompts)
@@ -661,11 +662,11 @@ class ReconcileResumeTests(unittest.TestCase):
             restored=False, resolution_delta="", frozen_diff="",
             findings=[{"id": "h1", "summary": "scope call"}],
             attempt=2,
-            state=forge_run.ConvergenceState(resolved_ids={"f1"}),
+            state=forge_run.ConvergenceState(resolved_ids={"t1:f1"}),
         )
         outcome = forge_run.execute_task(
             self._task1(), self.plan, self.spec, self.run_dir, self.fake,
-            self.d, {}, approved_ids=frozenset({"h1"}), resume=resume,
+            self.d, {}, approved_ids=frozenset({"t1:h1"}), resume=resume,
         )
         self.assertEqual(outcome.status, "escalated")
         self.assertEqual(outcome.halt_reason, "regression")
@@ -690,11 +691,11 @@ class ReconcileResumeTests(unittest.TestCase):
             restored=False, resolution_delta="", frozen_diff="",
             findings=[{"id": "h1", "summary": "scope call"}],
             attempt=2,
-            state=forge_run.ConvergenceState(resolved_ids={"f1"}),
+            state=forge_run.ConvergenceState(resolved_ids={"t1:f1"}),
         )
         outcome = forge_run.execute_task(
             self._task1(), self.plan, self.spec, self.run_dir, self.fake,
-            self.d, {}, approved_ids=frozenset({"h1"}), resume=resume,
+            self.d, {}, approved_ids=frozenset({"t1:h1"}), resume=resume,
         )
         self.assertEqual(outcome.status, "escalated")
         self.assertEqual(outcome.halt_reason, "regression")
@@ -772,10 +773,10 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         with open(os.path.join(self.run_dir, "run.json")) as f:
             return json.load(f)
 
-    def _halt_msg(self, ref="Acceptance: `true`"):
+    def _halt_msg(self, ref="Acceptance: `true`", carried_from=None):
         return _fix_findings_msg(
             "f1.txt", "99", "the legacy guard is wrong", id="h1",
-            contract_ref=ref,
+            contract_ref=ref, carried_from=carried_from,
             repair_task={
                 "title": "Fix the legacy guard", "files": ["f1.txt"],
                 "spec": "Halt resolution", "tests": ["the guard holds"],
@@ -800,13 +801,13 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         self._halt_then_resolve()
         run = self._run_json()
         self.assertIsNone(run.get("halt"))
-        self.assertEqual(run["approved"], ["h1"])
+        self.assertEqual(run["approved"], ["t1:h1"])
 
     def test_second_resume_keeps_first_approval_without_restating_resolve(self):
         self._halt_then_resolve()
         res = self._run([{"exit": 0, "msg": _pass_msg()}])
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(self._run_json()["approved"], ["h1"])
+        self.assertEqual(self._run_json()["approved"], ["t1:h1"])
 
     # --- rework lap: every write site, final-review wiring, defer, validation
 
@@ -831,6 +832,22 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def _seed_the_approved_finding(self):
+        # A scoped carried_from may only name a prior finding the final review
+        # was given, so the final reviewer that re-raises the approved t1:h1
+        # is handed it as a replayed seed (run.json's seeded_findings).
+        path = os.path.join(self.run_dir, "run.json")
+        run = self._run_json()
+        run["seeded_findings"] = [{
+            "id": "t1:h1", "identity": "t1:h1", "summary": "the legacy guard",
+            "location": {"file": "f1.txt", "lines": "99"},
+            "provenance": "in-run", "impact": "unverifiable",
+            "contract_ref": None, "convergence": None, "carried_from": None,
+            "repair_task": None, "disposition": "seed",
+        }]
+        with open(path, "w") as f:
+            json.dump(run, f)
+
     def _in_process(self, responses, **kw):
         self._env_for(responses)
         return forge_run.run_plan(
@@ -841,7 +858,8 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         # The final reviewer re-raises the already-approved pre-existing
         # finding; only the runner threading approved_ids into the final
         # review's convergence lets that pass instead of halting again.
-        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1")}])
+        self._seed_the_approved_finding()
+        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1", carried_from="t1:h1")}])
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
     def test_every_run_json_write_of_a_resumed_run_carries_approved(self):
@@ -862,7 +880,7 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertGreaterEqual(len(seen), 4)
         for approved in seen:
-            self.assertEqual(sorted(approved or []), ["h1"], seen)
+            self.assertEqual(sorted(approved or []), ["t1:h1"], seen)
 
     def test_contract_error_write_keeps_run_level_approved_and_halt(self):
         self._halt()
@@ -903,11 +921,14 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
                     resolve={"h1": "defer"})
         run = self._run_json()
         self.assertIsNone(run.get("halt"))
-        self.assertEqual(run["approved"], ["h1"])
+        self.assertEqual(run["approved"], ["t1:h1"])
         self.assertEqual(
             [d.get("id") for d in run.get("deferrals") or []], ["h1"])
+        self.assertEqual(
+            [d.get("identity") for d in run.get("deferrals") or []], ["t1:h1"])
         # The next resume neither re-halts nor loses the deferral.
-        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1")}])
+        self._seed_the_approved_finding()
+        res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1", carried_from="t1:h1")}])
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(
             [d.get("id") for d in self._run_json().get("deferrals") or []],
@@ -919,7 +940,128 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1, res.stdout)
         self.assertIn("h1", res.stderr)
         self.assertIn("no halt record", res.stderr)
-        self.assertEqual(self._run_json()["approved"], ["h1"])
+        self.assertEqual(self._run_json()["approved"], ["t1:h1"])
+
+    # --- review-scoped identities (#128)
+
+    def _edit_halt(self, fn):
+        path = os.path.join(self.run_dir, "run.json")
+        run = self._run_json()
+        fn(run["halt"])
+        with open(path, "w") as f:
+            json.dump(run, f)
+
+    def test_resolve_accepts_a_full_identity_on_a_scope_decision_halt(self):
+        self._halt()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "t1:h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._run_json()["approved"], ["t1:h1"])
+
+    def test_resolve_accepts_a_bare_id_matching_exactly_one_identity(self):
+        self._halt()
+        res = self._run([{"exit": 0, "msg": ""},
+                         {"exit": 0, "msg": self._halt_msg()},
+                         {"exit": 0, "msg": _pass_msg()}],
+                        extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._run_json()["approved"], ["t1:h1"])
+
+    def test_resolve_raises_listing_candidates_for_an_ambiguous_bare_id(self):
+        self._halt()
+
+        def add_twin(halt):
+            twin = dict(halt["findings"][0], identity="t2:h1")
+            halt["findings"].append(twin)
+
+        self._edit_halt(add_twin)
+        before = self._run_json()["halt"]
+        res = self._run([], extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("ambiguous", res.stderr)
+        self.assertIn("t1:h1", res.stderr)
+        self.assertIn("t2:h1", res.stderr)
+        self.assertEqual(self._run_json()["halt"], before)
+
+    def test_resolve_raises_naming_an_identity_no_halt_record_carries(self):
+        self._halt()
+        res = self._run([], extra_args=["--resolve", "t9:h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("t9:h1", res.stderr)
+        self.assertIn("t1:h1", res.stderr)  # the outstanding identity, listed
+
+    def test_reconciliation_brief_names_resolved_findings_by_identity(self):
+        self._halt_then_resolve()
+        with open(os.path.join(self.run_dir, "task-1-reconcile.md")) as f:
+            brief = f.read()
+        self.assertIn("- t1:h1 (repair)", brief)
+
+    def test_a_halt_record_whose_findings_lack_identity_raises_naming_run_json(self):
+        self._halt()
+
+        def strip(halt):
+            for f in halt["findings"]:
+                f.pop("identity", None)
+
+        self._edit_halt(strip)
+        res = self._run([], extra_args=["--resolve", "h1=repair"])
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn(os.path.join(self.run_dir, "run.json"), res.stderr)
+        self.assertIn("identity", res.stderr)
+
+    def test_resolve_defer_stages_exactly_the_named_identity(self):
+        self._halt()
+
+        def add_other_task_twin(halt):
+            twin = dict(halt["findings"][0], identity="t5:h1")
+            halt["findings"].append(twin)
+
+        self._edit_halt(add_other_task_twin)
+        with mock.patch.object(
+            forge_run, "run_final_review_loop",
+            side_effect=RuntimeError("simulated kill"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._in_process(
+                    [{"exit": 0, "msg": ""},
+                     {"exit": 0, "msg": self._halt_msg(
+                         carried_from=None)}],
+                    resolve={"t1:h1": "defer"})
+        run = self._run_json()
+        staged = run.get("deferrals") or []
+        self.assertEqual([d.get("identity") for d in staged], ["t1:h1"])
+        self.assertEqual([d.get("task_number") for d in staged], [1])
+        self.assertEqual(run["approved"], ["t1:h1"])
+
+    def test_scope_approval_in_one_task_does_not_exempt_another_tasks_finding(self):
+        # f1 approved while resolving task 2 (identity t2:h1) must not exempt
+        # task 5's own h1 (identity t5:h1): it halts scope-decision.
+        os.makedirs(self.run_dir, exist_ok=True)
+        plan5 = os.path.join(self.run_dir, "plan5.md")  # run/ is gitignored
+        with open(plan5, "w") as f:
+            f.write(PLAN_APPROVED.replace("Task 1", "Task 5"))
+        task = forge_run.order_tasks(forge_run.parse_plan_tasks(plan5))[0]
+        self.assertEqual(task.number, 5)
+        outcome = self._execute_task5(
+            task, plan5, frozenset({"t2:h1"}))
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+        outcome = self._execute_task5(
+            task, plan5, frozenset({"t5:h1"}))
+        self.assertEqual(outcome.status, "passed")
+
+    def _execute_task5(self, task, plan5, approved_ids):
+        run_dir = os.path.join(self.run_dir, "run5-{}".format(
+            "-".join(sorted(i.replace(":", "_") for i in approved_ids))))
+        os.makedirs(run_dir, exist_ok=True)
+        self._env_for([{"exit": 0, "msg": "", "append_file": self.f1,
+                        "append_text": "FROZENWORK\n"},
+                       {"exit": 0, "msg": self._halt_msg()}])
+        return forge_run.execute_task(
+            task, plan5, self.spec, run_dir, self.fake, self.d, {},
+            approved_ids=approved_ids)
 
 
 class UnverifiedResolveTests(UnverifiedCase):
@@ -946,7 +1088,7 @@ class UnverifiedResolveTests(UnverifiedCase):
         self.assertEqual(len(self.dispatches("final-review-last")), 1)
         self.assertEqual(len(self.dispatches("doc-sync-last")), 1)
         self.assertEqual(self.run_json()["status"], "passed")
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "accept", "evidence": self.EVIDENCE})
         self.assertIsNone(self.run_json().get("halt"))
 
@@ -955,10 +1097,10 @@ class UnverifiedResolveTests(UnverifiedCase):
         rc, _, err = self._resume(["--resolve", "f1=defer"], ("f1", "no prod data"))
         self.assertEqual(rc, 0, err)
         deferrals = self.run_json()["deferrals"]
-        self.assertEqual([d["id"] for d in deferrals], ["f1"])
+        self.assertEqual([d["id"] for d in deferrals], ["final:f1"])
         self.assertIn("f1", deferrals[0]["summary"])
         self.assertEqual(deferrals[0]["stage"], "final-review")
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "defer", "evidence": None})
 
     def test_repair_reruns_final_review_and_completes(self):
@@ -966,7 +1108,7 @@ class UnverifiedResolveTests(UnverifiedCase):
         rc, _, err = self._resume(["--resolve", "f1=repair"], ("f1", "no prod data"))
         self.assertEqual(rc, 0, err)
         self.assertEqual(len(self.dispatches("final-review-last")), 1)
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "repair", "evidence": None})
 
     def test_resolving_one_of_two_halts_again_naming_only_the_other(self):
@@ -975,8 +1117,49 @@ class UnverifiedResolveTests(UnverifiedCase):
             ["--resolve", "f1=repair"], ("f1", "a"), ("f2", "b"))
         self.assertEqual(rc, 2, err)
         halt = self.run_json()["halt"]
-        self.assertEqual([o["id"] for o in halt["outstanding"]], ["f2"])
+        self.assertEqual([o["id"] for o in halt["outstanding"]], ["final:f2"])
         self.assertEqual(len(self.dispatches("doc-sync-last")), 0)
+
+    def test_resolve_accepts_a_full_identity_on_an_unverified_entry(self):
+        self._halt(("f1", "no prod data"))
+        rc, _, err = self._resume(
+            ["--resolve", "final:f1=repair"], ("f1", "no prod data"))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.entry("final:f1")["call"],
+                         {"verb": "repair", "evidence": None})
+
+    def _add_twin_entry(self):
+        """A second open finding entry whose local id is f1, as a seed
+        replayed from task 2 would leave beside the final review's own."""
+        path = os.path.join(self.run_dir, "run.json")
+        run = self.run_json()
+        twin = {"kind": "finding", "id": "t2:f1", "reason": "twin",
+                "call": None}
+        run["unverified"].append(twin)
+        run["halt"]["outstanding"].append(
+            {"kind": "finding", "id": "t2:f1", "reason": "twin"})
+        with open(path, "w") as f:
+            json.dump(run, f)
+
+    def test_bare_id_resolves_to_the_one_open_entry_carrying_it(self):
+        self._halt(("f1", "a"), ("f2", "b"))
+        rc, _, err = self._resume(
+            ["--resolve", "f2=repair"], ("f1", "a"), ("f2", "b"))
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(self.entry("final:f2")["call"],
+                         {"verb": "repair", "evidence": None})
+        self.assertIsNone(self.entry("final:f1")["call"])
+
+    def test_bare_id_carried_by_two_open_entries_raises_listing_both(self):
+        self._halt(("f1", "a"))
+        self._add_twin_entry()
+        before = self.run_json()
+        rc, _, err = self.run_main([], ["--resolve", "f1=repair"])
+        self.assertEqual(rc, 1, err)
+        self.assertIn("ambiguous", err)
+        self.assertIn("final:f1", err)
+        self.assertIn("t2:f1", err)
+        self.assertEqual(self.run_json()["unverified"], before["unverified"])
 
     def test_malformed_forms_are_contract_errors_naming_the_form(self):
         self._halt(("f1", "no prod data"))
@@ -988,7 +1171,7 @@ class UnverifiedResolveTests(UnverifiedCase):
                 self.assertIn(entry.strip(), err)
                 self.assertEqual(self.run_json()["halt"]["halt_reason"],
                                  "unverified")
-        self.assertIsNone(self.entry("f1")["call"])
+        self.assertIsNone(self.entry("final:f1")["call"])
 
     def test_accept_on_a_scope_decision_id_is_a_contract_error(self):
         halt_msg = _fix_findings_msg(
@@ -1037,7 +1220,7 @@ class UnverifiedSurvivalTests(UnverifiedCase):
         with self._kill_final():
             rc, _, _ = self.run_main([], ["--resolve", "f1=repair"])
         self.assertEqual(rc, 1)
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "repair", "evidence": None})
 
     def test_every_write_of_a_resumed_run_carries_the_unverified_list(self):
@@ -1108,7 +1291,7 @@ class UnverifiedIdCollisionTests(UnverifiedCase):
     def test_both_entries_are_kept(self):
         self._halt()
         got = [(e["kind"], e["id"]) for e in self.unverified()]
-        self.assertEqual(got, [("finding", "t1"), ("coverage", "t1")])
+        self.assertEqual(got, [("finding", "final:t1"), ("coverage", "t1")])
         self.assertEqual(len(self.run_json()["halt"]["outstanding"]), 2)
 
     def test_bare_id_is_ambiguous_and_raises_naming_it(self):
@@ -1117,7 +1300,7 @@ class UnverifiedIdCollisionTests(UnverifiedCase):
         rc, _, err = self.run_main([], ["--resolve", "t1=repair"])
         self.assertEqual(rc, 1)
         self.assertIn("ambiguous", err)
-        self.assertIn("finding:t1", err)
+        self.assertIn("finding:final:t1", err)
         self.assertIn("coverage:t1", err)
         self.assertEqual(self.run_json()["unverified"], before["unverified"])
 
@@ -1128,7 +1311,7 @@ class UnverifiedIdCollisionTests(UnverifiedCase):
             ["--resolve", "finding:t1=repair"])
         self.assertEqual(rc, 2, err)
         calls = {(e["kind"], e["id"]): e["call"] for e in self.unverified()}
-        self.assertEqual(calls[("finding", "t1")],
+        self.assertEqual(calls[("finding", "final:t1")],
                          {"verb": "repair", "evidence": None})
         self.assertIsNone(calls[("coverage", "t1")])
         self.assertEqual(

@@ -414,16 +414,20 @@ def render_halt(halt):
              "checkpoint)"
     )
     approved = halt.get("approved") or {}
-    # Canonical id (``carried_from`` else ``id``) — the identity `run_plan`
-    # and `convergence_decision` both key on. Splitting on the raw id instead
-    # would list a re-issued finding the human already answered as still
-    # outstanding, and print a `--resolve` command naming an id the runner
-    # then rejects as unknown: a command that cannot work is worse than none.
+    # The finding's runner-stamped ``identity`` (``t<N>:<id>`` / ``final:<id>``)
+    # — the key `run_plan` and `convergence_decision` match on and `--resolve`
+    # takes. A halt-record finding without one predates the rule; guessing a
+    # scope for it would print a command the runner rejects, so it raises.
     outstanding = []
     for f in halt.get("findings") or []:
-        canon = f.get("carried_from") or f.get("id", "?")
-        if canon not in approved:
-            outstanding.append(canon)
+        identity = f.get("identity")
+        if not identity:
+            raise ValueError(
+                "halt record finding {!r} has no `identity` field — "
+                "run.json predates review-scoped finding ids".format(
+                    f.get("id", "?")))
+        if identity not in approved:
+            outstanding.append(identity)
     if outstanding:
         lines.append("  outstanding findings: {}".format(", ".join(outstanding)))
         # --resolve (and the approved-finding exemption it feeds) answers a

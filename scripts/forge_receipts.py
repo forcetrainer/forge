@@ -299,7 +299,7 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
     fix has been folded in correctly clears the record rather than preserving
     it — each call rebuilds ``run.json`` from scratch, so omitting the key is
     already sufficient to erase a prior invocation's value. ``approved`` is the
-    run-level set of human-approved canonical finding ids (any iterable of ids,
+    run-level set of human-approved finding identities (any iterable of ids,
     e.g. the ``{id: resolution}`` map's keys), written as a sorted list and
     omitted on None. Every write must pass it: each call rebuilds ``run.json``,
     so a write that omitted it would drop approvals the human already gave.

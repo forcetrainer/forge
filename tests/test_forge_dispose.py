@@ -71,11 +71,11 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
                     autofix="auto", state_path=None, checklist_path=None,
-                    citable_path=None, approved=None):
+                    citable_path=None, approved=None, prior_path=None):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
-            "--attempt", str(attempt),
+            "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,
         ]
@@ -87,7 +87,48 @@ class ForgeDisposeCLITests(unittest.TestCase):
             args += ["--citable", citable_path]
         for approved_id in approved or []:
             args += ["--approved", approved_id]
+        if prior_path:
+            args += ["--prior-identities", prior_path]
         return args
+
+    # --- scoped carried_from must name a supplied prior finding -------------
+
+    def _carried_verdict(self, carried_from):
+        return self._write_json("vcf.json", {"verdict": "findings", "findings": [
+            {"id": "f4", "summary": "bug", "carried_from": carried_from,
+             "convergence": "carried",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+
+    def test_prior_identities_flag_accepts_a_scoped_carried_from_in_the_set(self):
+        v = self._carried_verdict("t2:f1")
+        prior = self._write_json("prior.json", ["t2:f1"])
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fix = json.loads(result.stdout)["findings"]["fix"]
+        self.assertEqual([f["identity"] for f in fix], ["t2:f1"])
+
+    def test_scoped_carried_from_without_prior_identities_is_rejected(self):
+        v = self._carried_verdict("t2:f1")
+        result = self.run_dispose(self._base_args(v))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("f4", result.stderr)
+        self.assertIn("t2:f1", result.stderr)
+
+    def test_scoped_carried_from_outside_the_prior_identities_is_rejected(self):
+        v = self._carried_verdict("t2:f1")
+        prior = self._write_json("prior.json", ["t3:f1"])
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("t2:f1", result.stderr)
+
+    def test_prior_identities_file_must_be_a_json_array_of_strings(self):
+        v = self._carried_verdict(None)
+        prior = self._write_json("prior.json", {"t2:f1": 1})
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("prior-identities", result.stderr)
 
     # --- quadrant / decision.json shape -------------------------------------
 
@@ -207,7 +248,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         )
         d2 = json.loads(r2.stdout)
         self.assertEqual(d2["action"], "pass")
-        self.assertEqual(sorted(d2["state"]["resolved_ids"]), ["f1"])
+        self.assertEqual(sorted(d2["state"]["resolved_ids"]), ["t1:f1"])
 
     def test_regression_resolved_id_reappears_halts(self):
         v1 = self._write_json("vb1.json", {"verdict": "findings", "findings": [
@@ -434,7 +475,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
                               "spec": "x", "tests": [], "acceptance": [],
                               "tier": "standard"}},
         ]})
-        result = self.run_dispose(self._base_args(v, approved=["f1"]))
+        result = self.run_dispose(self._base_args(v, approved=["t1:f1"]))
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)
         self.assertEqual(decision["action"], "pass")
@@ -455,7 +496,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
                               "spec": "x", "tests": [], "acceptance": [],
                               "tier": "standard"}},
         ]})
-        result = self.run_dispose(self._base_args(v, approved=["f1", "f2"]))
+        result = self.run_dispose(self._base_args(v, approved=["t1:f1", "t1:f2"]))
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)
         self.assertEqual(decision["action"], "pass")
@@ -475,7 +516,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
                               "spec": "x", "tests": [], "acceptance": [],
                               "tier": "standard"}},
         ]})
-        result = self.run_dispose(self._base_args(v, approved=["f1"]))
+        result = self.run_dispose(self._base_args(v, approved=["t1:f1"]))
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)
         self.assertEqual(decision["action"], "halt")
@@ -502,12 +543,57 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decision = json.loads(result.stdout)
         self.assertEqual(decision["action"], "pass")
 
+    # --- --scope and identities ---------------------------------------------
+    def _verdict(self, name="vs.json"):
+        return self._write_json(name, {"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "x",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+
+    def _args_without_scope(self, verdict):
+        return ["--verdict", verdict, "--base", self.base, "--attempt", "1",
+                "--acceptance-ok", "true", "--autofix", "auto"]
+
+    def test_missing_scope_is_a_usage_error_naming_it(self):
+        result = self.run_dispose(self._args_without_scope(self._verdict()))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--scope", result.stderr)
+
+    def test_malformed_scope_is_a_usage_error(self):
+        for bad in ("task1", "t", "T1", "finalx"):
+            result = self.run_dispose(
+                self._args_without_scope(self._verdict()) + ["--scope", bad])
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertIn("--scope", result.stderr)
+
+    def test_decision_findings_and_state_carry_identities(self):
+        result = self.run_dispose(
+            self._args_without_scope(self._verdict()) + ["--scope", "t3"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["findings"]["fix"][0]["identity"], "t3:f1")
+        self.assertEqual(decision["state"]["carried_ids"], ["t3:f1"])
+
+    def test_final_scope_and_execution_failure_identity(self):
+        result = self.run_dispose(
+            self._args_without_scope(self._verdict()) + ["--scope", "final"])
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["findings"]["fix"][0]["identity"], "final:f1")
+        result = self.run_dispose([
+            "--base", self.base, "--attempt", "1", "--acceptance-ok", "false",
+            "--autofix", "auto", "--scope", "t1", "--execution-failure",
+            "--execution-detail", "crash"])
+        decision = json.loads(result.stdout)
+        self.assertEqual(
+            decision["findings"]["fix"][0]["identity"], "exec-failure")
+
     # --- execution-failure path -----------------------------------------------
 
     def test_execution_failure_is_fix_retry_not_halt_or_defer(self):
         result = self.run_dispose([
             "--base", self.base,
-            "--attempt", "1", "--acceptance-ok", "false", "--autofix", "auto",
+            "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false", "--autofix", "auto",
             "--execution-failure", "--execution-detail", "worker crashed",
         ])
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -523,7 +609,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         for i in range(1, 6):
             result = self.run_dispose([
                 "--base", self.base,
-                "--attempt", str(i), "--acceptance-ok", "false",
+                "--scope", "t1", "--attempt", str(i), "--acceptance-ok", "false",
                 "--autofix", "auto", "--execution-failure",
                 "--execution-detail", "worker timed out",
             ] + (["--state", state_path] if state_path else []))
@@ -539,7 +625,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
     def test_failed_acceptance_without_execution_failure_is_usage_error(self):
         v = self._write_json("vfa.json", {"verdict": "clean"})
         result = self.run_dispose([
-            "--verdict", v, "--base", self.base, "--attempt", "1",
+            "--verdict", v, "--base", self.base, "--scope", "t1", "--attempt", "1",
             "--acceptance-ok", "false", "--autofix", "auto",
             "--failed-acceptance", "make a",
         ])
@@ -549,7 +635,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def test_failed_acceptance_with_acceptance_ok_true_is_usage_error(self):
         result = self.run_dispose([
-            "--base", self.base, "--attempt", "1", "--acceptance-ok", "true",
+            "--base", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
             "--autofix", "auto", "--execution-failure",
             "--failed-acceptance", "make a",
         ])
@@ -562,7 +648,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decisions = []
         for i in (1, 2):
             result = self.run_dispose([
-                "--base", self.base, "--attempt", str(i),
+                "--base", self.base, "--scope", "t1", "--attempt", str(i),
                 "--acceptance-ok", "false", "--autofix", "auto",
                 "--execution-failure", "--failed-acceptance", "make a",
             ] + (["--state", state_path] if state_path else []))
@@ -585,7 +671,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]})
         result = self.run_dispose([
             "--verdict", v, "--base", "not-a-real-ref-xyz",
-            "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
+            "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
         ])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not-a-real-ref-xyz", result.stderr)
@@ -640,7 +726,7 @@ class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
             json.dump(verdict_obj, f)
         return subprocess.run(
             [sys.executable, SCRIPT, "--verdict", path, "--base", self.base,
-             "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix],
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix],
             cwd=self.repo_dir, capture_output=True, text=True,
         )
 
@@ -754,6 +840,46 @@ class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
         self.assertEqual(
             self._derived_defects(self._claimed("pre-existing", "2-2")), [])
 
+    def test_validate_repair_tasks_carried_ids_without_scope_raises(self):
+        verdict = forge_dispose._verdict_from_obj(
+            self._claimed("in-diff", "50-51"))
+        diff = self._git("diff", self.base)
+        with self.assertRaises(ValueError):
+            forge_dispose.validate_repair_tasks(
+                verdict, diff, carried_ids={"t1:f1"})
+
+    def test_validate_repair_tasks_carried_ids_with_scope_classifies(self):
+        verdict = forge_dispose._verdict_from_obj(
+            self._claimed("in-diff", "50-51"))
+        diff = self._git("diff", self.base)
+        defects = forge_dispose.validate_repair_tasks(
+            verdict, diff, run_diff=diff, carried_ids={"t1:f1"}, scope="t1")
+        self.assertEqual(defects, [
+            "f1: repair_task is required on a pre-existing contract-breaking "
+            "finding"])
+
+    def _missing_id_obj(self):
+        obj = self._claimed("in-diff", "50-51")
+        del obj["findings"][0]["id"]
+        return obj
+
+    def test_verdict_defects_reports_a_missing_id_instead_of_raising(self):
+        verdict = forge_dispose._verdict_from_obj(self._missing_id_obj())
+        diff = self._git("diff", self.base)
+        defects = forge_run._verdict_defects(
+            verdict, [], "verification", None,
+            classify_ctx=lambda: {"diff_text": diff, "run_diff": diff,
+                                  "carried_ids": set(), "scope": "t1"},
+        )
+        self.assertTrue(any("finding #1" in d and "id" in d for d in defects),
+                        defects)
+
+    def test_cli_reports_a_missing_id_as_an_error_not_a_traceback(self):
+        result = self._dispose(self._missing_id_obj(), "auto")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("finding #1", result.stderr)
+
     def test_validation_does_not_mutate_the_verdict(self):
         verdict = forge_dispose._verdict_from_obj(
             self._claimed("in-diff", "50-51"))
@@ -840,7 +966,7 @@ class RunDiffParityGapTests(unittest.TestCase):
             json.dump(self.verdict_obj, f)
         result = subprocess.run(
             [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base,
-             "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto"],
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto"],
             cwd=self.repo_dir, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -854,7 +980,7 @@ class RunDiffParityGapTests(unittest.TestCase):
         verdict = forge_dispose._verdict_from_obj(self.verdict_obj)
         review_diff = self._git("diff", self.task_base)
         run_diff = self._git("diff", self.run_base)
-        forge_dispose.classify_findings(verdict, review_diff, run_diff=run_diff)
+        forge_dispose.classify_findings(verdict, review_diff, "t1", run_diff=run_diff)
         finding = verdict.findings[0]
         self.assertEqual(finding.provenance, "in-run")
         self.assertEqual(finding.disposition, "seed")
@@ -1083,6 +1209,7 @@ class ForgeDisposeCLIContractRefMembershipTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("location", result.stderr)
         self.assertNotIn("citable ref", result.stderr)
+
 
 
 if __name__ == "__main__":

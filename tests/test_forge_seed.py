@@ -318,6 +318,56 @@ class SeedDispositionTests(_GitFixtureCase):
             len(forge_run._read_seeded_findings(run_dir) or []), 1
         )
 
+    def _seed_run(self):
+        plan = self._plan(PLAN_SEED_THEN_CONTINUE)
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
+        self._init_repo()
+        run_dir = os.path.join(self.d, "run")
+        self._set_responses([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "SEEDMARKER cross-task issue",
+                contract_ref="Acceptance: `echo TASK2MARK >> f2.txt`",
+            )},
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(
+            forge_run.run_plan(plan, self.spec, run_dir, self.fake, self.d), 0)
+        return run_dir
+
+    def test_seeded_finding_persists_with_identity_as_id_and_no_carried_from(self):
+        run_dir = self._seed_run()
+        with open(os.path.join(run_dir, "run.json")) as f:
+            seeded = json.load(f)["seeded_findings"]
+        self.assertEqual(len(seeded), 1)
+        self.assertEqual(seeded[0]["id"], "t2:f1")
+        self.assertEqual(seeded[0]["identity"], "t2:f1")
+        self.assertIsNone(seeded[0]["carried_from"])
+
+    def test_a_task_receipts_findings_each_carry_their_stamped_identity(self):
+        run_dir = self._seed_run()
+        with open(os.path.join(run_dir, "task-2-attempt-1.json")) as f:
+            findings = json.load(f)["review_verdict"]["findings"]
+        self.assertEqual([f["identity"] for f in findings], ["t2:f1"])
+
+    def test_unverified_entries_for_two_tasks_f1_seeds_both_survive_the_merge(self):
+        def seed(identity):
+            return forge_common.Finding(
+                id="f1", summary="s " + identity, file="f1.txt", lines="2",
+                provenance="in-run", impact="unverifiable",
+                disposition="seed", identity=identity)
+
+        def verdict(identity):
+            return forge_common.Verdict(kind="findings", findings=[seed(identity)])
+
+        first = forge_run._collect_unverified(verdict("t2:f1"))
+        second = forge_run._collect_unverified(verdict("t5:f1"))
+        merged = forge_run._merge_unverified(first, second)
+        self.assertEqual([e["id"] for e in merged], ["t2:f1", "t5:f1"])
+
 
 # --- 4: seeded findings pre-seed the final review's discovery packet only ---
 
@@ -357,6 +407,7 @@ class FinalReviewSeedPacketTests(_GitFixtureCase):
             id="seed1", summary="SEEDMARKER earlier-task issue", file="other.py",
             lines="5", provenance="in-run", impact="contract-breaking",
             contract_ref="Acceptance: `true`", disposition="seed",
+            identity="t1:seed1",
         ))]
 
         self._set_responses([
@@ -396,6 +447,58 @@ class FinalReviewSeedPacketTests(_GitFixtureCase):
         verification_summaries = [f["summary"] for f in verification_calls[0]]
         self.assertNotIn("SEEDMARKER earlier-task issue", verification_summaries)
         self.assertIn("real issue", verification_summaries)
+
+    def _unverifiable_msg(self, fid, carried_from=None):
+        return json.dumps({"verdict": "findings", "findings": [{
+            "id": fid, "summary": "cannot run it here",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "unverifiable",
+            "contract_ref": None,
+            "convergence": "carried" if carried_from else None,
+            "carried_from": carried_from, "repair_task": None,
+        }]})
+
+    def _final_with(self, seeded, msg):
+        run_base = self._init_repo_with_task_work()
+        run_dir = os.path.join(self.d, "run")
+        os.makedirs(run_dir)
+        self._set_responses([{"exit": 0, "msg": msg}])
+        calls = []
+        orig = rp.build_packet
+
+        def spy(*a, **kw):
+            calls.append(kw.get("prior_findings"))
+            return orig(*a, **kw)
+
+        with mock.patch.object(rp, "build_packet", side_effect=spy):
+            outcome = forge_run.run_final_review_loop(
+                [self.spec], run_base, run_dir, self.fake, self.d, "standard",
+                "auto", {}, seeded_findings=seeded,
+            )
+        return outcome, calls, run_dir
+
+    def test_seeded_finding_replays_with_identity_as_id_and_no_carried_from(self):
+        record = forge_run._seed_record(forge_common.Finding(
+            id="f1", summary="earlier-task issue", file="f1.txt", lines="2",
+            provenance="in-run", impact="unverifiable", carried_from=None,
+            disposition="seed", identity="t2:f1"))
+        self.assertEqual(record["id"], "t2:f1")
+        self.assertIsNone(record["carried_from"])
+        self.assertEqual(record["identity"], "t2:f1")
+        outcome, calls, _ = self._final_with(
+            [record], self._unverifiable_msg("x9", carried_from="t2:f1"))
+        self.assertEqual(calls[0][0]["id"], "t2:f1")
+        self.assertIsNone(calls[0][0]["carried_from"])
+        # The final reviewer carried it from the seed: it keeps the identity.
+        self.assertEqual([e["id"] for e in outcome.unverified], ["t2:f1"])
+
+    def test_a_final_review_receipts_findings_carry_their_stamped_identity(self):
+        outcome, _, run_dir = self._final_with(
+            [], self._unverifiable_msg("f1"))
+        with open(os.path.join(run_dir, "final-review.json")) as f:
+            findings = json.load(f)["findings"]
+        self.assertEqual([f["identity"] for f in findings], ["final:f1"])
+        self.assertEqual([e["id"] for e in outcome.unverified], ["final:f1"])
 
 
 if __name__ == "__main__":

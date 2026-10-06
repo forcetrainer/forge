@@ -703,7 +703,7 @@ class ValidateContractRefsUnitTests(unittest.TestCase):
                 label="task-1", review_kind="verification", citable=citable,
             )
         self.assertTrue(retried)
-        classified = forge_dispose.classify_findings(verdict, diff_text)
+        classified = forge_dispose.classify_findings(verdict, diff_text, "t1")
         self.assertEqual(classified.findings[0].disposition, "defer")
 
 
@@ -917,7 +917,7 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
-            "--attempt", str(attempt),
+            "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,
         ]

@@ -108,6 +108,7 @@ def _finding(**kw):
         contract_ref=None,
     )
     base.update(kw)
+    base.setdefault("identity", "t1:" + base["id"])
     return forge_common.Finding(**base)
 
 
@@ -492,7 +493,7 @@ class ClassifyFindingsTests(unittest.TestCase):
 
     def test_pass_verdict_returns_unchanged(self):
         v = forge_common.Verdict(kind="pass")
-        out = forge_run.classify_findings(v, DIFF_SINGLE)
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertIs(out, v)
         self.assertEqual(out.kind, "pass")
 
@@ -505,7 +506,7 @@ class ClassifyFindingsTests(unittest.TestCase):
         f2 = _finding(id="f2", file="foo.py", lines="40", provenance="in-diff",
                       impact="contract-breaking", contract_ref="AC2")
         v = forge_common.Verdict(kind="findings", findings=[f1, f2])
-        out = forge_run.classify_findings(v, DIFF_SINGLE)
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertEqual(f1.provenance, "in-diff")
         self.assertEqual(f1.disposition, "fix")
         self.assertEqual(f2.provenance, "pre-existing")
@@ -515,7 +516,7 @@ class ClassifyFindingsTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="13", provenance="in-diff",
                      impact="contract-breaking", contract_ref=None)
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertEqual(f.provenance, "in-diff")
         self.assertEqual(f.disposition, "defer")
 
@@ -532,7 +533,7 @@ class ClassifyFindingsRunDiffTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1", run_diff=DIFF_RUN_WIDER)
         self.assertEqual(f.provenance, "in-run")
         self.assertEqual(f.disposition, "seed")
 
@@ -540,7 +541,7 @@ class ClassifyFindingsRunDiffTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="13", provenance="pre-existing",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1", run_diff=DIFF_RUN_WIDER)
         self.assertEqual(f.provenance, "in-diff")
         self.assertEqual(f.disposition, "fix")
 
@@ -548,7 +549,7 @@ class ClassifyFindingsRunDiffTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="100", provenance="pre-existing",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1", run_diff=DIFF_RUN_WIDER)
         self.assertEqual(f.provenance, "pre-existing")
         self.assertEqual(f.disposition, "halt")
 
@@ -556,7 +557,7 @@ class ClassifyFindingsRunDiffTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
                      impact="improvement", contract_ref=None)
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE, run_diff=DIFF_RUN_WIDER)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1", run_diff=DIFF_RUN_WIDER)
         self.assertEqual(f.provenance, "in-run")
         self.assertEqual(f.disposition, "defer")
 
@@ -568,7 +569,7 @@ class ClassifyFindingsRunDiffTests(unittest.TestCase):
         f = _finding(id="f1", file="foo.py", lines="41", provenance="pre-existing",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_run.classify_findings(v, DIFF_SINGLE)
+        forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertEqual(f.provenance, "pre-existing")
         self.assertEqual(f.disposition, "halt")
 
@@ -583,7 +584,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         f = _finding(id="f1", convergence="resolved",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"f1"})
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1", carried_ids={"t1:f1"})
         self.assertEqual(out.findings, [])
         self.assertIsNone(f.disposition)  # never dispositioned — dropped first
 
@@ -594,7 +595,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
                      provenance="pre-existing", impact="contract-breaking",
                      contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"other"})
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1", carried_ids={"other"})
         self.assertEqual(out.findings, [f])
         self.assertEqual(f.provenance, "in-diff")
         self.assertEqual(f.disposition, "fix")
@@ -606,7 +607,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         f = _finding(id="f1-new", carried_from="orig1", convergence="resolved",
                      impact="contract-breaking", contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        out = forge_run.classify_findings(v, DIFF_SINGLE, carried_ids={"orig1"})
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1", carried_ids={"t1:orig1"})
         self.assertEqual(out.findings, [])
 
     def test_carried_ids_none_preserves_todays_behavior(self):
@@ -616,7 +617,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
                      provenance="pre-existing", impact="contract-breaking",
                      contract_ref="AC1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        out = forge_run.classify_findings(v, DIFF_SINGLE)
+        out = forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertEqual(out.findings, [f])
         self.assertEqual(f.disposition, "fix")
 
@@ -627,9 +628,9 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
                                 provenance="in-diff", impact="contract-breaking",
                                 contract_ref="AC1")
         v1 = forge_common.Verdict(kind="findings", findings=[f1_attempt1])
-        forge_run.classify_findings(v1, DIFF_SINGLE, carried_ids=state.carried_ids)
+        forge_run.classify_findings(v1, DIFF_SINGLE, "t1", carried_ids=state.carried_ids)
         forge_run.advance_state(state, v1.findings, True)
-        self.assertIn("f1", state.carried_ids)
+        self.assertIn("t1:f1", state.carried_ids)
 
         # Attempt 2: the reviewer (falsely) labels f1 resolved; f1's canon is
         # a member of the carried set from attempt 1, so the guard honors the
@@ -638,14 +639,14 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
                                 lines="13", impact="contract-breaking",
                                 contract_ref="AC1")
         v2 = forge_common.Verdict(kind="findings", findings=[f1_attempt2])
-        forge_run.classify_findings(v2, DIFF_SINGLE, carried_ids=state.carried_ids)
+        forge_run.classify_findings(v2, DIFF_SINGLE, "t1", carried_ids=state.carried_ids)
         self.assertEqual(v2.findings, [])
         action, halt_reason = forge_run.convergence_decision(
             v2.findings, state, True, 2, "auto"
         )
         self.assertEqual(action, "pass")
         forge_run.advance_state(state, v2.findings, True)
-        self.assertIn("f1", state.resolved_ids)
+        self.assertIn("t1:f1", state.resolved_ids)
 
         # Attempt 3: f1 reappears for real (the resolved claim was false) —
         # the existing regression rule catches it via the runner's own
@@ -654,7 +655,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
                                 provenance="in-diff", impact="contract-breaking",
                                 contract_ref="AC1")
         v3 = forge_common.Verdict(kind="findings", findings=[f1_attempt3])
-        forge_run.classify_findings(v3, DIFF_SINGLE, carried_ids=state.carried_ids)
+        forge_run.classify_findings(v3, DIFF_SINGLE, "t1", carried_ids=state.carried_ids)
         action, halt_reason = forge_run.convergence_decision(
             v3.findings, state, True, 3, "auto"
         )
@@ -705,6 +706,197 @@ class SeededDispositionGroupTests(unittest.TestCase):
         )
         self.assertEqual(action, "pass")
         self.assertIsNone(halt_reason)
+
+
+
+class FindingIdentityTests(unittest.TestCase):
+    """finding_identity: the one place a finding's run-wide identity is derived
+    (scope + canonical id; a scope-prefixed carried_from is taken verbatim)."""
+
+    def test_prefixes_bare_id_with_scope(self):
+        f = _finding(id="f1")
+        self.assertEqual(forge_dispose.finding_identity(f, "t2"), "t2:f1")
+
+    def test_prefixes_bare_carried_from_with_scope(self):
+        f = _finding(id="f9", carried_from="f1")
+        self.assertEqual(forge_dispose.finding_identity(f, "t2"), "t2:f1")
+
+    def test_keeps_a_scoped_carried_from_naming_a_supplied_prior_identity(self):
+        f = _finding(id="f1", carried_from="t2:f1")
+        self.assertEqual(
+            forge_dispose.finding_identity(f, "final", frozenset({"t2:f1"})),
+            "t2:f1")
+        g = _finding(id="f1", carried_from="final:f3")
+        self.assertEqual(
+            forge_dispose.finding_identity(g, "t5", frozenset({"final:f3"})),
+            "final:f3")
+
+    def test_scoped_carried_from_outside_the_prior_set_raises_naming_it(self):
+        f = _finding(id="f7", carried_from="t2:f1")
+        for prior in (frozenset(), frozenset({"t3:f1"})):
+            with self.assertRaises(ValueError) as cm:
+                forge_dispose.finding_identity(f, "t5", prior)
+            self.assertIn("t2:f1", str(cm.exception))
+            self.assertIn("f7", str(cm.exception))
+
+    def test_malformed_scope_raises_naming_it(self):
+        f = _finding(id="f1")
+        for bad in ("task2", "t", "t2x", "", "Final", None):
+            with self.assertRaises(ValueError) as cm:
+                forge_dispose.finding_identity(f, bad)
+            self.assertIn(repr(bad), str(cm.exception))
+
+
+class ClassifyStampsIdentityTests(unittest.TestCase):
+    def test_every_finding_gets_identity_under_the_scope(self):
+        f1 = _finding(id="f1", impact="contract-breaking", contract_ref="AC1")
+        f2 = _finding(id="f2", carried_from="f1")
+        f3 = _finding(id="f3", carried_from="t2:f7")
+        v = forge_common.Verdict(kind="findings", findings=[f1, f2, f3])
+        forge_dispose.classify_findings(
+            v, DIFF_SINGLE, "t4", prior_identities=frozenset({"t2:f7"}))
+        self.assertEqual(
+            [f.identity for f in v.findings], ["t4:f1", "t4:f1", "t2:f7"])
+
+    def test_scope_is_required_and_validated(self):
+        v = forge_common.Verdict(kind="findings", findings=[_finding()])
+        with self.assertRaises(TypeError):
+            forge_dispose.classify_findings(v, DIFF_SINGLE)
+        with self.assertRaises(ValueError):
+            forge_dispose.classify_findings(v, DIFF_SINGLE, "bogus")
+
+    def test_validate_finding_ids_reports_a_colon(self):
+        v = forge_common.Verdict(
+            kind="findings", findings=[_finding(id="t2:f1"), _finding(id="f2")])
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("t2:f1", defects[0])
+
+    def test_resolved_label_honored_only_when_identity_in_carried_ids(self):
+        def run(carried):
+            f = _finding(id="f1", convergence="resolved",
+                         impact="contract-breaking", contract_ref="AC1")
+            v = forge_common.Verdict(kind="findings", findings=[f])
+            return forge_dispose.classify_findings(
+                v, DIFF_SINGLE, "t3", carried_ids=carried).findings
+        self.assertEqual(run({"t3:f1"}), [])
+        # a bare id, or another review's f1, is not this finding's identity
+        self.assertEqual(len(run({"f1"})), 1)
+        self.assertEqual(len(run({"t2:f1"})), 1)
+
+
+class ValidateCarriedFromTests(unittest.TestCase):
+    def _verdict(self, *findings):
+        return forge_common.Verdict(kind="findings", findings=list(findings))
+
+    def test_scoped_carried_from_naming_a_supplied_identity_is_valid(self):
+        v = self._verdict(_finding(id="f1", carried_from="t2:f1"))
+        self.assertEqual(
+            forge_dispose.validate_carried_from(v, frozenset({"t2:f1"})), [])
+
+    def test_scoped_carried_from_naming_no_supplied_identity_is_a_defect(self):
+        v = self._verdict(_finding(id="f7", carried_from="t2:f1"))
+        defects = forge_dispose.validate_carried_from(v, frozenset({"t3:f1"}))
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f7", defects[0])
+        self.assertIn("t2:f1", defects[0])
+
+    def test_scoped_carried_from_on_a_review_with_no_prior_findings_is_a_defect(self):
+        v = self._verdict(_finding(id="f7", carried_from="final:f1"))
+        self.assertEqual(len(forge_dispose.validate_carried_from(v, frozenset())), 1)
+
+    def test_bare_carried_from_and_none_are_never_defects(self):
+        v = self._verdict(_finding(id="f1", carried_from="f0"),
+                          _finding(id="f2"))
+        self.assertEqual(forge_dispose.validate_carried_from(v, frozenset()), [])
+
+    def test_a_pass_verdict_has_no_defects(self):
+        self.assertEqual(forge_dispose.validate_carried_from(
+            forge_common.Verdict(kind="pass"), frozenset()), [])
+
+    def test_bare_carried_from_is_still_prefixed_with_the_scope(self):
+        f = _finding(id="f2", carried_from="f1")
+        v = self._verdict(f)
+        forge_dispose.classify_findings(v, DIFF_SINGLE, "t4")
+        self.assertEqual(f.identity, "t4:f1")
+
+
+def _with_id(bad_id, **kw):
+    """A Finding whose id is malformed (the helper cannot derive an identity
+    from a non-string id, so it is built valid and the id overwritten)."""
+    f = _finding(id="x", **kw)
+    f.id = bad_id
+    return f
+
+
+class MalformedIdentityFieldDefectTests(unittest.TestCase):
+    def _verdict(self, *findings):
+        return forge_common.Verdict(kind="findings", findings=list(findings))
+
+    def test_missing_id_is_a_defect_naming_the_position(self):
+        v = self._verdict(_finding(id="f1"), _with_id(None))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #2", defects[0])
+        self.assertIn("id", defects[0])
+
+    def test_non_string_id_is_a_defect_naming_the_position(self):
+        v = self._verdict(_with_id(7))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #1", defects[0])
+        self.assertIn("id", defects[0])
+
+    def test_a_bad_id_does_not_hide_a_duplicate_among_the_good_ones(self):
+        v = self._verdict(_finding(id="f1"), _with_id(None),
+                          _finding(id="f1"))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 2)
+        self.assertTrue(any("duplicate" in d and "f1" in d for d in defects))
+
+    def test_non_string_carried_from_is_a_defect_naming_finding_and_field(self):
+        v = self._verdict(_finding(id="f3", carried_from=5))
+        defects = forge_dispose.validate_carried_from(v, frozenset())
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f3", defects[0])
+        self.assertIn("carried_from", defects[0])
+
+    def test_non_string_carried_from_on_a_finding_without_an_id_names_position(self):
+        v = self._verdict(_with_id(None, carried_from=["t1:f1"]))
+        defects = forge_dispose.validate_carried_from(v, frozenset())
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #1", defects[0])
+        self.assertIn("carried_from", defects[0])
+
+
+class ScopedApprovalTests(unittest.TestCase):
+    def _halt_finding(self, id, carried_from=None):
+        return _finding(id=id, carried_from=carried_from, file="foo.py",
+                        lines="40", provenance="pre-existing",
+                        impact="contract-breaking", contract_ref="AC1")
+
+    def test_approving_t2_f1_does_not_exempt_f1_under_scope_t5(self):
+        f = self._halt_finding("f1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_dispose.classify_findings(v, DIFF_SINGLE, "t5")
+        self.assertEqual(f.disposition, "halt")
+        self.assertEqual(
+            forge_dispose.convergence_decision(
+                v.findings, forge_dispose.ConvergenceState(), True, 1, "auto",
+                approved_ids={"t2:f1"}),
+            ("halt", "scope-decision"))
+
+    def test_approving_t2_f1_exempts_final_finding_carried_from_it(self):
+        f = self._halt_finding("f4", carried_from="t2:f1")
+        v = forge_common.Verdict(kind="findings", findings=[f])
+        forge_dispose.classify_findings(
+            v, DIFF_SINGLE, "final", prior_identities=frozenset({"t2:f1"}))
+        self.assertEqual(f.identity, "t2:f1")
+        self.assertEqual(
+            forge_dispose.convergence_decision(
+                v.findings, forge_dispose.ConvergenceState(), True, 1, "auto",
+                approved_ids={"t2:f1"}),
+            ("pass", None))
 
 
 if __name__ == "__main__":

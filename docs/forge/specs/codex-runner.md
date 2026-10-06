@@ -328,8 +328,11 @@ setup.
   checkpoint. The human is never asked to commit a half-finished attempt or discard it
   to get past the precondition.
 - **`--resolve <id>=repair|defer|accept:<evidence>`** (repeatable) carries a human
-  decision into a resumed run. On a `scope-decision` halt: `repair` means the human
-  fixed it, `defer` stages it as a deferral; either way the id is exempt from further
+  decision into a resumed run. `<id>` is the finding's identity (`execution` spec,
+  Reviewer verdict contract: `t<N>:<id>` or `final:<id>`) as `--status` prints it; a
+  bare local id is accepted when exactly one outstanding identity carries it and raises
+  listing the candidates otherwise. On a `scope-decision` halt: `repair` means the human
+  fixed it, `defer` stages it as a deferral; either way the identity is exempt from further
   `scope-decision` halts this run (recorded in `run.json`'s run-level `approved`).
   On an `unverified` stage halt (`execution` spec: The disposition matrix) the id is an
   unverified entry's: `accept:<evidence>` records the human's evidence (non-empty;
@@ -659,6 +662,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
 2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
 2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)
 2026-10-05: reviewer dispatches drop `sandbox_mode="read-only"`; the write guarantee moves to `forge_git.repo_fingerprint` — working tree, index, HEAD, branch — taken before every reviewer dispatch and on every exit, a mismatch halting non-recoverably as a contract error; task discovery packets carry command-clause acceptance results (#127)

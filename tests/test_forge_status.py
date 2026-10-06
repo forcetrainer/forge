@@ -25,6 +25,7 @@ from _forge_support import (  # noqa: E402
     MINIMAL_SPEC,
     PLAN_STD,
     SCRIPT_PATH,
+    forge_run,
     write_fake_codex,
 )
 
@@ -313,8 +314,11 @@ class RenderStatusTests(unittest.TestCase):
                 "convergence_state": {"resolved_ids": [], "carried_ids": [],
                                       "prev_acceptance_ok": True},
                 "halt_reason": "scope-decision",
-                "findings": [{"id": "h1", "summary": "legacy guard is wrong"},
-                             {"id": "h2", "summary": "second scope call"}],
+                "findings": [
+                    {"id": "h1", "identity": "t2:h1",
+                     "summary": "legacy guard is wrong"},
+                    {"id": "h2", "identity": "t2:h2",
+                     "summary": "second scope call"}],
                 "repair_task": {"title": "Fix the legacy guard"},
                 "approved": {},
             }
@@ -326,15 +330,14 @@ class RenderStatusTests(unittest.TestCase):
             self.assertEqual(state["halt"], halt)
             out = forge_status.render_status(state)
             self.assertIn("resumable", out)
-            self.assertIn("h1", out)
-            self.assertIn("h2", out)
+            self.assertIn("t2:h1", out)
+            self.assertIn("t2:h2", out)
             self.assertIn("--resolve", out)
 
-    def test_render_halt_splits_outstanding_on_the_canonical_id(self):
-        # A re-issued finding is answered by its CANONICAL id (`carried_from`)
-        # — the identity run_plan's `--resolve` validation keys on. Splitting
-        # on the raw id would show h1 as still outstanding and print a
-        # `--resolve h1b=...` command run_plan rejects as unknown.
+    def test_render_halt_splits_outstanding_on_the_identity(self):
+        # Outstanding is judged on the finding's runner-stamped identity — the
+        # key run_plan's `--resolve` validation and `approved` use. A finding
+        # re-issued under a new id carries the identity it was raised under.
         with tempfile.TemporaryDirectory() as d:
             halt = {
                 "task": 1,
@@ -344,17 +347,74 @@ class RenderStatusTests(unittest.TestCase):
                 "convergence_state": {},
                 "halt_reason": "scope-decision",
                 "findings": [
-                    {"id": "h1b", "carried_from": "h1", "summary": "re-issued"},
-                    {"id": "h9", "summary": "still open"},
+                    {"id": "h1b", "carried_from": "h1", "identity": "t1:h1",
+                     "summary": "re-issued"},
+                    {"id": "h9", "identity": "t1:h9", "summary": "still open"},
                 ],
-                "approved": {"h1": "repair"},
+                "approved": {"t1:h1": "repair"},
             }
             _write_run(d, "escalated", [_summary(1, "escalated")], halt=halt)
             out = forge_status.render_status(forge_status.read_run_state(d))
-            self.assertIn("outstanding findings: h9", out)
-            self.assertIn("--resolve h9=repair|defer", out)
+            self.assertIn("outstanding findings: t1:h9", out)
+            self.assertIn("--resolve t1:h9=repair|defer", out)
             self.assertNotIn("h1b", out)
-            self.assertIn("already resolved: h1=repair", out)
+            self.assertIn("already resolved: t1:h1=repair", out)
+
+    def test_status_prints_outstanding_identities_and_a_resume_command(self):
+        # Two tasks' findings share the local id f1; status tells them apart
+        # by identity and the resume command names both.
+        halt = {
+            "task": 5, "attempt": 1, "freeze_commit": "a" * 40,
+            "freeze_base": "b" * 40, "convergence_state": {},
+            "halt_reason": "scope-decision",
+            "findings": [
+                {"id": "f1", "identity": "t5:f1", "summary": "one"},
+                {"id": "f1", "identity": "t2:f1", "summary": "two"},
+            ],
+            "approved": {},
+        }
+        lines = forge_status.render_halt(halt)
+        text = "\n".join(lines)
+        self.assertIn("outstanding findings: t5:f1, t2:f1", text)
+        self.assertIn(
+            "resume with: --resolve t5:f1=repair|defer "
+            "--resolve t2:f1=repair|defer", text)
+
+    def test_status_resume_command_round_trips_into_resolve(self):
+        import re
+        halt = {
+            "task": 5, "attempt": 1, "freeze_commit": None,
+            "freeze_base": "b" * 40, "convergence_state": {},
+            "halt_reason": "scope-decision",
+            "findings": [
+                {"id": "f1", "identity": "t5:f1", "summary": "one"},
+                {"id": "f2", "identity": "t5:f2", "summary": "two"},
+            ],
+            "approved": {},
+        }
+        line = next(ln for ln in forge_status.render_halt(halt)
+                    if "resume with:" in ln)
+        names = re.findall(r"--resolve (\S+?)=repair\|defer", line)
+        self.assertEqual(names, ["t5:f1", "t5:f2"])
+        entries = ["{}=repair".format(n) for n in names]
+        resolutions = forge_run.parse_resolutions(entries)
+        outstanding = [f["identity"] for f in halt["findings"]]
+        for name in resolutions:
+            self.assertEqual(forge_run._resolve_identity(name, outstanding),
+                             name)
+
+    def test_render_halt_raises_naming_the_missing_identity_field(self):
+        halt = {
+            "task": 1, "attempt": 1, "freeze_commit": None,
+            "freeze_base": "b" * 40, "convergence_state": {},
+            "halt_reason": "scope-decision",
+            "findings": [{"id": "h1", "summary": "old record"}],
+            "approved": {},
+        }
+        with self.assertRaises(ValueError) as cm:
+            forge_status.render_halt(halt)
+        self.assertIn("identity", str(cm.exception))
+        self.assertIn("h1", str(cm.exception))
 
     def test_render_halt_names_the_stage_for_a_stage_freeze(self):
         # A final-review / doc-sync halt freezes its uncommitted edits under a

@@ -35,6 +35,52 @@ from forge_common import (
 )
 
 
+# --- finding identity --------------------------------------------------------
+
+# The review a finding was raised in: ``t<N>`` for task N's review, ``final``
+# for the final review (Reviewer verdict contract, finding identity).
+SCOPE_PATTERN = re.compile(r"(?:t[0-9]+|final)")
+_SCOPED_PREFIX = re.compile(r"(?:t[0-9]+|final):")
+
+
+def finding_identity(finding, scope, prior_identities=frozenset()):
+    """The runner-owned, review-scoped identity of ``finding``: ``carried_from``
+    verbatim when it already begins with a scope (``t<N>:`` or ``final:``) AND
+    names a member of ``prior_identities`` (the prior findings this review's
+    packet carried — a seeded per-task finding replayed into the final review
+    keeps the identity it was raised under), else ``scope + ":" +
+    (carried_from or id)``. A scoped ``carried_from`` outside
+    ``prior_identities`` raises ValueError naming the value and the finding id
+    — never prefixed, never kept. Raises ValueError naming ``scope`` when it is
+    not ``t<N>`` or ``final`` — never defaulted, never guessed."""
+    if not isinstance(scope, str) or not SCOPE_PATTERN.fullmatch(scope):
+        raise ValueError(
+            "invalid finding scope {!r}: expected t<N> or final".format(scope)
+        )
+    carried = finding.carried_from
+    if carried and _SCOPED_PREFIX.match(carried):
+        if carried not in prior_identities:
+            raise ValueError(
+                "finding {!r}: carried_from {!r} names no prior finding this "
+                "review was given".format(finding.id, carried)
+            )
+        return carried
+    return scope + ":" + (carried or finding.id)
+
+
+def _identity(finding):
+    """A finding's stamped identity; raises ValueError naming the finding id when
+    classify_findings never stamped one (the runner owns identity, so an
+    unstamped finding is a caller bug, never something to derive from a bare
+    id)."""
+    if finding.identity is None:
+        raise ValueError(
+            "finding {!r} has no identity: classify_findings stamps it from "
+            "the review scope".format(finding.id)
+        )
+    return finding.identity
+
+
 # --- reviewer dispatch & verdict --------------------------------------------
 
 
@@ -330,7 +376,8 @@ def validate_locations(verdict):
 
 
 def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
-                          carried_ids=None):
+                          carried_ids=None, scope=None,
+                          prior_identities=frozenset()):
     """Validate that every finding in the scope-decision cell carries its
     drafted ``repair_task`` (Reviewer verdict contract: required on a
     pre-existing x contract-breaking finding, optional on any other verifiable
@@ -344,14 +391,26 @@ def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
     (same diffs, same ``resolved`` drops), so a truly pre-existing finding the
     reviewer labeled ``in-diff`` still needs its ``repair_task``. The caller's
     verdict is never mutated. With no ``diff_text`` there is nothing to derive
-    from, and the reviewer's emitted provenance is used as a fallback."""
+    from, and the reviewer's emitted provenance is used as a fallback.
+
+    ``scope`` is the review's identity scope; the ``resolved`` drops compare
+    identities, so a non-empty ``carried_ids`` requires it (ValueError otherwise). Without
+    one the probe's identities are discarded with the copy, so a
+    placeholder scope is used and none is required."""
     if verdict.kind != "findings":
         return []
     findings = verdict.findings
     if diff_text is not None:
+        if scope is None and carried_ids:
+            raise ValueError(
+                "validate_repair_tasks needs a scope to compare carried_ids "
+                "identities"
+            )
         probe = copy.deepcopy(verdict)
         classify_findings(
-            probe, diff_text, run_diff=run_diff, carried_ids=carried_ids
+            probe, diff_text, "t0" if scope is None else scope,
+            run_diff=run_diff, carried_ids=carried_ids,
+            prior_identities=prior_identities,
         )
         findings = probe.findings
     return [
@@ -361,6 +420,21 @@ def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
         if finding.provenance == "pre-existing"
         and finding.impact == "contract-breaking"
         and finding.repair_task is None
+    ]
+
+
+def malformed_id_defects(verdict):
+    """Defect strings for every finding whose ``id`` is missing, empty or not
+    a string, naming it by position. Callers gate the classify probe on this:
+    classification derives an identity from the id and would raise a raw
+    TypeError instead of letting the defect reach the retry path."""
+    if verdict.kind != "findings":
+        return []
+    return [
+        "finding #{}: id must be a non-empty string, got {!r}".format(
+            position, finding.id)
+        for position, finding in enumerate(verdict.findings or [], 1)
+        if not isinstance(finding.id, str) or not finding.id
     ]
 
 
@@ -374,26 +448,74 @@ def validate_finding_ids(verdict):
     A finding id is the runner's only handle on a finding, and several
     mechanisms treat it as naming exactly one: ``carried_ids``/``resolved_ids``
     drive the stuck and regression rules, ``convergence: "resolved"`` is
-    matched by canonical id, and ``run.json``'s staged ``deferrals`` are
+    matched by identity, and ``run.json``'s staged ``deferrals`` are
     selected for filing by id (plus an ordinal). Two findings sharing an id
     inside ONE verdict make every one of those ambiguous, so it is a malformed
     verdict — rejected loudly here, exactly as a duplicate coverage id already
     is, rather than left for a downstream stage to paper over. Ids are only
     required to be unique within a verdict: they are reviewer-authored per
-    review and are deliberately not namespaced across a run."""
+    review and are deliberately not namespaced across a run — the runner scopes
+    them itself (``finding_identity``), which is why ``:`` is reserved: a
+    reviewer id containing it is a defect."""
     if verdict.kind != "findings":
         return []
     seen = []
     dup_ids = set()
+    colon_ids = []
+    defects = malformed_id_defects(verdict)
     for finding in verdict.findings or []:
+        if not isinstance(finding.id, str) or not finding.id:
+            continue
         if finding.id in seen:
             dup_ids.add(finding.id)
         seen.append(finding.id)
-    if not dup_ids:
+        if ":" in finding.id and finding.id not in colon_ids:
+            colon_ids.append(finding.id)
+    if dup_ids:
+        defects.append(
+            "duplicate finding id(s) in one verdict: "
+            + ", ".join(sorted(dup_ids))
+        )
+    if colon_ids:
+        defects.append(
+            "finding id(s) containing ':' (reserved for the runner's "
+            "scope:id identity): " + ", ".join(colon_ids)
+        )
+    return defects
+
+
+def validate_carried_from(verdict, prior_identities):
+    """Validate that every scoped ``carried_from`` (``t<N>:`` or ``final:``)
+    names a prior finding this review's packet carried. Returns defect strings
+    — empty means valid — in the shape ``validate_finding_ids`` returns, so it
+    feeds the same retry-once-then-contract-error mechanism. A scoped value
+    outside ``prior_identities`` would let a reviewer borrow an approved
+    identity on a finding it invented, so it is never kept (and never
+    prefixed); a bare ``carried_from`` is not checked here — it is prefixed
+    with the review's scope."""
+    if verdict.kind != "findings":
         return []
-    return [
-        "duplicate finding id(s) in one verdict: " + ", ".join(sorted(dup_ids))
-    ]
+    defects = []
+    for position, finding in enumerate(verdict.findings or [], 1):
+        carried = finding.carried_from
+        if not carried:
+            continue
+        name = (
+            "finding {}".format(finding.id)
+            if isinstance(finding.id, str) and finding.id
+            else "finding #{}".format(position)
+        )
+        if not isinstance(carried, str):
+            defects.append(
+                "{}: carried_from must be a string or null, got {!r}".format(
+                    name, carried)
+            )
+        elif _SCOPED_PREFIX.match(carried) and carried not in prior_identities:
+            defects.append(
+                "{}: carried_from {!r} names no prior finding this review was "
+                "given".format(name, carried)
+            )
+    return defects
 
 
 def validate_contract_refs(verdict, citable):
@@ -472,7 +594,8 @@ def derive_disposition(finding):
     return "halt"
 
 
-def classify_findings(verdict, diff_text, run_diff=None, carried_ids=None):
+def classify_findings(verdict, diff_text, scope, run_diff=None,
+                      carried_ids=None, prior_identities=frozenset()):
     """Set each finding's runner-verified provenance and derived disposition
     against ``diff_text`` (the review's actual diff), then return the verdict.
     A pass verdict is returned unchanged. The reviewer proposes classification;
@@ -486,10 +609,15 @@ def classify_findings(verdict, diff_text, run_diff=None, carried_ids=None):
     In a final review the run base *is* the review base, so a caller never
     needs to pass ``run_diff`` there — in-run is unreachable.
 
+    ``scope`` (``t<N>`` or ``final``; ValueError otherwise) is the review's
+    identity scope: every returned finding is stamped with its runner-owned
+    ``identity`` (``finding_identity``); a scoped ``carried_from`` is kept only
+    when it is in ``prior_identities``, else ValueError (callers validate with
+    ``validate_carried_from`` first).
+
     Before disposition, a finding carrying ``convergence == "resolved"`` is
-    dropped when its canonical id (``_canon``: ``carried_from`` or ``id``) is a
-    member of ``carried_ids`` — the prior attempt's outstanding fix-finding
-    set — so a listed resolved finding behaves identically to an omitted one
+    dropped when its identity is a member of ``carried_ids`` — the prior
+    attempt's outstanding fix-finding identity set — so a listed resolved finding behaves identically to an omitted one
     (Convergence label honored). The guard is load-bearing: a ``resolved``
     label on an id the runner never tracked as outstanding is meaningless and
     is ignored, dispositioning the finding normally — otherwise a reviewer
@@ -499,16 +627,22 @@ def classify_findings(verdict, diff_text, run_diff=None, carried_ids=None):
     a dropped finding never reaches it, and a falsely-resolved finding that
     reappears on a later attempt is still caught by the existing regression
     rule against the runner's authoritative resolved-id set."""
+    if not isinstance(scope, str) or not SCOPE_PATTERN.fullmatch(scope):
+        raise ValueError(
+            "invalid finding scope {!r}: expected t<N> or final".format(scope)
+        )
     if verdict.kind != "findings":
         return verdict
     ranges = diff_line_ranges(diff_text)
     run_ranges = diff_line_ranges(run_diff) if run_diff is not None else None
     kept = []
     for finding in verdict.findings:
+        finding.identity = finding_identity(
+            finding, scope, prior_identities)
         if (
             carried_ids is not None
             and finding.convergence == "resolved"
-            and _canon(finding) in carried_ids
+            and finding.identity in carried_ids
         ):
             continue
         finding.provenance = verify_provenance(finding, ranges, run_ranges)
@@ -645,9 +779,9 @@ def validate_coverage(verdict, checklist, citable=None):
 @dataclass
 class ConvergenceState:
     """The runner's authoritative view across a task's attempts. ``resolved_ids``
-    are the canonical finding ids the runner has recorded as resolved (a prior
+    are the finding identities the runner has recorded as resolved (a prior
     fix finding that later disappeared); ``carried_ids`` is the set of fix-finding
-    canonical ids still outstanding as of the prior *reviewed* attempt — a fix id
+    identities still outstanding as of the prior *reviewed* attempt — a fix id
     present in two consecutive reviewed attempts with nothing resolved between them
     is *stuck* (membership is all the stuck rule needs; the exact per-finding
     appearance count is not); ``prev_acceptance_ok`` is the prior attempt's
@@ -686,21 +820,13 @@ class ConvergenceState:
         )
 
 
-def _canon(finding):
-    """Canonical identity for cross-attempt matching: the original finding id,
-    following ``carried_from`` when the reviewer re-issued the same issue under a
-    new id. The runner matches by this — never by the reviewer's self-labeling —
-    so a mislabeled reappearance is still caught."""
-    return finding.carried_from or finding.id
-
-
 def _real_fix_canons(findings):
-    """Canonical ids of the reviewer's fix-disposition findings. The implicit
-    execution-failure finding (no impact) carries no identity, so it never enters
-    the resolved-id or carried-fix set — it is subject only to the regression
-    (green->red) and backstop rules, never stuck/scope-halt."""
+    """Identities of the reviewer's fix-disposition findings. The implicit
+    execution-failure finding (no impact) is not a reviewer finding, so it never
+    enters the resolved-id or carried-fix set — it is subject only to the
+    regression (green->red) and backstop rules, never stuck/scope-halt."""
     return {
-        _canon(f) for f in findings
+        _identity(f) for f in findings
         if f.disposition == "fix" and f.impact is not None
     }
 
@@ -728,8 +854,8 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     1. ``gate`` mode + any reviewer finding -> halt/``gate`` (a transient
        execution failure is exempt: it carries no impact).
     2. any halt-disposition finding (pre-existing x contract-breaking) ->
-       halt/``scope-decision``. A finding whose canonical id (``_canon``) is in
-       ``approved_ids`` — a human resolution carried in from a prior halt (Halt
+       halt/``scope-decision``. A finding whose ``identity`` is in
+       ``approved_ids`` (identities, never bare ids) — a human resolution carried in from a prior halt (Halt
        resolution) — is exempt from this step only; every other rule still sees
        it.
     3. regression -> halt/``regression``: a runner-recorded resolved id reappears,
@@ -747,12 +873,14 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     6. attempt count reaches the backstop -> halt/``backstop`` (a seatbelt against
        slow non-convergence, not a target cap); otherwise -> ``rework``.
     """
+    for f in findings:
+        _identity(f)
     if autofix_mode == "gate" and any(f.impact is not None for f in findings):
         return ("halt", "gate")
-    if any(f.disposition == "halt" and _canon(f) not in approved_ids
+    if any(f.disposition == "halt" and f.identity not in approved_ids
            for f in findings):
         return ("halt", "scope-decision")
-    reappeared = any(_canon(f) in state.resolved_ids for f in findings)
+    reappeared = any(f.identity in state.resolved_ids for f in findings)
     green_to_red = state.prev_acceptance_ok is True and not acceptance_ok
     if reappeared or green_to_red:
         return ("halt", "regression")
@@ -786,6 +914,8 @@ def advance_state(state, findings, acceptance_ok, failed_acceptance=None):
     next green->red check. Every attempt, execution failure or reviewed,
     overwrites ``prev_failed_acceptance`` with ``failed_acceptance`` (None unless
     acceptance was this attempt's execution failure)."""
+    for f in findings:
+        _identity(f)
     state.prev_failed_acceptance = failed_acceptance
     if _is_execution_failure(findings):
         state.prev_acceptance_ok = acceptance_ok
@@ -812,6 +942,7 @@ def execution_failure_finding(detail):
     return Finding(
         id="exec-failure", summary=detail, file=None, lines=None,
         provenance=None, impact=None, disposition="fix",
+        identity="exec-failure",
     )
 
 
@@ -850,6 +981,16 @@ def _build_decision(action, halt_reason, findings, state):
     }
 
 
+def _scope_arg(value):
+    """argparse type for --scope: an argparse usage error naming the flag when the
+    value is neither ``t<N>`` nor ``final``."""
+    if not SCOPE_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--scope must be t<N> or final, got {!r}".format(value)
+        )
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="forge_dispose.py")
     parser.add_argument(
@@ -866,6 +1007,11 @@ def main(argv=None):
         "--state", default=None,
         help="path to the prior ConvergenceState JSON; omitted/absent means a "
              "fresh state (attempt 1)",
+    )
+    parser.add_argument(
+        "--scope", required=True, type=_scope_arg,
+        help="the review's identity scope: t<N> for task N's review, final "
+             "for the final review (Reviewer verdict contract); required",
     )
     parser.add_argument("--attempt", type=int, required=True)
     parser.add_argument("--acceptance-ok", required=True, choices=["true", "false"])
@@ -898,10 +1044,18 @@ def main(argv=None):
     )
     parser.add_argument(
         "--approved", action="append", default=[],
-        help="canonical id (carried_from else id) of a finding the human has "
+        help="identity (<scope>:<id>, e.g. t2:f1) of a finding the human has "
              "resolved (Halt resolution); repeatable. Exempts that finding from "
              "the scope-decision halt for this attempt — regression (rule 3) "
              "still applies to it. Omitted: no exemptions, today's behavior.",
+    )
+    parser.add_argument(
+        "--prior-identities", default=None,
+        help="path to a JSON array of the identities of the prior findings "
+             "this review's packet carried (seeds on the final discovery "
+             "lap, outstanding findings on a verification lap). A scoped "
+             "carried_from outside this set is a defect. Omitted: the empty "
+             "set, so any scoped carried_from is a defect.",
     )
     parser.add_argument(
         "--failed-acceptance", default=None,
@@ -980,6 +1134,30 @@ def main(argv=None):
             )
             return 1
 
+    prior_identities = frozenset()
+    if args.prior_identities:
+        try:
+            with open(args.prior_identities, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read prior-identities file {}: {}".format(
+                    args.prior_identities, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        if not isinstance(loaded, list) or not all(
+            isinstance(i, str) for i in loaded
+        ):
+            print(
+                "error: prior-identities file {} must be a JSON array of "
+                "identity strings".format(args.prior_identities),
+                file=sys.stderr,
+            )
+            return 1
+        prior_identities = frozenset(loaded)
+
     verdict = None
     try:
         if args.execution_failure:
@@ -1020,6 +1198,20 @@ def main(argv=None):
                 # precedence as validate_locations above, so a
                 # contract-breaking claim citing a bogus ref never reaches a
                 # decision.
+                carried_defects = validate_carried_from(
+                    verdict, prior_identities
+                )
+                if carried_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid carried_from: "
+                        + "; ".join(carried_defects)
+                    )
+                id_defects = malformed_id_defects(verdict)
+                if id_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid finding id(s): "
+                        + "; ".join(id_defects)
+                    )
                 if citable:
                     contract_ref_defects = validate_contract_refs(
                         verdict, citable
@@ -1036,7 +1228,8 @@ def main(argv=None):
                 # earlier task's line reads pre-existing here (The shared
                 # decision helper).
                 repair_defects = validate_repair_tasks(
-                    verdict, diff_text, carried_ids=state.carried_ids
+                    verdict, diff_text, carried_ids=state.carried_ids,
+                    scope=args.scope, prior_identities=prior_identities,
                 )
                 if repair_defects:
                     raise RuntimeError(
@@ -1044,7 +1237,9 @@ def main(argv=None):
                         + "; ".join(repair_defects)
                     )
                 verdict = classify_findings(
-                    verdict, diff_text, carried_ids=state.carried_ids
+                    verdict, diff_text, args.scope,
+                    carried_ids=state.carried_ids,
+                    prior_identities=prior_identities,
                 )
             findings = verdict.findings
     except RuntimeError as e:

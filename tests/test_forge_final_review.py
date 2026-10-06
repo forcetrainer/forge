@@ -323,18 +323,30 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
-    def _reraised_halt_msg(self):
+    def _reraised_halt_msg(self, carried_from="t1:h1"):
         # Line 99 is outside the reviewed diff -> pre-existing x
         # contract-breaking, the scope-decision cell.
         return _fix_findings_msg(
             "f1.txt", "99", "the legacy guard is wrong", id="h1",
-            contract_ref="spec:Alpha section",
+            contract_ref="spec:Alpha section", carried_from=carried_from,
             repair_task={
                 "title": "Fix the legacy guard", "files": ["f1.txt"],
                 "spec": "Alpha section", "tests": ["the guard holds"],
                 "acceptance": "`true`", "tier": "standard",
             },
         )
+
+    def _seeded_h1(self):
+        # The task-1 finding the final reviewer is given (as a replayed seed)
+        # and re-raises by carrying it: only a prior finding the packet
+        # carried may be named by a scoped carried_from.
+        return [{
+            "id": "t1:h1", "identity": "t1:h1", "summary": "the legacy guard",
+            "location": {"file": "f1.txt", "lines": "99"},
+            "provenance": "in-run", "impact": "unverifiable",
+            "contract_ref": None, "convergence": None, "carried_from": None,
+            "repair_task": None, "disposition": "seed",
+        }]
 
     def test_unapproved_preexisting_finding_halts_scope_decision(self):
         run_base = self._init_repo_with_task_work()
@@ -343,9 +355,23 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         outcome = forge_run.run_final_review_loop(
             [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
+            seeded_findings=self._seeded_h1(),
         )
         self.assertEqual(outcome.status, "escalated")
         self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_final_finding_carried_from_a_task_identity_no_seed_supplied_is_a_contract_error(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        msg = self._reraised_halt_msg()
+        self._responses([{"exit": 0, "msg": msg}, {"exit": 0, "msg": msg}])
+        with self.assertRaises(RuntimeError) as cm:
+            forge_run.run_final_review_loop(
+                [self.spec], run_base, self.run_dir, self.fake, self.d,
+                "standard", "auto", {}, plan_path=plan,
+                approved_ids=frozenset({"t1:h1"}),
+            )
+        self.assertIn("t1:h1", str(cm.exception))
 
     def test_approved_id_reraised_by_final_reviewer_passes(self):
         run_base = self._init_repo_with_task_work()
@@ -354,9 +380,71 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         outcome = forge_run.run_final_review_loop(
             [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
-            approved_ids=frozenset({"h1"}),
+            approved_ids=frozenset({"t1:h1"}),
+            seeded_findings=self._seeded_h1(),
         )
         self.assertEqual(outcome.status, "passed")
+
+    def test_approved_finding_contributes_no_repair_task_to_a_later_non_scope_halt(self):
+        # gate mode halts on any finding (step 1) before the scope check; the
+        # approved finding's repair_task must not ride along on that halt.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "gate", {}, plan_path=plan,
+            approved_ids=frozenset({"t1:h1"}),
+            seeded_findings=self._seeded_h1(),
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "gate")
+        self.assertIsNone(outcome.repair_task)
+
+    def test_seed_carried_final_finding_keeps_its_identity_across_a_verification_lap(self):
+        # A final finding carried from seed t2:f1 (reviewer id f9) comes back
+        # on the verification packet under its identity, so echoing the
+        # packet's id keeps t2:f1 (and its approval exemption), never final:f9.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        seed = self._seeded_h1()
+        seed[0].update({"id": "t2:f1", "identity": "t2:f1"})
+        f1 = os.path.join(self.d, "f1.txt")
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "carried seed", id="f9", contract_ref="spec:Alpha section",
+                carried_from="t2:f1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "FIXED\n"},
+            {"exit": 0, "msg": self._reraised_halt_msg(carried_from="t2:f1").replace(
+                '"id": "h1"', '"id": "f9"')},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"t2:f1"}), seeded_findings=seed,
+        )
+        with open(os.path.join(self.run_dir, "final-review.md")) as f:
+            packet = f.read()
+        block = packet.split("```json\n", 1)[1].split("```", 1)[0]
+        prior = json.loads(block)
+        self.assertEqual([(e["id"], e["carried_from"], e["identity"]) for e in prior],
+                         [("t2:f1", None, "t2:f1")])
+        self.assertEqual(outcome.status, "passed")
+
+    def test_final_review_raising_the_same_local_id_unlinked_is_not_exempt(self):
+        # An approval of t1:h1 exempts only a finding the final reviewer
+        # carries from it; the same local id raised afresh is final:h1.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([
+            {"exit": 0, "msg": self._reraised_halt_msg(carried_from=None)}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"t1:h1"}),
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
 
     def test_reviewer_cold_at_discovery_resumed_at_verification(self):
         run_base = self._init_repo_with_task_work()
@@ -800,7 +888,7 @@ class FinalReviewCitableSetTests(unittest.TestCase):
         )
         f1 = os.path.join(self.d, "f1.txt")
         seeded = [{
-            "id": "s1", "summary": "seeded from task 1",
+            "id": "t1:s1", "identity": "t1:s1", "summary": "seeded from task 1",
             "location": {"file": "f1.txt", "lines": "2"},
             "provenance": "unverifiable", "impact": "contract-breaking",
             "contract_ref": "t1.t1", "convergence": None,
@@ -878,6 +966,24 @@ class FinalPacketCitableTests(unittest.TestCase):
         path = forge_git._final_packet([spec], "HEAD", "", d)
         with open(path) as f:
             self.assertNotIn("Citable refs", f.read())
+
+
+class PriorIdentitiesTests(unittest.TestCase):
+    def test_collects_the_identity_of_every_prior_finding(self):
+        self.assertEqual(
+            forge_run._prior_identities(
+                [{"id": "t2:f1", "identity": "t2:f1"},
+                 {"id": "f3", "identity": "t4:f3"}]),
+            frozenset({"t2:f1", "t4:f3"}))
+        self.assertEqual(forge_run._prior_identities([]), frozenset())
+        self.assertEqual(forge_run._prior_identities(None), frozenset())
+
+    def test_an_entry_without_identity_raises_naming_it(self):
+        for entry in ({"id": "f7", "summary": "x"},
+                      {"id": "f7", "identity": None}):
+            with self.assertRaises(ValueError) as cm:
+                forge_run._prior_identities([entry])
+            self.assertIn("f7", str(cm.exception))
 
 
 if __name__ == "__main__":
@@ -1062,7 +1168,7 @@ class UnverifiedHaltTests(UnverifiedCase):
         self.assertEqual(rc, 2, err)
         run = self.run_json()
         self.assertEqual(run["halt"]["halt_reason"], "unverified")
-        self.assertEqual([e["id"] for e in run["unverified"]], ["f1"])
+        self.assertEqual([e["id"] for e in run["unverified"]], ["final:f1"])
         self.assertIsNone(run["unverified"][0]["call"])
         self.assertEqual(self.dispatches("doc-sync-last"), [])
 
@@ -1075,11 +1181,11 @@ class UnverifiedHaltTests(UnverifiedCase):
             ["--resolve", "f1=repair"])
         self.assertEqual(rc, 2, err)
         run = self.run_json()
-        self.assertEqual([e["id"] for e in run["unverified"]], ["f1", "f2"])
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual([e["id"] for e in run["unverified"]], ["final:f1", "final:f2"])
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "repair", "evidence": None})
-        self.assertIsNone(self.entry("f2")["call"])
-        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["f2"])
+        self.assertIsNone(self.entry("final:f2")["call"])
+        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["final:f2"])
 
     def test_final_review_receipt_lists_every_unverified_entry(self):
         self.run_main(self.first_call(self.seed_msg(
@@ -1087,7 +1193,7 @@ class UnverifiedHaltTests(UnverifiedCase):
         with open(os.path.join(self.run_dir, "final-review.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["unverified"], [
-            {"kind": "finding", "id": "f1", "reason": "no prod data",
+            {"kind": "finding", "id": "final:f1", "reason": "no prod data",
              "call": None},
-            {"kind": "finding", "id": "f2", "reason": "race untimed",
+            {"kind": "finding", "id": "final:f2", "reason": "race untimed",
              "call": None}])
