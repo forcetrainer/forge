@@ -901,18 +901,21 @@ class FinalReviewerWroteTests(ReviewerWroteCase):
         self.assertEqual(halt["stage"], "final-review")
         self.assertEqual(halt["halt_reason"], "reviewer-wrote")
         self.assertIn("stray.txt", " ".join(halt["changes"]))
-        sha = halt["freeze_commit"]
-        self.assertTrue(sha)
-        self.assertEqual(
-            self.git("rev-parse", "--verify", halt_ref(self, "final-review")).strip(),
-            sha)
-        self.assertIn("NEEDFIX", self.git("show", sha + ":f1.txt"))
-        self.assertFalse(self.in_commit(sha, "stray.txt"))
+        # The task's edits are committed by the final review, so the
+        # pre-review tree equals HEAD: nothing to freeze, no empty commit.
+        self.assertIsNone(halt["freeze_commit"])
+        self.assertNotEqual(subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", halt_ref(self, "final-review")],
+            cwd=self.repo, capture_output=True).returncode, 0)
         self.assertEqual(self.porcelain(), "")
         self.assertFalse(os.path.exists(self.stray))
         self.assertEqual(len(self.dispatches("final-review-last")), final_reviews)
         self.assertEqual(self.commit_count(), 2)  # base + the passed task only
         self.assertEqual(self.git("symbolic-ref", "HEAD").strip(), "refs/heads/main")
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(receipt["findings"]))
 
     def test_cold_final_reviewer_write_halts(self):
         res = self.run_cli([
@@ -955,6 +958,22 @@ class FinalReviewerWroteTests(ReviewerWroteCase):
 def halt_ref(case, stage):
     run_id = os.path.basename(os.path.normpath(case.run_dir))
     return forge_run.freeze_stage_ref_name(run_id, stage)
+
+
+class FinalFreezeFailureTests(ReviewerWroteCase):
+    def test_reset_failure_records_stage_halt_and_names_both(self):
+        rc, err = self.main_failing_git([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [self.stray_op()]},
+        ], "reset")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("reviewer", err)
+        self.assertIn("git reset", err)
+        halt = self.run_json()["halt"]
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        self.assertIn("git reset", halt["freeze_error"])
 
 
 class FingerprintErrorFinalTests(ReviewerWroteCase):

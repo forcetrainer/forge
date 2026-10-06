@@ -25,6 +25,7 @@ Imported helpers live in forge_git; stdlib only.
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,40 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forge_git  # noqa: E402
 
 KEYS = ("tree", "index", "head", "branch")
+
+_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_REF = re.compile(r"refs/[A-Za-z0-9._/-]+\Z")
+_BRANCH = re.compile(r"refs/heads/[A-Za-z0-9._/-]+\Z")
+
+
+def _validate_fingerprint(fp, origin):
+    """Every field's shape, before any value can reach git (parsers-fail-loud:
+    a malformed fingerprint is a usage error naming the field, never a
+    mismatch and never a traceback)."""
+    for k in ("tree", "index", "head"):
+        v = fp[k]
+        if not isinstance(v, str) or not _SHA.match(v):
+            raise ValueError(
+                "fingerprint {}: field {} must be a 40-hex sha, got {!r}".format(
+                    origin, k, v)
+            )
+    b = fp["branch"]
+    if b is not None and (not isinstance(b, str) or not _BRANCH.match(b)
+                          or ".." in b):
+        raise ValueError(
+            "fingerprint {}: field branch must be null or refs/heads/<name>, "
+            "got {!r}".format(origin, b)
+        )
+
+
+def _validate_ref(ref, branch):
+    if (not _REF.match(ref) or ".." in ref or ref.startswith("-")
+            or ref.startswith("refs/heads/") or ref == branch):
+        raise ValueError(
+            "--ref {!r} is not an allowed freeze ref: it must match "
+            "refs/<name> with no '..', must not be under refs/heads/ and must "
+            "not be the recorded branch".format(ref)
+        )
 
 
 def _load_fingerprint(arg):
@@ -55,6 +90,7 @@ def _load_fingerprint(arg):
         raise ValueError(
             "fingerprint {} is missing key(s): {}".format(origin, ", ".join(missing))
         )
+    _validate_fingerprint(fp, origin)
     return fp
 
 
@@ -75,19 +111,9 @@ def main(argv=None):
             return 0
         before = _load_fingerprint(args.fingerprint)
         if args.cmd == "freeze":
-            forge_git.restore_refs(cwd, before)
-            head_tree = forge_git._git(
-                cwd, ["rev-parse", before["head"] + "^{tree}"],
-                "git rev-parse for freeze",
-            ).strip()
-            if before["tree"] == head_tree:
-                forge_git._git(cwd, ["reset", "--hard", before["head"]],
-                               "git reset --hard for freeze")
-                forge_git._git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
-                print("none")
-            else:
-                print(forge_git.freeze_tree(
-                    cwd, before["tree"], args.ref, before["head"]))
+            _validate_ref(args.ref, before["branch"])
+            sha = forge_git.freeze_checkpoint(cwd, before, args.ref)
+            print("none" if sha is None else sha)
             return 0
         changes = forge_git.fingerprint_diff(
             cwd, before, forge_git.repo_fingerprint(cwd)

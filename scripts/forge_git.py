@@ -458,6 +458,25 @@ def freeze_tree(cwd, tree, ref_name, parent):
     return sha
 
 
+def freeze_checkpoint(cwd, fingerprint, ref_name):
+    """The reviewer-wrote freeze, shared by the runner and the CLI: restore the
+    recorded branch and HEAD (``restore_refs``), then park the recorded
+    pre-review tree under ``ref_name`` (``freeze_tree``). Returns the freeze
+    sha, or ``None`` when the recorded tree equals the recorded HEAD's tree —
+    nothing to freeze, no empty commit and no ref — in which case the working
+    tree is still returned to HEAD. Raises RuntimeError naming the git
+    command on a failure."""
+    restore_refs(cwd, fingerprint)
+    head = fingerprint["head"]
+    head_tree = _git(cwd, ["rev-parse", head + "^{tree}"],
+                     "git rev-parse for freeze").strip()
+    if fingerprint["tree"] == head_tree:
+        _git(cwd, ["reset", "--hard", head], "git reset --hard for freeze")
+        _git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
+        return None
+    return freeze_tree(cwd, fingerprint["tree"], ref_name, head)
+
+
 def freeze_attempt(cwd, ref_name):
     """Capture the in-progress attempt as a commit parked at ``ref_name``,
     then return the working tree to HEAD. Returns the freeze SHA, or ``None``

@@ -145,6 +145,7 @@ from forge_receipts import (  # noqa: F401
     strip_ledger_annotation,
     update_run_progress,
     utc_iso,
+    write_final_review_halt,
     write_final_review_receipt,
     write_receipt,
     write_run_json,
@@ -1603,22 +1604,79 @@ def _reviewer_wrote_record(error):
     }
 
 
-def _freeze_reviewer_wrote(cwd, ref_name, record):
+def _require_ignored_run_dir(cwd, run_dir):
+    """Refuse a ``--run-dir`` inside the repository that git does not ignore
+    (Reviewer write discipline): the runner's own receipt, event and
+    last-message files would change the fingerprint, so the first review would
+    halt as a false `reviewer-wrote` and the freeze would then clean the run
+    files out of the tree. The default ``.forge/`` is exempt (its own
+    ``.gitignore`` is written next); a directory outside the repository, or a
+    cwd that is not a repository, is unaffected. Raises RuntimeError naming the
+    path and the fix."""
+    abs_cwd = os.path.realpath(cwd)
+    abs_run = os.path.realpath(run_dir)
+    try:
+        rel = os.path.relpath(abs_run, abs_cwd)
+    except ValueError:
+        return
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or rel == ".":
+        return
+    if rel.split(os.sep)[0] == ".forge":
+        return
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "--", os.path.join(rel, "run.json")],
+            cwd=cwd, capture_output=True, text=True,
+        )
+    except OSError:
+        return
+    if proc.returncode == 1:
+        raise RuntimeError(
+            "--run-dir {} is inside the repository and not git-ignored, so the "
+            "runner's own files would change the repository fingerprint and "
+            "halt the first review as a false reviewer-wrote; use the default "
+            ".forge/ run dir or add the directory to .gitignore".format(run_dir)
+        )
+
+
+def _freeze_reviewer_wrote(cwd, ref_name, record, record_halt=None):
     """The `reviewer-wrote` halt path (Reviewer write discipline): the one
     place the runner moves a ref. Point the recorded branch back at the
     recorded HEAD sha and re-attach HEAD (``restore_refs`` first — the freeze's
     ``reset --hard`` moves whatever HEAD is attached to), then commit the
     PRE-REVIEW capture under ``ref_name`` parented on the recorded HEAD and
     return the working tree to that checkpoint (``freeze_tree``). Returns the
-    freeze sha. The reviewer's own changes are in ``record['changes']`` and
+    freeze sha, or None when the pre-review tree equals the recorded HEAD's
+    (nothing to freeze). The reviewer's own changes are in ``record['changes']`` and
     are discarded from the tree; a reviewer-made commit is left unreachable,
-    never deleted."""
+    never deleted.
+
+    ``record_halt(freeze_error)`` writes the halt record (class
+    ``reviewer-wrote``, the changed paths) to run.json. It is called BEFORE
+    any git command runs, so a failure part-way leaves the record behind, and
+    again with the failure text. A git failure is re-raised as one contract
+    error naming both the reviewer write and the failed command: the tree may
+    then hold the worker's edits and the reviewer's changes together, and the
+    record is how the human learns that."""
     before = record["before"]
-    forge_git.restore_refs(cwd, before)
-    return forge_git.freeze_tree(cwd, before["tree"], ref_name, before["head"])
+    if record_halt is not None:
+        record_halt("freeze not completed")
+    try:
+        return forge_git.freeze_checkpoint(cwd, before, ref_name)
+    except RuntimeError as e:
+        if record_halt is not None:
+            record_halt(str(e))
+        raise RuntimeError(
+            "the reviewer changed the repository ({}) and freezing the "
+            "pre-review tree then failed ({}); the working tree may hold both "
+            "the worker's edits and the reviewer's changes, and the halt "
+            "record in run.json (class reviewer-wrote) lists the changed "
+            "paths".format("; ".join(record["changes"]), e)
+        )
 
 
-def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None):
+def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
+                       write_halt=None):
     """Freeze a halted whole-run stage (``final-review`` | ``doc-sync``) and
     return its halt record.
 
@@ -1644,17 +1702,28 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None):
     if reviewer_wrote is not None:
         # `reviewer-wrote` (``halt_out['reviewer_wrote']`` from the loop): the
         # freeze is the pre-review capture, not whatever the tree holds now.
+        def stage_record(freeze_commit, freeze_error=None):
+            rec = {
+                "stage": stage,
+                "freeze_commit": freeze_commit,
+                "freeze_base": reviewer_wrote["before"]["head"],
+                "halt_reason": halt_reason,
+                "changes": reviewer_wrote["changes"],
+                "reviewer_head": reviewer_wrote["reviewer_head"],
+            }
+            if freeze_error is not None:
+                rec["freeze_error"] = freeze_error
+            return rec
+
+        record_halt = None
+        if write_halt is not None:
+            def record_halt(err):
+                write_halt(stage_record(None, err))
         freeze_commit = _freeze_reviewer_wrote(
-            cwd, freeze_stage_ref_name(run_id, stage), reviewer_wrote
+            cwd, freeze_stage_ref_name(run_id, stage), reviewer_wrote,
+            record_halt=record_halt,
         )
-        return {
-            "stage": stage,
-            "freeze_commit": freeze_commit,
-            "freeze_base": reviewer_wrote["before"]["head"],
-            "halt_reason": halt_reason,
-            "changes": reviewer_wrote["changes"],
-            "reviewer_head": reviewer_wrote["reviewer_head"],
-        }
+        return stage_record(freeze_commit)
     freeze_base = _git_head(cwd)
     freeze_commit = freeze_attempt(cwd, freeze_stage_ref_name(run_id, stage))
     return {
@@ -1977,6 +2046,11 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 record = _reviewer_wrote_record(e)
                 if halt_out is not None:
                     halt_out["reviewer_wrote"] = record
+                # --status and the monitor banner read the class and the
+                # changed paths from this receipt; it replaces any receipt an
+                # earlier lap left, which would otherwise be read instead.
+                write_final_review_halt(
+                    run_dir, "reviewer-wrote", list(record["changes"]))
                 return TaskOutcome(
                     status="escalated",
                     attempts=attempt,
@@ -2435,6 +2509,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 ", ".join(str(t.number) for t in tasks),
             )
         )
+    _require_ignored_run_dir(cwd, run_dir)
     os.makedirs(run_dir, exist_ok=True)
     ensure_forge_gitignore(cwd)
     # The halt record is read FIRST, before every other run.json reader: it is
@@ -2824,8 +2899,37 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             run_id = os.path.basename(os.path.normpath(run_dir))
             if reviewer_wrote is not None:
                 freeze_base = reviewer_wrote["before"]["head"]
+
+                def record_halt(freeze_error):
+                    # Written before the freeze runs (and again if it fails),
+                    # so a git failure cannot leave a dirty tree unrecorded.
+                    write_run_json(
+                        run_dir, plan_path, spec_paths, "running",
+                        task_summaries, run_base, started_at=run_started,
+                        pid=run_pid, threads=threads,
+                        seeded_findings=seeded_findings or None,
+                        halt={
+                            "task": task.number,
+                            "attempt": halt_out.get("attempt", outcome.attempts),
+                            "freeze_commit": None,
+                            "freeze_base": freeze_base,
+                            "convergence_state": halt_out.get("convergence_state") or {},
+                            "halt_reason": outcome.halt_reason,
+                            "findings": halt_out.get("findings") or [],
+                            "repair_task": outcome.repair_task,
+                            "approved": approved,
+                            "changes": reviewer_wrote["changes"],
+                            "reviewer_head": reviewer_wrote["reviewer_head"],
+                            "freeze_error": freeze_error,
+                        },
+                        deferrals=deferrals or None,
+                        approved=approved_ids or None,
+                        unverified=unverified or None,
+                    )
+
                 freeze_commit = _freeze_reviewer_wrote(
-                    cwd, freeze_ref_name(run_id, task.number), reviewer_wrote
+                    cwd, freeze_ref_name(run_id, task.number), reviewer_wrote,
+                    record_halt=record_halt,
                 )
             else:
                 freeze_base = _git_head(cwd)
@@ -2901,6 +3005,15 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_state = _freeze_stage_halt(
                     cwd, run_dir, "final-review", final_outcome.halt_reason,
                     reviewer_wrote=final_halt_out.get("reviewer_wrote"),
+                    write_halt=lambda rec: write_run_json(
+                        run_dir, plan_path, spec_paths, "escalated-final-review",
+                        task_summaries, run_base, started_at=run_started,
+                        pid=run_pid, threads=threads,
+                        seeded_findings=seeded_findings or None, halt=rec,
+                        deferrals=deferrals or None,
+                        approved=approved_ids or None,
+                        unverified=unverified or None,
+                    ),
                 )
             elif _open_unverified(unverified):
                 # The review passed but an unverified entry has no human call

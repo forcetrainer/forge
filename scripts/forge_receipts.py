@@ -380,6 +380,23 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
     return path
 
 
+def write_final_review_halt(run_dir, halt_reason, findings):
+    """The final-review receipt of a halt that discarded the verdict (a
+    `reviewer-wrote` halt): no verdict was usable, so the receipt carries the
+    class and ``findings`` — bare strings, the changed paths — which is where
+    ``forge_status`` reads the halt class and the monitor banner reads its
+    detail line. Replaces whatever receipt an earlier lap left."""
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "final-review.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "verdict": "findings",
+            "findings": ["; ".join(findings)] if findings else [],
+            "halt_reason": halt_reason,
+        }, f, indent=2)
+    return path
+
+
 _ATTEMPT_RE = re.compile(r"^task-(\d+)-attempt-(\d+)\.json$")
 
 

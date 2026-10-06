@@ -1255,6 +1255,64 @@ class TaskReviewerWroteTests(ReviewerWroteCase):
         self.assertNotIn("stray.txt", self.git("show", "HEAD", "--stat"))
 
 
+class TaskFreezeFailureTests(ReviewerWroteCase):
+    """A git failure while freezing a reviewer-wrote halt must leave a halt
+    record and an error naming both the reviewer write and the command."""
+
+    def test_commit_tree_failure_records_halt_and_names_both(self):
+        rc, err = self.main_failing_git([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [self.stray_op()]},
+        ], "commit-tree")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("reviewer", err)
+        self.assertIn("stray.txt", err)
+        self.assertIn("commit-tree", err)
+        run = self.run_json()
+        self.assertEqual(run["status"], "contract-error")
+        halt = run["halt"]
+        self.assertEqual(halt["task"], 1)
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        self.assertIsNone(halt["freeze_commit"])
+        self.assertIn("commit-tree", halt["freeze_error"])
+
+
+class RunDirInsideRepoTests(ReviewerWroteCase):
+    """A --run-dir inside the repository that git does not ignore would make
+    the runner's own files trip the fingerprint; refuse it up front."""
+
+    def _run(self, run_dir):
+        self.run_dir = run_dir
+        return self.run_cli([_WORKER, {"exit": 0, "msg": _pass_msg()}])
+
+    def test_unignored_in_repo_run_dir_is_a_contract_error_before_dispatch(self):
+        res = self._run(os.path.join(self.repo, "myrun"))
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("myrun", res.stderr)
+        self.assertIn("not git-ignored", res.stderr)
+        self.assertIn(".forge", res.stderr)
+        self.assertEqual(self.dispatches("task-1"), [])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "myrun")))
+
+    def test_relative_unignored_run_dir_is_refused_too(self):
+        res = self._run("myrun")
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("not git-ignored", res.stderr)
+
+    def test_ignored_in_repo_run_dir_is_accepted(self):
+        with open(os.path.join(self.repo, ".gitignore"), "a") as f:
+            f.write("myrun/\n")
+        self.git("add", "-A")
+        self.git("commit", "-m", "ignore myrun")
+        res = self._run(os.path.join(self.repo, "myrun"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_default_forge_run_dir_is_accepted(self):
+        res = self._run(os.path.join(self.repo, ".forge", "runs", "x"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
 class FingerprintErrorTaskTests(ReviewerWroteCase):
     """A fingerprint that cannot be taken is a contract error (exit 1) naming
     the git command: no fallback dispatch, no coverage retry, no commit."""

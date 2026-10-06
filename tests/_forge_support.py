@@ -694,6 +694,39 @@ class ReviewerWroteCase(unittest.TestCase):
             ])
         return rc, err.getvalue()
 
+    def main_failing_git(self, responses, fail_command):
+        """Run ``forge_run.main`` in-process with ``forge_git._git`` raising
+        ``RuntimeError`` for the git subcommand ``fail_command`` (the freeze
+        and ref-restore helpers use it; fingerprints do not); returns
+        (rc, stderr)."""
+        from unittest import mock
+        import forge_git
+        real = forge_git._git
+
+        def flaky(cwd, args, what, *a, **kw):
+            if args and args[0] == fail_command:
+                raise RuntimeError(
+                    "{} failed in {}: boom".format(what, cwd))
+            return real(cwd, args, what, *a, **kw)
+
+        env = {
+            "FORGE_FAKE_LOG": self.log,
+            "FORGE_FAKE_PROMPT_LOG": self.log + ".prompts",
+            "FORGE_FAKE_RESPONSES": self.write_responses(responses),
+        }
+        old_cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, old_cwd)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(forge_git, "_git", flaky), \
+                contextlib.redirect_stderr(err):
+            rc = forge_run.main([
+                self.plan, "--spec", self.spec, "--run-dir", self.run_dir,
+                "--codex-bin", self.fake,
+            ])
+        return rc, err.getvalue()
+
     def stray_op(self, text="stray\n"):
         return {"op": "write", "path": self.stray, "text": text}
 

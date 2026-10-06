@@ -45,8 +45,10 @@ def git_diff(cwd, base):
     untracked files, and the runner only stages a task's work in the commit
     *after* review — without this, a task creating only new files reviewed as
     "no changes" (fixed 2026-09-02). Read-only: no ``git add``, no index
-    mutation, so the single-commit discipline and ``git stash create``
-    snapshots are undisturbed. Raises RuntimeError naming the cause on a git
+    mutation, so the single-commit discipline is undisturbed. This is the
+    packet's full diff against the base; the verification lap's repair delta
+    is a separate tree-against-tree capture (``forge_git.repair_delta``), so
+    an unchanged untracked file is not re-shown there. Raises RuntimeError naming the cause on a git
     failure (a packet-generation error — halt per the Halt spec)."""
     def run(args):
         try:

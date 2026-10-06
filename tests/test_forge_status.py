@@ -19,6 +19,7 @@ SCRIPTS = str(pathlib.Path(__file__).resolve().parent.parent / "scripts")
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
+import forge_receipts  # noqa: E402
 import forge_status  # noqa: E402
 from _forge_support import (  # noqa: E402
     MINIMAL_SPEC,
@@ -922,6 +923,47 @@ class ProgressFieldsTests(unittest.TestCase):
             self._write_ex(d, "running", [_summary(1, "passed")])
             st = forge_status.read_run_state(d, now=time.time() + 10000)
             self.assertIn("STALLED?", forge_status.render_status(st))
+
+
+class FinalReviewReviewerWroteStatusTests(unittest.TestCase):
+    CHANGES = ["tree: A stray.txt", "branch: refs/heads/main -> refs/heads/other"]
+
+    def _halt(self, freeze=None):
+        return {
+            "stage": "final-review", "freeze_commit": freeze,
+            "freeze_base": "b" * 40, "halt_reason": "reviewer-wrote",
+            "changes": self.CHANGES, "reviewer_head": None,
+        }
+
+    def test_receipt_carries_class_and_paths_into_status_and_banner_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+                       halt=self._halt())
+            forge_receipts.write_final_review_halt(
+                d, "reviewer-wrote", self.CHANGES)
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["halt_class"], "reviewer-wrote")
+            first = state["final_review"]["findings"][0]
+            self.assertIn("stray.txt", first)
+            out = forge_status.render_status(state)
+            self.assertIn("(reviewer-wrote)", out)
+            self.assertIn("stray.txt", out)
+
+    def test_receipt_replaces_an_earlier_laps_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_final_review(d, findings=["old"], halt_reason="scope-decision")
+            forge_receipts.write_final_review_halt(
+                d, "reviewer-wrote", self.CHANGES)
+            with open(os.path.join(d, "final-review.json")) as f:
+                data = json.load(f)
+            self.assertEqual(data["halt_reason"], "reviewer-wrote")
+            self.assertNotIn("old", json.dumps(data))
+
+    def test_nothing_to_freeze_prints_the_none_wording_not_a_sha(self):
+        lines = "\n".join(forge_status.render_halt(self._halt(freeze=None)))
+        self.assertIn("nothing to freeze", lines)
+        self.assertNotIn("frozen edits: None", lines)
+        self.assertIn("stray.txt", lines)
 
 
 if __name__ == "__main__":

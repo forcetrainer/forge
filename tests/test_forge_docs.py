@@ -648,14 +648,17 @@ def test_claude_loop_fingerprints_around_every_reviewer_spawn():
                    "on task and final reviews alike",
                    "is a **`reviewer-wrote` halt**",
                    "Exit 1 (git failed, no fingerprint) is a **contract error**",
-                   "forge_fingerprint.py freeze <that file> --ref",
+                   "forge_fingerprint.py freeze <that file> --ref refs/forge/freeze/<run>/task-<N>",
+                   "refs/forge/freeze/<run>/final-review",
                    "records the change lines `verify` printed in the halt"):
         assert phrase in loop, phrase
 
 
 def test_claude_loop_hands_acceptance_results_by_json_path():
     loop = _claude_loop_bullet()
+    assert "task-or-final" not in loop
     for phrase in ("writes the acceptance command-clause records",
+                   "(JSON keys `command`, `outcome`, `exit_code`, `passed`, `output_tail`)",
                    "as JSON to the scratch directory",
                    "the prompt names that path with the do-not-re-run assertion",
                    "the obligation to check prose clauses itself"):

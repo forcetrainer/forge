@@ -339,5 +339,80 @@ class FreezeCliTests(RepoCase):
         self.assertIn("git", p.stderr)
 
 
+class FingerprintValidationTests(RepoCase):
+    REF = "refs/forge/freeze/r/task-1"
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, CLI, *args], cwd=self.d, capture_output=True, text=True
+        )
+
+    def fp(self):
+        return json.loads(self.run_cli("snapshot").stdout)
+
+    def assert_usage(self, p, field):
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn(field, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_bad_ref_forms_are_refused_before_git(self):
+        fp = json.dumps(self.fp())
+        for ref in ("refs/heads/main", "refs/heads/other", "main", "-x",
+                    "refs/forge/../heads/main", "refs/forge/-x/..", "refs/a b",
+                    "refs/forge/x;y", "refs/"):
+            p = self.run_cli("freeze", fp, "--ref=" + ref)
+            self.assert_usage(p, "--ref")
+
+    def test_refs_heads_refusal_leaves_the_tree_alone(self):
+        self.write("worker.txt", "w\n")
+        fp = json.dumps(self.fp())
+        p = self.run_cli("freeze", fp, "--ref", "refs/heads/main")
+        self.assert_usage(p, "--ref")
+        self.assertIn("worker.txt", self.status())
+
+    def test_malformed_fields_are_usage_errors_for_freeze_and_verify(self):
+        cases = {
+            "tree": ["zz", "--foo", 5, None, "A" * 40, "a" * 39],
+            "index": ["zz", 5, None],
+            "head": ["--foo", "zz", 5, None, ["a" * 40]],
+            "branch": ["--foo", "main", "refs/heads/a b", 5, "refs/tags/x"],
+        }
+        base = self.fp()
+        for field, values in cases.items():
+            for v in values:
+                bad = dict(base)
+                bad[field] = v
+                for cmd in (["verify", json.dumps(bad)],
+                            ["freeze", json.dumps(bad), "--ref", self.REF]):
+                    self.assert_usage(self.run_cli(*cmd), field)
+
+    def test_null_branch_is_valid(self):
+        _git(self.d, "checkout", "--detach")
+        fp = self.fp()
+        self.assertIsNone(fp["branch"])
+        self.assertEqual(self.run_cli("verify", json.dumps(fp)).returncode, 0)
+
+
+class FreezeCheckpointTests(RepoCase):
+    REF = "refs/forge/freeze/r/final-review"
+
+    def test_none_when_recorded_tree_equals_head_tree(self):
+        before = forge_git.repo_fingerprint(self.d)
+        self.write("reviewer.txt", "late\n")
+        self.assertIsNone(forge_git.freeze_checkpoint(self.d, before, self.REF))
+        self.assertEqual(self.status(), "")
+        self.assertNotEqual(subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", self.REF], cwd=self.d,
+            capture_output=True).returncode, 0)
+
+    def test_sha_when_the_worker_left_edits(self):
+        self.write("worker.txt", "w\n")
+        before = forge_git.repo_fingerprint(self.d)
+        self.write("reviewer.txt", "late\n")
+        sha = forge_git.freeze_checkpoint(self.d, before, self.REF)
+        self.assertEqual(_git(self.d, "rev-parse", self.REF).strip(), sha)
+        self.assertEqual(self.status(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

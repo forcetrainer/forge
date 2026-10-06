@@ -395,6 +395,9 @@ def render_halt(halt):
             else "  frozen edits: (nothing to freeze — the stage made no "
                  "change to the tree)",
         ]
+        if halt.get("changes"):
+            lines.append("  changed by the reviewer: {}".format(
+                "; ".join(halt["changes"])))
         if halt.get("halt_reason") == "unverified":
             # The one stage class that poses a question `--resolve` answers:
             # the ids are the open entries', listed under the header.
