@@ -16,6 +16,7 @@ forge-run.py and this module — the same discipline forge_git/forge_plan/
 forge_receipts follow.
 """
 import argparse
+import copy
 import json
 import os
 import re
@@ -326,6 +327,41 @@ def validate_locations(verdict):
                 "location.lines: {!r}".format(finding.id, finding.lines)
             )
     return defects
+
+
+def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
+                          carried_ids=None):
+    """Validate that every finding in the scope-decision cell carries its
+    drafted ``repair_task`` (Reviewer verdict contract: required on a
+    pre-existing x contract-breaking finding, optional on any other verifiable
+    finding, null on an unverifiable one). Returns defect strings in the shape
+    ``validate_locations`` returns, feeding the same
+    retry-once-then-contract-error mechanism.
+
+    The cell is judged on the **runner-derived** provenance, never the
+    reviewer's claim: when ``diff_text`` is supplied, a deep copy of the
+    verdict is classified exactly as ``classify_findings`` will classify it
+    (same diffs, same ``resolved`` drops), so a truly pre-existing finding the
+    reviewer labeled ``in-diff`` still needs its ``repair_task``. The caller's
+    verdict is never mutated. With no ``diff_text`` there is nothing to derive
+    from, and the reviewer's emitted provenance is used as a fallback."""
+    if verdict.kind != "findings":
+        return []
+    findings = verdict.findings
+    if diff_text is not None:
+        probe = copy.deepcopy(verdict)
+        classify_findings(
+            probe, diff_text, run_diff=run_diff, carried_ids=carried_ids
+        )
+        findings = probe.findings
+    return [
+        "{}: repair_task is required on a pre-existing contract-breaking "
+        "finding".format(finding.id)
+        for finding in findings
+        if finding.provenance == "pre-existing"
+        and finding.impact == "contract-breaking"
+        and finding.repair_task is None
+    ]
 
 
 def validate_finding_ids(verdict):
@@ -994,6 +1030,19 @@ def main(argv=None):
                             + "; ".join(contract_ref_defects)
                         )
                 diff_text = _run_git_diff(args.base)
+                # The scope-decision cell is judged on the derived provenance
+                # (never the reviewer's claim), exactly as the runner's
+                # _verdict_defects does; the CLI has no run diff, so an
+                # earlier task's line reads pre-existing here (The shared
+                # decision helper).
+                repair_defects = validate_repair_tasks(
+                    verdict, diff_text, carried_ids=state.carried_ids
+                )
+                if repair_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid repair_task(s): "
+                        + "; ".join(repair_defects)
+                    )
                 verdict = classify_findings(
                     verdict, diff_text, carried_ids=state.carried_ids
                 )

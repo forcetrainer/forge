@@ -29,10 +29,14 @@ reviewer, final-review fixer, doc-sync; cold and resume alike — carries
 (`CODEX_ISOLATION_ARGS` in `forge_common`): no in-worker subagents (either
 backend; `agents.enabled=false` rather than `--disable multi_agent` because
 the model catalog's multi-agent setting outranks that feature flag, which
-codex ignores) and no memories carried across tasks. Task and final reviewers also
-carry `-c sandbox_mode="read-only"` (`CODEX_REVIEWER_SANDBOX_ARGS`; `-c`
-because `codex exec resume` has no `-s`) so they are read-only; writers carry
-no sandbox override. Other user config still applies. The rest of this document specifies the
+codex ignores) and no memories carried across tasks. No dispatch carries a sandbox override, reviewers included: they run under the
+`codex exec` default (workspace-write, network off) so a test harness can run, and
+they verify in a scratch copy they make themselves. The guarantee is enforced by the runner, not
+the sandbox: a repository fingerprint (`forge_git.repo_fingerprint`) before every reviewer
+dispatch and again on every exit, where a mismatch is a `reviewer-wrote` halt (task or stage
+escalation, exit 2) that freezes the pre-review capture and restores HEAD and the branch, and a
+fingerprint failure is a contract error (exit 1) — `execution` spec: Reviewer write
+discipline. Other user config still applies. The rest of this document specifies the
 runner (the dispatch branch). The disposition-matrix and convergence decision
 logic described below (Convergence stop) lives in shared `scripts/forge_dispose.py`
 (Phase 12b) — the runner calls it in-process; the Claude dispatch path (planning
@@ -44,17 +48,17 @@ callers, so the two harnesses' rework/halt rules can't drift apart.
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> [--spec <spec.md>] \
   --run-dir .forge/runs/<name> --autofix auto \
-  [--resolve <finding-id>=repair|defer ...]
+  [--resolve <id>=repair|defer|accept:<evidence> ...]
 ```
 
 **`--spec <spec.md>`** is optional and only for a legacy plan with no `**Spec files:**` header. The plan's specs come from that header, and every brief, checklist, packet and lint call the runner makes uses that set. Passing `--spec` alongside a header is a plan lint error (contract error, exit 1). A plan with neither has no spec.
 
-**`--resolve <finding-id>=repair|defer`** (repeatable, resume-only): carries the human's
-resolution of a `scope-decision` halt's drafted `repair_task` into the re-invocation.
-`repair` means the human fixed it; `defer` files it for later. Either exempts that finding
-id from the `scope-decision` halt for the rest of the run. It applies only to
-`scope-decision` halts — an id from any other halt class, or an id the runner never
-raised, is a contract error naming it. The runner applies no fix of its own.
+**`--resolve <id>=repair|defer|accept:<evidence>`** (repeatable, resume-only): carries the human's
+resolution of a halt's open question into the re-invocation. Two halts take it.
+- **`scope-decision`** (the drafted `repair_task`): `repair` means the human fixed it, `defer` files it for later; either exempts that finding id from the `scope-decision` halt for the rest of the run. An id from any other halt class, or an id the runner never raised, is a contract error naming it.
+- **`unverified`** (the final review left an open seed finding or `unverifiable` coverage entry): one call per open entry — `accept:<evidence>` (the evidence text is recorded), `defer` or `repair`. A bare id that is both a finding and a coverage entry raises as ambiguous; qualify it `finding:ID` or `coverage:ID`, e.g. `--resolve coverage:C3=accept:ran it by hand`.
+
+Parser rules: `accept` requires non-empty evidence; `repair` and `defer` reject evidence text; `accept` against any halt that is not `unverified` is a contract error. The runner applies no fix of its own.
 
 **`--autofix auto|gate`** (chosen at the execution offer, alongside the disclosed tier routing; default `auto`): `auto` runs the fix/defer/halt disposition matrix (below) so the runner reworks its own in-diff, contract-breaking findings without stopping; `gate` is the conservative escape hatch — any reviewer finding halts, no auto-fix, matching pre-Phase-7 behavior. Disclose the chosen mode in the offer alongside tier routing.
 
@@ -69,7 +73,7 @@ execution, review dispatch, the convergence-based rework loop, receipts, and
 plan-checkbox ledger annotations. It reuses `extract-brief.py` and
 `review-packet.py` for all plan/spec parsing — no duplicated heading grammar.
 
-**The review diff includes untracked files.** Every diff the runner hands a reviewer or feeds the finding classifier — the per-task discovery packet, the repair delta on verification laps, the final-review packet and its fix loop, `forge_dispose.py`'s own recomputed diff, and the standalone `review-packet.py` CLI — comes from one helper, `review-packet.py`'s `git_diff(cwd, base)`: `git diff <base>` followed by a `git diff --no-index /dev/null <path>` new-file hunk for each untracked, non-ignored file (`git ls-files --others --exclude-standard`, so the gitignored `.forge/` never leaks in). Plain `git diff` never looks at untracked files, and the runner only stages a task's work in the commit *after* its review passes, so before 0.10.3 a task whose whole implementation was new files reviewed as "no changes" and a finding on a new file classified as pre-existing. The helper is read-only — nothing is staged, the index is never touched — so the single-commit discipline and `git stash create` snapshots are undisturbed. One consequence: the pre-repair snapshot cannot record untracked files, so a verification lap's delta shows every still-uncommitted new file the task has created, not only the ones this repair touched (DEFERRALS 2026-09-02).
+**The review diff includes untracked files.** Every diff the runner hands a reviewer or feeds the finding classifier — the per-task discovery packet, the repair delta on verification laps, the final-review packet and its fix loop, `forge_dispose.py`'s own recomputed diff, and the standalone `review-packet.py` CLI — comes from one helper, `review-packet.py`'s `git_diff(cwd, base)`: `git diff <base>` followed by a `git diff --no-index /dev/null <path>` new-file hunk for each untracked, non-ignored file (`git ls-files --others --exclude-standard`, so the gitignored `.forge/` never leaks in). Plain `git diff` never looks at untracked files, and the runner only stages a task's work in the commit *after* its review passes, so before 0.10.3 a task whose whole implementation was new files reviewed as "no changes" and a finding on a new file classified as pre-existing. The helper is read-only — nothing is staged, the index is never touched — so the single-commit discipline is undisturbed. The verification lap's repair delta is a different capture: the pre-repair state is a tree object recorded through a temporary index (tracked and untracked non-ignored files alike), and the delta is that tree against a fresh capture of the working tree, tree against tree. An unchanged new file therefore yields no hunk, and an addition or deletion the repair made appears exactly once (this closes DEFERRALS 2026-09-02).
 
 **Commit discipline:** after each task reaches `passed` and its ledger checkbox is annotated, the runner stages all changes and commits with message `forge: task N — <title>`. Nothing staged (e.g., uncommitted changes from a human pre-fix on resume) means the commit is skipped; no empty commits are created. The `.forge/` directory is never staged; the ledger annotation rides in the task's commit. A task that halts freezes instead: the in-progress attempt — untracked files included — is captured as a commit under a forge-owned ref off the mainline, never stacked on it, and the working tree returns to the last committed checkpoint. The two terminal stages freeze the same way when they halt: a final-review halt after an applied fix dispatch, and a doc-sync halt that had already edited, both leave edits nothing commits, so each is parked under `refs/forge/freeze/<run-id>/<stage>` and the tree returns to the checkpoint. A stage freeze is recoverable, not replayed — the stage re-runs from scratch on the committed diff. This establishes a clean checkpoint after every passed task and after every halt alike, so HEAD is a reliable base for per-task review and resume.
 
@@ -147,7 +151,8 @@ is a human decision among:
   pre-existing/contract-breaking call): fix the code directly and pass
   `--resolve <finding-id>=repair` on resume, or pass
   `--resolve <finding-id>=defer` to file it for later instead — either exempts
-  that finding from the `scope-decision` halt for the rest of the run. The
+  that finding from the `scope-decision` halt for the rest of the run (an
+  `unverified` halt is answered per entry instead, as above). The
   runner applies no fix of its own.
 
 **Tier routing:** unchanged in substance from the pipelined path — trivial
@@ -327,7 +332,7 @@ codex exec -c agents.enabled=false --disable multi_agent_v2 --disable memories \
 
 - **`< /dev/null` is required.** With a prompt argument and an open standard input, `codex exec` waits for more input and never starts; closing it is what lets the command run unattended.
 - **Model and effort** are the standard tier's, from the routing table in `SKILL.md`.
-- **The verdict** is the reviewer's last message: `--output-last-message` writes it to `<verdict-file>`, which is the file `forge_docreview.py --verdict` validates. The reviewer is read-only and writes no file itself.
+- **The verdict** is the reviewer's last message: `--output-last-message` writes it to `<verdict-file>`, which is the file `forge_docreview.py --verdict` validates. The reviewer is read-only (this document-review command, not a runner dispatch) and writes no file itself.
 - **Scripts** live at the plugin root: `../../scripts/` from this skill directory. Do not search the working repo for them.
 - **An invalid verdict** gets one retry: run the command again, adding the defect list `forge_docreview.py` printed to the prompt after the packet path. A second invalid verdict is a contract error. Codex has no handle on the first reviewer to resume, so the retry is the fresh-reviewer form the skills name as the fallback.
 - **A re-review after an amendment** is the same command on the rebuilt packet.

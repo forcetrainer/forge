@@ -133,7 +133,8 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         run_dir = os.path.join(self.d, "run-s")
         os.makedirs(run_dir)
         task = forge_run.Task(number=1, title="t", tier="standard")
-        verdict = forge_run.dispatch_reviewer(task, self.packet, self.fake, run_dir)
+        verdict = forge_run.dispatch_reviewer(
+            task, self.packet, self.fake, run_dir, cwd=scratch_repo(self))
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-1-review-last")
         self.assertIsNotNone(argv)
@@ -145,7 +146,8 @@ class DispatchReviewerUnitTests(unittest.TestCase):
         run_dir = os.path.join(self.d, "run-c")
         os.makedirs(run_dir)
         task = forge_run.Task(number=2, title="t", tier="complex")
-        verdict = forge_run.dispatch_reviewer(task, self.packet, self.fake, run_dir)
+        verdict = forge_run.dispatch_reviewer(
+            task, self.packet, self.fake, run_dir, cwd=scratch_repo(self))
         self.assertEqual(verdict.kind, "pass")
         argv = self._argv_for("task-2-review-last")
         self.assertIsNotNone(argv)
@@ -541,6 +543,11 @@ class FinalReviewLoopTests(unittest.TestCase):
         )
 
     def _init_repo_with_task_work(self):
+        # The run dir and fake-codex logs live in the repository directory and
+        # are written during a review: ignore them so only a reviewer's own
+        # write changes the unchanged-repository fingerprint.
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         # A base commit, then a second commit simulating the plan's own task
         # work (an append to a tracked file) -- run_base is the commit BEFORE
         # the task work, so the whole-plan diff has something to point a
@@ -1110,3 +1117,261 @@ class TaskReviewRetryResumeTests(unittest.TestCase):
         self.assertEqual(len(self._review_calls()), 1)
         self.assertFalse(os.path.exists(
             os.path.join(self.run_dir, "task-1-retry-defects.md")))
+
+
+# --- reviewer write discipline: task reviews --------------------------------
+
+_WORKER = {"exit": 0, "msg": ""}
+
+
+class TaskReviewerWroteTests(ReviewerWroteCase):
+    """A task reviewer that changes the repository halts the run as
+    `reviewer-wrote` (exit 2), freezing the pre-review capture."""
+
+    def _assert_frozen_halt(self, res, stray="stray.txt"):
+        self.assertEqual(res.returncode, 2, res.stderr)
+        with open(os.path.join(self.run_dir, "task-1-attempt-1.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["status"], "escalated")
+        self.assertEqual(receipt["halt_reason"], "reviewer-wrote")
+        self.assertIn(stray, " ".join(receipt["outstanding_findings"]))
+        halt = self.halt_record()
+        self.assertEqual(halt["task"], 1)
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertEqual(halt["freeze_base"], self.base_sha)
+        self.assertIn(stray, " ".join(halt["changes"]))
+        sha = halt["freeze_commit"]
+        self.assertTrue(sha)
+        # The freeze is the worker's work alone: the acceptance edit is in it,
+        # the reviewer's stray file is not.
+        self.assertIn("NEEDFIX", self.git("show", sha + ":f1.txt"))
+        self.assertFalse(self.in_commit(sha, stray))
+        self.assertEqual(self.git("rev-parse", sha + "^").strip(), self.base_sha)
+        self.assertEqual(self.porcelain(), "")
+        self.assertFalse(os.path.exists(self.stray))
+        return halt
+
+    def test_cold_reviewer_write_halts_and_freezes_pre_review_capture(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [self.stray_op()]},
+        ])
+        self._assert_frozen_halt(res)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 1)
+        self.assertEqual(self.commit_count(), 1)  # no task commit
+        self.assertNotIn("passed", self.run_json()["status"])
+
+    def test_reviewer_that_writes_nothing_passes_through(self):
+        res = self.run_cli([_WORKER, {"exit": 0, "msg": _pass_msg()}])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(self.halt_record())
+
+    def test_reviewer_commit_halts_with_branch_and_head_restored(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [
+                self.stray_op(),
+                {"op": "git", "args": ["add", "-A"]},
+                {"op": "git", "args": ["commit", "-m", "reviewer commit"]},
+            ]},
+        ])
+        halt = self._assert_frozen_halt(res)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base_sha)
+        self.assertEqual(
+            self.git("rev-parse", "refs/heads/main").strip(), self.base_sha)
+        stub_sha = halt["reviewer_head"]
+        self.assertEqual(self.git("log", "-1", "--format=%s", stub_sha).strip(),
+                         "reviewer commit")
+        self.assertIn(stub_sha, " ".join(halt["changes"]))
+        # Left unreachable, never deleted.
+        self.assertEqual(
+            subprocess.run(["git", "merge-base", "--is-ancestor", stub_sha, "HEAD"],
+                           cwd=self.repo).returncode, 1)
+        self.assertEqual(self.commit_count(), 1)
+
+    def test_reviewer_branch_switch_halts_with_head_reattached(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [
+                {"op": "git", "args": ["checkout", "-b", "other"]},
+            ]},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        halt = self.halt_record()
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("branch", " ".join(halt["changes"]))
+        self.assertEqual(self.git("symbolic-ref", "HEAD").strip(), "refs/heads/main")
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base_sha)
+        self.assertEqual(self.porcelain(), "")
+        self.assertIn("NEEDFIX", self.git("show", halt["freeze_commit"] + ":f1.txt"))
+
+    def test_resumed_reviewer_write_then_success_halts(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-rev1")},
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [self.stray_op()]},
+        ])
+        self._assert_frozen_halt(res)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 2)
+
+    def test_resumed_reviewer_write_then_crash_is_not_a_resume_fallback(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-rev1")},
+            {"exit": 1, "msg": "", "file_ops": [self.stray_op()]},
+            {"exit": 0, "msg": _pass_msg()},  # a cold fallback would land here
+        ])
+        self._assert_frozen_halt(res)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 2)
+        self.assertEqual(self.commit_count(), 1)
+
+    def test_resumed_reviewer_write_then_timeout_halts(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-rev1")},
+            {"exit": 0, "msg": "", "sleep": 30, "ops_first": True,
+             "file_ops": [self.stray_op()]},
+            {"exit": 0, "msg": _pass_msg()},
+        ], extra_args=("--timeout", "3"))
+        self._assert_frozen_halt(res)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 2)
+
+    def test_halt_resumes_and_brief_names_the_reviewer_write(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [self.stray_op()]},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        res = self.run_cli([_WORKER, {"exit": 0, "msg": _pass_msg()}])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(self.halt_record())
+        with open(os.path.join(self.run_dir, "task-1-attempt-2-brief.md")) as f:
+            brief = f.read()
+        self.assertIn("reviewer-wrote", brief)
+        self.assertIn("reviewer changed the repository", brief)
+        self.assertNotIn("stray.txt", self.git("show", "HEAD", "--stat"))
+
+
+class TaskFreezeFailureTests(ReviewerWroteCase):
+    """A git failure while freezing a reviewer-wrote halt must leave a halt
+    record and an error naming both the reviewer write and the command."""
+
+    def test_commit_tree_failure_records_halt_and_names_both(self):
+        rc, err = self.main_failing_git([
+            _WORKER,
+            {"exit": 0, "msg": _pass_msg(), "file_ops": [self.stray_op()]},
+        ], "commit-tree")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("reviewer", err)
+        self.assertIn("stray.txt", err)
+        self.assertIn("commit-tree", err)
+        run = self.run_json()
+        self.assertEqual(run["status"], "contract-error")
+        halt = run["halt"]
+        self.assertEqual(halt["task"], 1)
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        self.assertIsNone(halt["freeze_commit"])
+        self.assertIn("commit-tree", halt["freeze_error"])
+
+
+class RunDirInsideRepoTests(ReviewerWroteCase):
+    """A --run-dir inside the repository that git does not ignore would make
+    the runner's own files trip the fingerprint; refuse it up front."""
+
+    def _run(self, run_dir):
+        self.run_dir = run_dir
+        return self.run_cli([_WORKER, {"exit": 0, "msg": _pass_msg()}])
+
+    def test_unignored_in_repo_run_dir_is_a_contract_error_before_dispatch(self):
+        res = self._run(os.path.join(self.repo, "myrun"))
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("myrun", res.stderr)
+        self.assertIn("not git-ignored", res.stderr)
+        self.assertIn(".forge", res.stderr)
+        self.assertEqual(self.dispatches("task-1"), [])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "myrun")))
+
+    def test_relative_unignored_run_dir_is_refused_too(self):
+        res = self._run("myrun")
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("not git-ignored", res.stderr)
+
+    def test_ignored_in_repo_run_dir_is_accepted(self):
+        with open(os.path.join(self.repo, ".gitignore"), "a") as f:
+            f.write("myrun/\n")
+        self.git("add", "-A")
+        self.git("commit", "-m", "ignore myrun")
+        res = self._run(os.path.join(self.repo, "myrun"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_default_forge_run_dir_is_accepted(self):
+        res = self._run(os.path.join(self.repo, ".forge", "runs", "x"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+class FingerprintErrorTaskTests(ReviewerWroteCase):
+    """A fingerprint that cannot be taken is a contract error (exit 1) naming
+    the git command: no fallback dispatch, no coverage retry, no commit."""
+
+    def _assert_contract_error(self, rc, err, reviews, expect_commit_count=1):
+        self.assertEqual(rc, 1, err)
+        self.assertIn("git rev-parse HEAD", err)
+        self.assertEqual(self.run_json()["status"], "contract-error")
+        self.assertEqual(len(self.dispatches("task-1-review-last")), reviews)
+        self.assertEqual(self.commit_count(), expect_commit_count)
+
+    def test_failure_before_cold_task_reviewer(self):
+        rc, err = self.main_failing_fingerprint([_WORKER, {"exit": 0, "msg": _pass_msg()}], 1)
+        self._assert_contract_error(rc, err, reviews=0)
+
+    def test_failure_on_exit_of_cold_task_reviewer(self):
+        rc, err = self.main_failing_fingerprint([_WORKER, {"exit": 0, "msg": _pass_msg()}], 2)
+        self._assert_contract_error(rc, err, reviews=1)
+
+    def test_failure_before_resumed_task_reviewer(self):
+        rc, err = self.main_failing_fingerprint([
+            _WORKER,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-rev1")},
+            {"exit": 0, "msg": _pass_msg()},
+            {"exit": 0, "msg": _pass_msg()},
+        ], 3)
+        self._assert_contract_error(rc, err, reviews=1)
+
+    def test_failure_on_exit_of_resumed_task_reviewer(self):
+        rc, err = self.main_failing_fingerprint([
+            _WORKER,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-rev1")},
+            {"exit": 1, "msg": ""},
+            {"exit": 0, "msg": _pass_msg()},  # a cold fallback would land here
+        ], 4)
+        self._assert_contract_error(rc, err, reviews=2)
+
+
+class AcceptanceInPacketTests(ReviewerWroteCase):
+    def test_discovery_packet_has_acceptance_results_and_verification_does_not(self):
+        res = self.run_cli([
+            _WORKER,
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs a guard")},          # review a1: fix
+            {"exit": 0, "msg": ""},                         # worker a2
+            {"exit": 0, "msg": _pass_msg()},                # review a2 (verification)
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompts = _log_prompts(self.log + ".prompts")
+        argvs = _log_argvs(self.log)
+        review_prompts = [
+            p for a, p in zip(argvs, prompts)
+            if "--output-last-message" in a
+            and "task-1-review-last" in a[a.index("--output-last-message") + 1]
+        ]
+        self.assertEqual(len(review_prompts), 2)
+        discovery, verification = review_prompts
+        self.assertIn("## Acceptance results", discovery)
+        self.assertIn("echo NEEDFIX >> f1.txt", discovery)
+        self.assertNotIn("## Acceptance results", verification)

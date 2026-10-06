@@ -46,38 +46,18 @@ def _working_tree_dirty(cwd):
 
 
 def snapshot_tree(cwd):
-    """Pre-repair working-tree snapshot for a later ``git diff <ref>`` (Delta-
-    scoped verification packets spec): taken just before a repair dispatch so
-    the next verification packet's delta is scoped to that repair alone.
-    ``git stash create`` records a commit-ish of the current index + tracked
-    working-tree state without touching either (unlike plain ``git stash``,
-    it never updates the stash ref or the working tree, and — like ``git
-    diff`` — it never looks at untracked files) — the usual path. When there
-    is nothing tracked to stash, ``stash create`` prints nothing; that means
-    the tracked tree already equals HEAD, so the snapshot ref is simply
-    ``HEAD`` itself — no ``git add``, no index mutation, not even for an
-    untracked file sitting in the tree (a prior fallback staged those via
-    ``git add -A``, which a later ``git add -A && git commit`` would then
-    sweep into the task or final-review commit — fixed 2026-08-21). Never
-    mutates the working tree or the index either way. Returns ``None``
-    outside a git repo (mirrors ``_git_head``); raises RuntimeError naming the
-    cause on a git failure (a packet-generation error — halt per the Halt
-    spec)."""
-    head = _git_head(cwd)
-    if head is None:
+    """Pre-repair working-tree snapshot for a later tree-against-tree delta
+    (Delta-scoped verification packets spec): taken just before a repair
+    dispatch so the next verification packet's delta is scoped to that repair
+    alone. It is ``capture_tree`` — tracked *and* untracked non-ignored
+    content via a temporary index, the real index and working tree untouched
+    — so a task's new files (untracked until the post-review commit) are part
+    of the snapshot and a repair that edits or deletes one shows as exactly
+    that. Returns ``None`` outside a git repo (mirrors ``_git_head``); raises
+    FingerprintError naming the command on a git failure."""
+    if _git_head(cwd) is None:
         return None
-    try:
-        stash = subprocess.run(
-            ["git", "stash", "create"], cwd=cwd, capture_output=True, text=True
-        )
-    except OSError:
-        return None
-    if stash.returncode != 0:
-        raise RuntimeError(
-            "git stash create failed in {}: {}".format(cwd, stash.stderr.strip())
-        )
-    ref = stash.stdout.strip()
-    return ref if ref else head
+    return capture_tree(cwd)
 
 
 def _git_commit_task(cwd, task):
@@ -131,7 +111,8 @@ def _git_diff(cwd, base):
 
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
-                 checklist=None, spec_path=None, citable=None):
+                 checklist=None, spec_path=None, citable=None,
+                 acceptance_results=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -150,7 +131,12 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     the label ``[<spec id>] <heading>`` when the plan declares more than one
     spec file. Context the reviewer reads for understanding, not a checklist
     item (Contract checklist spec). A task declaring no ``**Spec:**`` gets no
-    spec-context section."""
+    spec-context section.
+
+    ``acceptance_results`` (a list of result dicts, or None) is forwarded to
+    ``build_packet``, which renders the ``## Acceptance results`` section for
+    a non-None value — an empty list renders it with no rows (a prose-only
+    task). None leaves the packet without the section."""
     with open(plan_path, "r", encoding="utf-8") as f:
         plan_text = f.read()
     block = rp.extract_task_block(plan_text, task.number)
@@ -172,7 +158,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
     packet = rp.build_packet(
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
         review_kind="discovery", spec_sections=spec_sections,
-        citable=citable,
+        citable=citable, acceptance_results=acceptance_results,
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:
@@ -308,6 +294,189 @@ def _untracked_nested_repos(cwd):
     return found
 
 
+class RepositoryChangedError(Exception):
+    """The repository changed across a reviewer dispatch (a ``reviewer-wrote``
+    halt). ``changes`` is the human-readable fingerprint diff. Deliberately not
+    a RuntimeError: the resume wrappers recover from RuntimeError, and this
+    must propagate with no cold fallback and no retry."""
+
+    def __init__(self, changes):
+        self.changes = list(changes)
+        super().__init__(
+            "repository changed during review: " + "; ".join(self.changes)
+        )
+
+
+class FingerprintError(Exception):
+    """A git call inside ``capture_tree`` or ``repo_fingerprint`` failed (a
+    packet-generation-class contract error). Not a RuntimeError, for the same
+    reason as RepositoryChangedError."""
+
+
+def _fp_git(cwd, args, what, env=None):
+    """Run a git command for capture/fingerprint, raising FingerprintError
+    naming the command and git's stderr on any failure."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, env=env
+        )
+    except OSError as e:
+        raise FingerprintError(
+            "{} (git {}) could not run in {}: {}".format(what, " ".join(args), cwd, e)
+        )
+    if proc.returncode != 0:
+        raise FingerprintError(
+            "{} (git {}) failed in {}: {}".format(
+                what, " ".join(args), cwd, proc.stderr.strip()
+            )
+        )
+    return proc.stdout
+
+
+def capture_tree(cwd):
+    """Tree sha of the working tree's tracked plus untracked non-ignored
+    content. Stages into a **temporary index** (``GIT_INDEX_FILE``) seeded
+    from HEAD, so tracked-but-ignored paths survive and the repo's real index
+    and working tree are never touched. The one capture behind
+    ``freeze_attempt``, ``snapshot_tree`` and ``repo_fingerprint``. Raises
+    FingerprintError naming the failing git command."""
+    fd, index_path = tempfile.mkstemp(prefix="forge-capture-index-")
+    os.close(fd)
+    os.remove(index_path)  # git wants to create it itself
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = index_path
+    try:
+        _fp_git(cwd, ["read-tree", "HEAD"], "capture", env=env)
+        _fp_git(cwd, ["add", "-A"], "capture", env=env)
+        return _fp_git(cwd, ["write-tree"], "capture", env=env).strip()
+    finally:
+        if os.path.exists(index_path):
+            os.remove(index_path)
+
+
+def repo_fingerprint(cwd):
+    """What a commit would record, plus where it would land: ``tree`` (the
+    ``capture_tree`` of the working tree), ``index`` (the tree the real index
+    holds), ``head`` (HEAD sha) and ``branch`` (the symbolic ref HEAD is
+    attached to, e.g. ``refs/heads/main``, or ``None`` when detached). Never
+    mutates the index or working tree. Raises FingerprintError naming the
+    failing git command."""
+    tree = capture_tree(cwd)
+    index = _fp_git(cwd, ["write-tree"], "fingerprint").strip()
+    head = _fp_git(cwd, ["rev-parse", "HEAD"], "fingerprint").strip()
+    try:
+        proc = subprocess.run(
+            ["git", "symbolic-ref", "-q", "HEAD"], cwd=cwd,
+            capture_output=True, text=True,
+        )
+    except OSError as e:
+        raise FingerprintError(
+            "fingerprint (git symbolic-ref -q HEAD) could not run in {}: {}".format(cwd, e)
+        )
+    if proc.returncode == 0:
+        branch = proc.stdout.strip()
+    elif proc.returncode == 1 and not proc.stderr.strip():
+        branch = None  # detached HEAD
+    else:
+        raise FingerprintError(
+            "fingerprint (git symbolic-ref -q HEAD) failed in {}: {}".format(
+                cwd, proc.stderr.strip()
+            )
+        )
+    return {"tree": tree, "index": index, "head": head, "branch": branch}
+
+
+def fingerprint_diff(cwd, before, after):
+    """Human-readable lines naming each component that differs between two
+    fingerprints; ``[]`` when equal. A changed ``tree`` names the paths
+    (``git diff-tree --name-status -r``)."""
+    lines = []
+    if before["tree"] != after["tree"]:
+        names = _fp_git(
+            cwd, ["diff-tree", "--name-status", "-r", before["tree"], after["tree"]],
+            "fingerprint diff",
+        )
+        paths = [ln for ln in names.splitlines() if ln.strip()]
+        if paths:
+            lines.extend("tree: " + ln.replace("\t", " ") for ln in paths)
+        else:
+            lines.append("tree: {} -> {}".format(before["tree"], after["tree"]))
+    if before["index"] != after["index"]:
+        lines.append("index: {} -> {}".format(before["index"], after["index"]))
+    if before["head"] != after["head"]:
+        lines.append("head: {} -> {}".format(before["head"], after["head"]))
+    if before["branch"] != after["branch"]:
+        lines.append("branch: {} -> {}".format(before["branch"], after["branch"]))
+    return lines
+
+
+def tree_diff(cwd, old_tree, new_tree):
+    """``git diff <old_tree> <new_tree>`` text. Raises RuntimeError naming the
+    cause on a git failure (a packet-generation error)."""
+    return _git(cwd, ["diff", old_tree, new_tree], "git diff for tree delta")
+
+
+def repair_delta(cwd, snapshot_tree):
+    """The repair delta a verification packet carries: the pre-repair
+    ``snapshot_tree`` against a fresh ``capture_tree`` — tree against tree, so
+    an unchanged formerly-untracked file yields no hunk and an addition or
+    deletion appears exactly once."""
+    return tree_diff(cwd, snapshot_tree, capture_tree(cwd))
+
+
+def restore_refs(cwd, fingerprint):
+    """Point the recorded branch at the recorded HEAD sha and re-attach HEAD
+    to it (detach HEAD at the sha when the fingerprint's ``branch`` is
+    ``None``). The only ref-moving call outside ``freeze_tree``. Commits made
+    in the meantime stay present but unreachable — never deleted. Does not
+    touch the index or working tree; follow with ``freeze_tree`` to return the
+    tree to the checkpoint. Raises RuntimeError naming the cause on failure."""
+    head, branch = fingerprint["head"], fingerprint["branch"]
+    if branch is None:
+        _git(cwd, ["update-ref", "--no-deref", "HEAD", head],
+             "git update-ref --no-deref HEAD for ref restore")
+        return
+    _git(cwd, ["update-ref", branch, head], "git update-ref for ref restore")
+    _git(cwd, ["symbolic-ref", "HEAD", branch], "git symbolic-ref for ref restore")
+
+
+def freeze_tree(cwd, tree, ref_name, parent):
+    """Commit an already-captured ``tree`` with ``parent`` as its parent under
+    ``ref_name`` (``commit-tree`` + ``update-ref`` on ``ref_name`` alone), then
+    reset the working tree to ``parent`` (``git reset --hard`` plus ``git clean
+    -fd``; ``clean`` runs without ``-x`` so ignored paths survive). Returns the
+    freeze sha. ``reset --hard`` moves whatever HEAD is attached to, so a
+    caller whose HEAD may have moved calls ``restore_refs`` first. Raises
+    RuntimeError naming the cause on any git failure."""
+    sha = _git(
+        cwd, ["commit-tree", tree, "-p", parent, "-m", "forge: freeze " + ref_name],
+        "git commit-tree for freeze",
+    ).strip()
+    _git(cwd, ["update-ref", ref_name, sha], "git update-ref for freeze")
+    _git(cwd, ["reset", "--hard", parent], "git reset --hard for freeze")
+    _git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
+    return sha
+
+
+def freeze_checkpoint(cwd, fingerprint, ref_name):
+    """The reviewer-wrote freeze, shared by the runner and the CLI: restore the
+    recorded branch and HEAD (``restore_refs``), then park the recorded
+    pre-review tree under ``ref_name`` (``freeze_tree``). Returns the freeze
+    sha, or ``None`` when the recorded tree equals the recorded HEAD's tree —
+    nothing to freeze, no empty commit and no ref — in which case the working
+    tree is still returned to HEAD. Raises RuntimeError naming the git
+    command on a failure."""
+    restore_refs(cwd, fingerprint)
+    head = fingerprint["head"]
+    head_tree = _git(cwd, ["rev-parse", head + "^{tree}"],
+                     "git rev-parse for freeze").strip()
+    if fingerprint["tree"] == head_tree:
+        _git(cwd, ["reset", "--hard", head], "git reset --hard for freeze")
+        _git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
+        return None
+    return freeze_tree(cwd, fingerprint["tree"], ref_name, head)
+
+
 def freeze_attempt(cwd, ref_name):
     """Capture the in-progress attempt as a commit parked at ``ref_name``,
     then return the working tree to HEAD. Returns the freeze SHA, or ``None``
@@ -323,8 +492,8 @@ def freeze_attempt(cwd, ref_name):
     capture whose staged leftovers a later ``git add -A && git commit`` swept
     into the next task's slice (see ``snapshot_tree``, fixed 2026-08-21).
 
-    The commit is written with ``commit-tree`` (parent HEAD) and published
-    with ``update-ref`` on ``ref_name`` alone: HEAD and the current branch ref
+    The commit is written by ``freeze_tree`` (``commit-tree``, parent HEAD,
+    published with ``update-ref`` on ``ref_name`` alone): HEAD and the current branch ref
     never move, so the checkpoint stays the review base for both the human's
     fix and the resumed task (Commit discipline: freeze commits are parked off
     the mainline, never stacked on it).
@@ -345,30 +514,15 @@ def freeze_attempt(cwd, ref_name):
             "destroy work that is not ours to discard. Move, remove, or commit "
             "it, then resume.".format(", ".join(nested), cwd)
         )
-    fd, index_path = tempfile.mkstemp(prefix="forge-freeze-index-")
-    os.close(fd)
-    os.remove(index_path)  # git wants to create it itself
-    env = os.environ.copy()
-    env["GIT_INDEX_FILE"] = index_path
     try:
-        _git(cwd, ["read-tree", "HEAD"], "git read-tree for freeze", env=env)
-        _git(cwd, ["add", "-A"], "git add -A for freeze", env=env)
-        tree = _git(cwd, ["write-tree"], "git write-tree for freeze", env=env).strip()
-    finally:
-        if os.path.exists(index_path):
-            os.remove(index_path)
+        tree = capture_tree(cwd)
+    except FingerprintError as e:
+        raise RuntimeError(str(e))
     head_tree = _git(cwd, ["rev-parse", "HEAD^{tree}"],
                      "git rev-parse HEAD^{tree} for freeze").strip()
     if tree == head_tree:
         return None  # nothing to freeze; no ref written
-    sha = _git(
-        cwd, ["commit-tree", tree, "-p", head, "-m", "forge: freeze " + ref_name],
-        "git commit-tree for freeze",
-    ).strip()
-    _git(cwd, ["update-ref", ref_name, sha], "git update-ref for freeze")
-    _git(cwd, ["reset", "--hard", "HEAD"], "git reset --hard for freeze")
-    _git(cwd, ["clean", "-fd"], "git clean -fd for freeze")
-    return sha
+    return freeze_tree(cwd, tree, ref_name, head)
 
 
 def restore_freeze(cwd, freeze_sha):

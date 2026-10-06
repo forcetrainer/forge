@@ -46,8 +46,9 @@ TIER_MAP = {
 }
 # Argument groups for every `codex exec` the runner spawns, cold and resume
 # alike. Single update point, as TIER_MAP is for models: subagents and memories
-# are off whatever the user's Codex config says; reviewers are read-only (-c,
-# because `codex exec resume` has no -s). agents.enabled=false, not
+# are off whatever the user's Codex config says. No dispatch carries a sandbox
+# override, reviewers included: the write guarantee is the runner's
+# unchanged-repository check, not a sandbox. agents.enabled=false, not
 # `--disable multi_agent`: the model catalog's multi-agent setting outranks
 # that feature flag (codex-cli 0.154.0), so the flag alone is ignored.
 CODEX_ISOLATION_ARGS = (
@@ -55,7 +56,6 @@ CODEX_ISOLATION_ARGS = (
     "--disable", "multi_agent_v2",
     "--disable", "memories",
 )
-CODEX_REVIEWER_SANDBOX_ARGS = ("-c", 'sandbox_mode="read-only"')
 TIER_ORDER = ("trivial", "standard", "complex")  # ascending; index gives rank
 # Reviewer routing reads TIER_MAP directly (reviewer tier = task tier; the
 # once-separate reviewer table is retired to remove the stale-drift hazard of
@@ -251,6 +251,9 @@ class TaskOutcome:
     halt_reason: str | None = None
     deferrals: list = field(default_factory=list)
     repair_task: dict | None = None
+    # The final review's accumulated unverified entries (kind/id/reason/call),
+    # merged with the set read back from run.json. Empty on a per-task outcome.
+    unverified: list = field(default_factory=list)
 
 
 def finding_to_dict(finding):

@@ -323,6 +323,41 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
+    def _reraised_halt_msg(self):
+        # Line 99 is outside the reviewed diff -> pre-existing x
+        # contract-breaking, the scope-decision cell.
+        return _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            contract_ref="spec:Alpha section",
+            repair_task={
+                "title": "Fix the legacy guard", "files": ["f1.txt"],
+                "spec": "Alpha section", "tests": ["the guard holds"],
+                "acceptance": "`true`", "tier": "standard",
+            },
+        )
+
+    def test_unapproved_preexisting_finding_halts_scope_decision(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_approved_id_reraised_by_final_reviewer_passes(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"h1"}),
+        )
+        self.assertEqual(outcome.status, "passed")
+
     def test_reviewer_cold_at_discovery_resumed_at_verification(self):
         run_base = self._init_repo_with_task_work()
         plan = self._plan()
@@ -352,6 +387,37 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         self.assertIn("resume", review_calls[1])
         self.assertIn("th-rev1", review_calls[1])
         self.assertEqual(threads.get("final-reviewer"), "th-rev1")
+
+    def test_final_verification_packet_delta_over_formerly_untracked_files(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        for name, text in (("u_edit.txt", "e\n"), ("u_del.txt", "d\n"),
+                           ("u_same.txt", "s\n")):
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write(text)
+        ops = [
+            {"op": "append", "path": os.path.join(self.d, "u_edit.txt"), "text": "EDITED\n"},
+            {"op": "delete", "path": os.path.join(self.d, "u_del.txt")},
+            {"op": "write", "path": os.path.join(self.d, "u_add.txt"), "text": "ADDED\n"},
+        ]
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "issue", contract_ref="spec:Alpha section",
+            ), "stdout": _stream("th-rev1")},
+            {"exit": 0, "msg": "", "file_ops": ops, "stdout": _stream("th-fix1")},
+            {"exit": 0, "msg": _pass_msg(), "stdout": _stream("th-rev1")},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "final-review.md")) as f:
+            packet = f.read()
+        self.assertEqual(packet.count("+EDITED"), 1, packet)
+        self.assertEqual(packet.count("deleted file mode"), 1, packet)
+        self.assertEqual(packet.count("+ADDED"), 1, packet)
+        self.assertNotIn("u_same.txt", packet)
 
     def test_invalid_final_verdict_retries_by_resuming_final_reviewer_thread(self):
         run_base = self._init_repo_with_task_work()
@@ -607,6 +673,44 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             receipt = json.load(f)
         self.assertEqual(receipt["halt_reason"], "scope-decision")
 
+    # --- repair_task rule judged on runner-derived provenance (classify_ctx) ---
+
+    _REPAIR = {
+        "title": "Fix the legacy guard", "files": ["f1.txt"], "spec": "x",
+        "tests": ["the guard holds"], "acceptance": "`true`", "tier": "standard",
+    }
+
+    def _final_claimed_in_diff_outside_diff(self, first_repair_task, retry_repair_task):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        msg = lambda rt: _fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            contract_ref="spec:Alpha section", repair_task=rt)
+        responses = [{"exit": 0, "msg": msg(first_repair_task)}]
+        if first_repair_task is None:
+            responses.append({"exit": 0, "msg": msg(retry_repair_task)})
+        self._responses(responses)
+        return forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+        )
+
+    def test_final_review_retries_on_missing_repair_task_for_derived_pre_existing(self):
+        outcome = self._final_claimed_in_diff_outside_diff(None, self._REPAIR)
+        retry = os.path.join(self.run_dir, "final-coverage-retry.md")
+        self.assertTrue(os.path.exists(retry), "no verdict-validation retry fired")
+        with open(retry) as f:
+            self.assertIn(
+                "h1: repair_task is required on a pre-existing "
+                "contract-breaking finding", f.read())
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_final_review_does_not_retry_when_repair_task_supplied(self):
+        outcome = self._final_claimed_in_diff_outside_diff(self._REPAIR, None)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.run_dir, "final-coverage-retry.md")))
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+
 
 # Same fixture plus a **Tests:** block, so the plan has real t<N>.t<M>
 # grammar — the coverage source `build_final_checklist` deliberately does not
@@ -778,3 +882,212 @@ class FinalPacketCitableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- reviewer write discipline: the final review ----------------------------
+
+_FR_WORKER = {"exit": 0, "msg": ""}
+_FR_TASK_PASS = {"exit": 0, "msg": '{"verdict": "pass"}'}
+
+
+class FinalReviewerWroteTests(ReviewerWroteCase):
+    """A final reviewer that changes the repository halts the run as a
+    `final-review` stage escalation, class `reviewer-wrote` (exit 2)."""
+
+    def _assert_stage_halt(self, res, final_reviews):
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.run_json()["status"], "escalated-final-review")
+        halt = self.halt_record()
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        # The task's edits are committed by the final review, so the
+        # pre-review tree equals HEAD: nothing to freeze, no empty commit.
+        self.assertIsNone(halt["freeze_commit"])
+        self.assertNotEqual(subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", halt_ref(self, "final-review")],
+            cwd=self.repo, capture_output=True).returncode, 0)
+        self.assertEqual(self.porcelain(), "")
+        self.assertFalse(os.path.exists(self.stray))
+        self.assertEqual(len(self.dispatches("final-review-last")), final_reviews)
+        self.assertEqual(self.commit_count(), 2)  # base + the passed task only
+        self.assertEqual(self.git("symbolic-ref", "HEAD").strip(), "refs/heads/main")
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(receipt["findings"]))
+
+    def test_cold_final_reviewer_write_halts(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [self.stray_op()]},
+        ])
+        self._assert_stage_halt(res, final_reviews=1)
+
+    def test_resumed_final_reviewer_write_halts_without_fallback(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-final1")},
+            {"exit": 1, "msg": "", "file_ops": [self.stray_op()]},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},  # a cold fallback would land here
+        ])
+        self._assert_stage_halt(res, final_reviews=2)
+
+    def test_final_reviewer_commit_is_restored(self):
+        res = self.run_cli([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [
+                self.stray_op(),
+                {"op": "git", "args": ["add", "-A"]},
+                {"op": "git", "args": ["commit", "-m", "reviewer commit"]},
+            ]},
+        ])
+        self._assert_stage_halt(res, final_reviews=1)
+        halt = self.halt_record()
+        self.assertEqual(
+            self.git("log", "-1", "--format=%s", halt["reviewer_head"]).strip(),
+            "reviewer commit")
+
+    def test_final_reviewer_that_writes_nothing_passes_through(self):
+        res = self.run_cli([_FR_WORKER, _FR_TASK_PASS,
+                            {"exit": 0, "msg": '{"verdict": "pass"}'}])
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+def halt_ref(case, stage):
+    run_id = os.path.basename(os.path.normpath(case.run_dir))
+    return forge_run.freeze_stage_ref_name(run_id, stage)
+
+
+class FinalFreezeFailureTests(ReviewerWroteCase):
+    def test_reset_failure_records_stage_halt_and_names_both(self):
+        rc, err = self.main_failing_git([
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": '{"verdict": "pass"}', "file_ops": [self.stray_op()]},
+        ], "reset")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("reviewer", err)
+        self.assertIn("git reset", err)
+        halt = self.run_json()["halt"]
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "reviewer-wrote")
+        self.assertIn("stray.txt", " ".join(halt["changes"]))
+        self.assertIn("git reset", halt["freeze_error"])
+
+
+class FingerprintErrorFinalTests(ReviewerWroteCase):
+    """The task review spends calls 1 and 2; the final reviewer's first
+    dispatch is calls 3 and 4, a resumed retry's 5 and 6."""
+
+    def _assert_contract_error(self, rc, err, final_reviews):
+        self.assertEqual(rc, 1, err)
+        self.assertIn("git rev-parse HEAD", err)
+        self.assertEqual(self.run_json()["status"], "contract-error")
+        self.assertEqual(len(self.dispatches("final-review-last")), final_reviews)
+        self.assertEqual(self.commit_count(), 2)  # base + the passed task
+        self.assertNotIn("final-review", self.git("log", "--format=%s"))
+
+    def _cold(self):
+        return [_FR_WORKER, _FR_TASK_PASS, {"exit": 0, "msg": '{"verdict": "pass"}'}]
+
+    def _resumed(self):
+        return [
+            _FR_WORKER, _FR_TASK_PASS,
+            {"exit": 0, "msg": INVALID_LOCATION_MSG,
+             "stdout": thread_stream("th-final1")},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+            {"exit": 0, "msg": '{"verdict": "pass"}'},
+        ]
+
+    def test_failure_before_cold_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._cold(), 3)
+        self._assert_contract_error(rc, err, final_reviews=0)
+
+    def test_failure_on_exit_of_cold_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._cold(), 4)
+        self._assert_contract_error(rc, err, final_reviews=1)
+
+    def test_failure_before_resumed_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._resumed(), 5)
+        self._assert_contract_error(rc, err, final_reviews=1)
+
+    def test_failure_on_exit_of_resumed_final_reviewer(self):
+        rc, err = self.main_failing_fingerprint(self._resumed(), 6)
+        self._assert_contract_error(rc, err, final_reviews=2)
+
+
+class UnverifiedHaltTests(UnverifiedCase):
+    """A final review that passes with an unverified entry lacking a human
+    call is a stage halt of class `unverified` (Disposition matrix)."""
+
+    def _fix_msg(self):
+        return json.dumps({"verdict": "findings", "findings": [{
+            "id": "fx", "summary": "needs a fix",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "t1", "convergence": None,
+            "carried_from": None, "repair_task": None,
+        }, self.seed_finding("f1", "cannot run the migration here")]})
+
+    def test_coverage_entry_without_findings_halts_unverified(self):
+        responses = self.first_call(self.coverage_msg("needs a prod snapshot"))
+        responses.append(self.DOC_SYNC_CLEAN)
+        real = forge_run._freeze_stage_halt
+        with mock.patch.object(forge_run, "_freeze_stage_halt", wraps=real) as spy:
+            rc, _, err = self.run_main(responses)
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_args.args[2:4], ("final-review", "unverified"))
+        run = self.run_json()
+        self.assertEqual(run["status"], "escalated-final-review")
+        halt = run["halt"]
+        self.assertEqual(halt["stage"], "final-review")
+        self.assertEqual(halt["halt_reason"], "unverified")
+        self.assertEqual(halt["outstanding"], [
+            {"kind": "coverage", "id": "t1", "reason": "needs a prod snapshot"}])
+        self.assertEqual(run["unverified"], [{
+            "kind": "coverage", "id": "t1", "reason": "needs a prod snapshot",
+            "call": None}])
+        self.assertEqual(self.dispatches("doc-sync-last"), [])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_seed_omitted_by_verification_verdict_stays_open(self):
+        rc, _, err = self.run_main([
+            self.WORKER, self.TASK_PASS, self.final(self._fix_msg()),
+            {"exit": 0, "msg": ""},                      # final-review fixer
+            self.final('{"verdict": "pass"}'),           # verification omits f1
+            self.DOC_SYNC_CLEAN,
+        ])
+        self.assertEqual(rc, 2, err)
+        run = self.run_json()
+        self.assertEqual(run["halt"]["halt_reason"], "unverified")
+        self.assertEqual([e["id"] for e in run["unverified"]], ["f1"])
+        self.assertIsNone(run["unverified"][0]["call"])
+        self.assertEqual(self.dispatches("doc-sync-last"), [])
+
+    def test_second_invocation_accumulates_and_keeps_first_call(self):
+        rc, _, err = self.run_main(
+            self.first_call(self.seed_msg(("f1", "no prod data"))))
+        self.assertEqual(rc, 2, err)
+        rc, _, err = self.run_main(
+            [self.final(self.seed_msg(("f2", "cannot time the race")))],
+            ["--resolve", "f1=repair"])
+        self.assertEqual(rc, 2, err)
+        run = self.run_json()
+        self.assertEqual([e["id"] for e in run["unverified"]], ["f1", "f2"])
+        self.assertEqual(self.entry("f1")["call"],
+                         {"verb": "repair", "evidence": None})
+        self.assertIsNone(self.entry("f2")["call"])
+        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["f2"])
+
+    def test_final_review_receipt_lists_every_unverified_entry(self):
+        self.run_main(self.first_call(self.seed_msg(
+            ("f1", "no prod data"), ("f2", "race untimed"))))
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["unverified"], [
+            {"kind": "finding", "id": "f1", "reason": "no prod data",
+             "call": None},
+            {"kind": "finding", "id": "f2", "reason": "race untimed",
+             "call": None}])

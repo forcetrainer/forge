@@ -17,8 +17,9 @@ dispatched, what a reviewer is held to, and what the loop does with every findin
 fix, defer, seed, or halt. The model is one model on both harnesses; only the
 substrate enforcing it differs. `scripts/forge_dispose.py` is the one implementation
 of the decision, called in-process by the Codex runner and via its CLI by the Claude
-orchestrator, so the same verdict produces the same decision regardless of who acts
-on it. `skills/planning/SKILL.md` is the orchestrator-facing statement of this
+orchestrator, so the same verdict and the same inputs produce the same decision regardless of
+who acts on it (the Claude CLI's one missing input is named under The shared decision
+helper). `skills/planning/SKILL.md` is the orchestrator-facing statement of this
 contract; the Codex-mechanical half — process dispatch, packets, receipts, live logs
 — belongs to the `codex-runner` spec.
 
@@ -102,6 +103,69 @@ over the work already done and rationalize its defects — not a stronger model.
 
 A reviewer finding an issue is not a failure and never triggers escalation; it is the
 loop working. Only a halt is a failure, and a halt is a human's call.
+
+### Reviewer write discipline
+
+A reviewer verifies by executing, not only by reading — and execution needs writes
+(test harnesses create temp files and sockets; breaking a behavior means editing it).
+The guarantee forge keeps is **the tree the orchestrator commits is the tree the worker
+left**, enforced by the orchestrator, not by a sandbox.
+
+- **No read-only sandbox.** Reviewer dispatches carry no sandbox override on either
+  harness. Codex reviewers run under the `codex exec` default (workspace-write, network
+  off); Claude reviewers run as any agent does.
+- **Mutate only in a scratch copy.** Every mutation a reviewer makes for verification
+  happens in a copy of the tree it makes itself in a temporary directory — never in the
+  repository. `git stash` in any form is forbidden. The reviewer chooses the copy
+  mechanism; it knows what its harness needs.
+- **Break the code.** For each behavior the task's tests claim to cover, the reviewer
+  mutates that behavior in the scratch copy and confirms a named test fails. Evidence
+  rules: the scratch baseline passes before any mutant; one behavior-specific mutant at
+  a time, baseline restored between mutants; the failure must be attributable to the
+  assertion that checks the behavior — a collection error, an import failure or an
+  unrelated failure is inconclusive, not a kill. A test that stays green on a broken
+  behavior is a finding; the mutation is its evidence. This is a standing review step
+  in the shared agent contracts, not a per-prompt addition.
+- **Never re-run acceptance against the worker's tree.** The orchestrator has already
+  run every acceptance **command clause** and hands the results to the reviewer
+  (Reviewer input, below); repeating them on the unchanged tree is waste. Running a
+  test command in the scratch copy — baseline or mutant — is verification, not a
+  re-run, even when that command also appears in Acceptance. Prose acceptance clauses
+  have no execution and remain the reviewer's checklist obligation.
+- **Unchanged-repository check.** The orchestrator fingerprints the repository before
+  each reviewer dispatch (cold or resumed, task or final) and again on every exit —
+  verdict returned, crash or timeout alike. The fingerprint covers the working tree
+  (tracked and untracked non-ignored content, captured via a temporary index), the
+  real index, HEAD and the current branch ref, so a reviewer that commits, stages,
+  checks out or moves a ref is caught as surely as one that edits a file. The
+  fingerprint covers exactly what a commit would record, no more: a change a commit
+  cannot record — bytes a clean filter normalizes away, a dirty working tree inside a
+  submodule — is outside it by design, because the guarantee is about the tree the
+  orchestrator commits. A mismatch is
+  a halt of class **`reviewer-wrote`** — a task escalation on a task review, a stage
+  escalation on the final review — naming the changed state; the verdict is discarded
+  whatever it said. Like every halt class it **freezes** — but what it parks under the task's or
+  stage's ref is the **pre-review capture**: the tree as it stood when the review began,
+  which is exactly the worker's work and nothing of the reviewer's. The fingerprint
+  already holds that tree, so the freeze is a commit of it; the reviewer's changes are
+  recorded in the halt record as the fingerprint diff and then discarded from the
+  working tree, which returns to the checkpoint. Reconcile therefore restores the
+  worker's attempt alone, never re-injecting a reviewer write as task work, and the
+  class-aware brief names the reviewer write as the cause of the halt. Because the
+  fingerprint also records HEAD and the branch, the halt path restores them too — the
+  branch ref is pointed back at the recorded HEAD sha and HEAD re-attached to that
+  branch — the one place the orchestrator ever moves a ref, so a reviewer-made commit
+  or branch switch cannot survive into the resumed run; such a commit's sha is named in
+  the halt record and otherwise left unreachable, never deleted. It is not a contract error (which writes no receipt and
+  freezes nothing). The freeze, the ref restore and the tree's return to the checkpoint
+  *are* the halt path; what the halt forbids is continuing: no retry, no resume within
+  the same invocation, and it propagates through the resume wrappers without a cold
+  fallback or coverage retry — a reviewer that wrote to the repository broke its
+  contract, and silently carrying on would hide that. Reconcile happens only on a later
+  invocation, as for every halt. A fingerprint that cannot be taken (git failed) is the
+  packet-generation-class contract error it always was. One
+  helper, in `forge_git`, shared by both harnesses (the Claude loop calls its CLI, as it
+  calls `forge_dispose`).
 
 ## Execution mode — inline or dispatch
 
@@ -268,8 +332,8 @@ named-evidence rule downgrades it to an improvement and a genuine defect is defe
 instead of halting. Observed 2026-09-06 — a reviewer correctly identified a
 `pre-existing` contract-breaking defect, had no citable id for it, emitted
 `contract_ref: null`, and the finding dispositioned to `defer` rather than reaching the
-human gate it was written for. In the final review the two sets coincide, since spec
-sections are coverage items there.
+human gate it was written for. In the final review, citable refs are every final coverage item plus every
+task's test-case id, so a seeded finding keeps the citation it was written with.
 
 **Citable ids are printed, never derived.** Every reviewer input — the Codex review
 packet and the Claude reviewer prompt alike; task and final, discovery and verification
@@ -383,8 +447,11 @@ identical contract.
 - `convergence` and `carried_from` are set only on a re-review, labeling each current
   finding against the prior attempt's findings supplied in the packet. `resolved`
   findings may be listed or omitted; both behave identically.
-- `repair_task` is required only on a finding the runner will `halt` — it is the
-  payload of the human gate, never auto-applied. Optional elsewhere.
+- `repair_task` is required on a finding in the scope-decision cell (pre-existing ×
+  contract-breaking) — the payload of that human gate, never auto-applied — optional on
+  any other verifiable finding, and `null` on an `unverifiable` one. Which findings
+  halt is the autonomy mode's business, not the reviewer's: in `gate` mode every
+  finding halts, and the requirement does not widen with it.
 - A finding id names exactly one finding within a verdict. Duplicate ids inside one
   verdict are a validation defect: the id is the runner's only handle on a finding, and
   the carried/resolved sets, the honored `resolved` label and staged-deferral selection
@@ -614,7 +681,34 @@ the final review for the same reason.
   run is resumable once they resolve it (Halt resolution).
 
 In the final review, `run_base` **is** the diff base, so `in-run` and `in-diff` coincide
-and `seed` is unreachable — no special case required.
+and the cross-task route to `seed` is unreachable. The `unverifiable` route is not:
+the final reviewer can report a finding its diff cannot settle, and there is no later
+review to carry it to. A `seed` the final review produces is **terminal**: it is
+recorded on the final receipt as `unverified`, the review still converges on the
+convergence rule (seed findings never block a pass), and every `unverified` finding is
+presented at the **close-out gate** beside the staged deferrals, with the reviewer's
+reason — the human's call on each entry is one of `accept` (leave it, recording the human's
+own evidence — required on a coverage entry, which has no finding behind it), `defer`
+(stage it as a deferral) or `repair` (the human fixed it by hand). **How the gate is
+reached differs by harness**, because a Codex runner cannot hold a conversation: on
+Codex a final-review pass with any entry lacking a call is a **stage halt** of class
+`unverified` — frozen under the stage rule like any stage halt (there is nothing to
+freeze after a pass, and the helper runs all the same), doc-sync not run, the halt
+payload listing every open entry with its reason, which *is* the presentation; the
+human answers on re-invocation with `--resolve <id>=accept:<evidence>|defer|repair`
+(`codex-runner` spec: Resume), and the resumed run re-runs the final review as every
+stage re-run does, halting again only on an entry still without a call. On Claude the
+orchestrator asks in conversation and records the same calls. No disposition is
+promoted and nothing is re-classified: `unverifiable` stays `seed`, and the human's
+call is the terminal act. The
+`unverified` set holds two kinds of entry: a `seed`-disposition finding, and a final
+coverage entry whose status is `unverifiable` — that status needs no backing finding
+(Coverage validation), so without this the obligation would vanish on a `pass` verdict
+with no findings; the entry keeps its checklist id and reason. The set **accumulates**
+across final-review attempts and across invocations —
+it lives in `run.json` beside `seeded_findings`, read back on resume, and a
+verification lap that omits a finding never clears it; only the human's recorded call
+does. A run never completes with an `unverified` finding nobody looked at.
 
 ### Location parsing
 
@@ -683,8 +777,12 @@ Net progress each round is **not** required — a round may resolve one finding 
 surface another — and converging work runs to completion. The backstop is a seatbelt
 against slow oscillation, not the primary stop. The runner owns the authoritative
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
-still caught. Halt reasons are exactly `scope-decision`, `regression`, `stuck`,
-`backstop`, `gate`.
+still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
+`backstop`, `gate` — `forge_common.HALT_REASONS`, what `convergence_decision` can
+return. Two further halt **classes** are raised outside it and never appear in
+`decision.json`: `reviewer-wrote` (Reviewer write discipline) and `unverified` (The
+disposition matrix). The receipt and halt-record `halt_reason` field accepts all
+seven.
 
 ## Halt resolution — freeze, resolve, reconcile
 
@@ -698,9 +796,10 @@ followed by a re-invocation, so `regression`, `stuck`, `backstop` and `gate` nee
 frozen tree for exactly the reason `scope-decision` does. Freezing only one class leaves
 the others dirty-and-unrecorded, and a resumed run that then halts on a different class
 strands its restored work in a ref nothing points at — worse than the dirty tree this
-section exists to remove. What *is* specific to `scope-decision` is the resolution
-mechanism below: `--resolve` and the approved-finding exemption answer a scope question,
-which the other classes do not pose.
+section exists to remove. What *is* specific to `scope-decision` — and to the
+final review's `unverified` stage halt (The disposition matrix) — is the resolution
+mechanism below: `--resolve` and the approved-finding exemption answer a question, which
+the other classes do not pose.
 
 **Freeze.** The in-progress attempt is captured as a commit — **untracked files
 included**, since a task built from new files is otherwise captured as empty — retained
@@ -764,11 +863,13 @@ them do.
 
 **Approved findings.** A human resolution — `repair` (I fixed it) or `defer` (file it
 for later) — exempts that canonical finding id from the `scope-decision` halt for the
-remainder of the run, so a resumed run does not stop again on a question already
-answered. On Codex it arrives as `--resolve` on the resumed invocation (`codex-runner`
-spec); on Claude the human states it in the conversation. **Regression still applies:** a
-finding claimed fixed that silently did not take is caught by rule 3, so the exemption
-never becomes a blind spot.
+remainder of the run — every later task review **and the final review**, whose
+convergence takes the same approved set — so a resumed run does not stop again on a
+question already answered. On Codex it arrives as `--resolve` on the resumed invocation (`codex-runner`
+spec); on Claude the human states it in the conversation. **Regression is narrower than the
+exemption:** rule 3 catches a finding already recorded as resolved; an approved
+finding is exempted, not recorded as resolved, so approval alone does not verify that
+the human's repair took. The approver owns that verification.
 
 **The human is the bound.** Because no repair is dispatched autonomously, the
 fix-resume-find-another loop cannot run away on its own: every round trip costs a human
@@ -790,8 +891,12 @@ discloses tier routing — default `auto`, and passed to `forge_dispose` on ever
 
 - `auto` — run the matrix: fix the in-diff × contract-breaking cell, defer the right
   column, seed cross-task defects, halt only genuine scope decisions.
-- `gate` — the conservative escape hatch: **any** finding halts, with a receipt and a
-  drafted repair task, and nothing is auto-fixed.
+- `gate` — the conservative escape hatch: **any** finding halts, with a receipt
+  carrying the findings and their evidence, and nothing is auto-fixed. A drafted
+  `repair_task` rides along only when the finding sits in the scope-decision cell
+  (pre-existing × contract-breaking) — the one cell whose halt carries one in `auto`
+  too; an `unverifiable` finding's `repair_task` is `null` here as everywhere (Reviewer
+  verdict contract).
 
 The loop never auto-fixes without a mode a human chose at the offer. Both harnesses take
 the same flag with the same semantics, because it is the same code deciding.
@@ -809,7 +914,10 @@ in, a decision out. `forge_common` supplies `Finding`, `Verdict`, `HALT_REASONS`
 exactly one `Finding` class identity and no duplicate-dataclass `__eq__` hazard.
 
 The Codex runner imports it; the Claude orchestrator drives the identical logic through
-its CLI:
+its CLI. One input is missing on that path today: the CLI takes no cumulative run diff,
+so `in-run` provenance cannot be computed and a cross-task defect classifies as
+`pre-existing` — a `halt` where the runner would `seed` (#89). Parity holds for every
+other cell.
 
 ```
 python3 forge_dispose.py \
@@ -828,6 +936,9 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
 {
   "action": "pass" | "rework" | "halt",
   "halt_reason": "scope-decision" | "regression" | "stuck" | "backstop" | "gate" | null,
+                 // convergence's five; `reviewer-wrote` and `unverified` are halt classes
+                 // raised outside `convergence_decision` and appear only on receipts and
+                 // the halt record, never in decision.json
   "findings": {
     "fix":    [ {"id": "…", "summary": "…", "file": "…", "lines": "…"} ],
     "defer":  [ {"…": "…", "why_harmless": "reviewer improvement rationale"} ],
@@ -871,7 +982,9 @@ the orchestrator's role there. Per task, in order:
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
-   prompt so the reviewer can label `resolved`/`carried`/`new`.
+   prompt so the reviewer can label `resolved`/`carried`/`new`. Fingerprint the repository
+   before the dispatch and after it returns; a mismatch halts as a `reviewer-wrote`
+   escalation — the attempt frozen, the verdict discarded (Reviewer write discipline).
 5. **Decide** — `forge_dispose` over the verdict, base, state, attempt, acceptance result
    and autofix mode. Persist the returned state for the next attempt.
 6. **Act** on the decision: `rework` re-dispatches the implementer with the fix findings
@@ -887,13 +1000,22 @@ holds it in its own, `forge_dispose` holds it in its process.
 input, so the diff is computed once, by the runner, against the right base; the packet
 is Codex-path-only machinery. A per-task packet pastes the spec sections the task
 names, as context; the final-review packet lists spec paths instead, and the reviewer
-reads those files itself (`codex-runner` spec: Runner). On **Claude** the reviewer is an agent that self-serves its own
+reads those files itself (`codex-runner` spec: Runner). A per-task **discovery** packet
+also carries an `## Acceptance results` section: one row per acceptance **command**
+clause — command, stated outcome, exit code, passed, output tail — opened by the
+assertion that these clauses have already been run and are not to be re-run on this
+tree, and that prose clauses remain the reviewer's to check. The runner passes its
+in-memory results. Verification and final-review packets carry no acceptance section. On **Claude** the reviewer is an agent that self-serves its own
 `git diff <prior commit>` **plus every untracked file** (`git ls-files --others
 --exclude-standard`, each rendered via `git diff --no-index /dev/null <path>` — plain
 `git diff` never sees a new file, and a task's new files are only staged by the commit
 *after* review, so a task built entirely from new files would otherwise review as an
 empty diff) and reads the spec itself. Thin-orchestrator is preserved on Claude by
 subagent self-service plus `forge_dispose` self-computing the diff, not by a packet.
+Acceptance results reach a Claude reviewer the same way everything else does: the
+orchestrator writes them as JSON — the same records — to the scratch directory and the
+reviewer prompt names that path with the do-not-re-run assertion; no packet, no pasted
+output.
 
 ### Serial by design
 
@@ -960,9 +1082,17 @@ contract, different mechanism; no thread-id plumbing on the Claude path.
   checklist and the `## Citable refs` section. Not the whole-plan diff, not the full
   spec — the resumed reviewer already holds both in session.
 - The repair delta is `git diff <pre-repair tree>`, where the pre-repair tree is
-  snapshotted with `git stash create` (or `git write-tree`) before the repair dispatch —
-  no working-tree mutation, no interference with the single `fix: final-review` commit
-  discipline.
+  captured before the repair dispatch by the same temporary-index capture the
+  repository fingerprint uses (Reviewer write discipline): tracked **and** untracked
+  non-ignored content, seeded from HEAD, the real index and working tree untouched, so
+  the single `fix: final-review` commit discipline is undisturbed. `git stash create`
+  is not sufficient — it never sees an untracked file, and a task's new files stay
+  untracked until the post-review commit, so a repair that edited or deleted one showed
+  as a whole-file addition or as nothing (DEFERRALS 2026-09-02, now closed by this
+  rule). The delta is a tree-against-tree diff: the post-repair content captured the same
+  way, compared to the snapshot — no separate untracked-file append pass, so an
+  unchanged formerly-untracked file produces no hunk, an edited one only its edit, and
+  an addition or deletion appears exactly once.
 - The final-review fixer's brief is findings, affected paths and referenced spec
   sections. The whole-plan diff is never pasted; the fixer reads the repo.
 
@@ -994,7 +1124,9 @@ review has passed and the suite is green; accepted ones are filed as issues thro
 `scripts/forge_memory.py defer` (the `project-memory` spec owns the record schema, the
 gate and the labels). Staged deferrals persist across a resume rather than being replaced
 by the current invocation's entries, so an earlier stage's entries are never erased. The
-end-of-plan summary lists them.
+end-of-plan summary lists them. The same gate presents the final review's `unverified`
+findings (The disposition matrix), each with its reviewer's reason, for the same
+three-way call — accept, defer, repair.
 
 Implementers may defer **non-spec scope only** — nice-to-haves, refactors, edge polish.
 Anything the spec requires surfaces at the review gate and is never silently deferred
@@ -1058,9 +1190,10 @@ a bad sync is trivially revertible, and the outcome is recorded in `run.json` an
 in the completion summary.
 
 The Claude path **does not run this stage** — it stops at the deferral gate and reconciles
-by hand. This is the one known harness divergence: a terminal reconciliation *stage*, not
-finding-handling *logic*, so the matrix and convergence core is at full cross-harness
-parity. Porting it is open work (issue #52).
+by hand. This is the one known *stage* divergence — a terminal reconciliation stage, not
+finding-handling logic; the matrix and convergence core are one implementation, with
+the single input gap named under The shared decision helper (#89). Porting the stage
+is open work (issue #52).
 
 ## Commit discipline
 
@@ -1083,10 +1216,14 @@ parity. Porting it is open work (issue #52).
 ## Receipts and run state
 
 - `run.json` carries `autofix_mode`, the aggregated `deferrals`, the aggregated
-  `seeded_findings`, the terminal `doc_sync` record, and the `halt` record when a run
+  `seeded_findings`, the final review's accumulated `unverified` entries with each
+  human call once made, the run-level `approved` finding ids (every human resolution
+  so far — a field of its own, never inside `halt`, because `halt` is cleared when the
+  reconciled task passes and an approval must outlive that), the terminal `doc_sync`
+  record, and the `halt` record when a run
   stopped on one — freeze commit, task and attempt, serialized convergence state,
   outstanding findings with the drafted `repair_task`, and any
-  human-approved finding ids. `deferrals`, `seeded_findings` and `halt`
+  human-approved finding ids. `deferrals`, `seeded_findings`, `unverified`, `approved` and `halt`
   are **read back on resume** — deliberately unlike the per-role session-handle map, which
   is cleared each invocation. A session handle goes stale the moment a human hand-edits
   code; a seeded finding is a finding about code, and dropping it on resume would silently
@@ -1154,6 +1291,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as `reviewer-wrote` (a freezing escalation, not a contract error) on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
 

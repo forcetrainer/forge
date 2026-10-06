@@ -194,7 +194,14 @@ def _banner(state, now):
         return Panel(line, box=box.HEAVY, style="on {}".format(GREEN), border_style=GREEN)
     if st == "halted":
         esc = next((t for t in tasks if t.get("status") == "escalated"), None)
-        if esc is not None:
+        unverified = forge_status.unverified_halt_lines(state)
+        if unverified is not None:
+            # A final review that passed with open unverified entries: the
+            # head and first entry come from run.json's `unverified`, not a
+            # receipt finding (Terminal-state banner).
+            head = "■ {}     press q to exit".format(unverified[0])
+            finding = unverified[1]
+        elif esc is not None:
             n, k, finding = esc.get("number"), esc.get("attempts") or 0, esc.get("finding")
             head = "■ HALTED — task {} escalated after {} attempts     press q to exit".format(n, k)
         else:

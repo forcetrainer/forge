@@ -79,6 +79,7 @@ ad-hoc review. No forge machinery uses them.
 ```
 forge-run.py <plan.md> [--spec <spec.md>] [--effort N=LEVEL ...] [--timeout SECONDS]
              [--autofix auto|gate] [--run-dir DIR] [--codex-bin PATH]
+             [--resolve ID=repair|defer|accept:EVIDENCE ...]
 forge-run.py --status --run-dir DIR
 ```
 
@@ -94,8 +95,7 @@ forge-run.py --status --run-dir DIR
   brief list each declared spec's path and the sections the plan's tasks name; neither
   carries spec text. A per-task review packet is unchanged: it still pastes the sections
   that task's `**Spec:**` line names, as context, each labeled `[<spec id>] <heading>`
-  when the plan declares more than one spec file. A reviewer or doc-sync dispatch opens the files itself — reviewers
-  run read-only and can. The diff is still assembled into the packet. This holds for a
+  when the plan declares more than one spec file. A reviewer or doc-sync dispatch opens the files itself. The diff is still assembled into the packet. This holds for a
   one-spec plan too, and keeps packet size independent of how many specs a plan
   declares.
 - A plan with no spec — no header and no `--spec` — runs: its final-review packet lists
@@ -197,9 +197,32 @@ forge-run.py --status --run-dir DIR
   GPT-6 catalog entries declare a backend, so the feature flag alone is ignored.
   `multi_agent_v2` is disabled because it outranks `agents.enabled`. Verified live
   against codex-cli 0.154.0.
-- **Reviewers read-only** — task and final reviewer dispatches add
-  `-c sandbox_mode="read-only"` (`-c`, because `codex exec resume` has no `-s`). Writer
-  dispatches carry no sandbox override.
+- **No sandbox override on any dispatch** — reviewers included. Under the `codex exec`
+  default (workspace-write, network off) a reviewer can run a test harness and break
+  code in its scratch copy; the read-only sandbox denied every write, `/tmp` and
+  sockets included, so harnesses died before a test ran. The write guarantee is the
+  unchanged-repository check (`execution` spec: Reviewer write discipline), not the
+  sandbox: the runner takes `forge_git.repo_fingerprint(cwd)` before every reviewer
+  dispatch — task and final, cold and resume — and again on every exit, verdict, crash
+  or timeout, and a mismatch is a `reviewer-wrote` halt — task escalation on a task review,
+  stage escalation on the final review, exit 2 — whose reason names the changed state;
+  the verdict is discarded. The freeze is a commit of the **pre-review capture** (the
+  worker's work exactly, which the fingerprint already holds — `forge_git.freeze_tree`,
+  parented on the fingerprint's recorded HEAD), the reviewer's changes go into the halt
+  record as the fingerprint diff, and the working tree, HEAD and branch return to the
+  recorded checkpoint: the branch ref is reset to the recorded HEAD sha and HEAD
+  re-attached to it, the one place the runner moves a ref; a reviewer-made commit is
+  named by sha in the halt record and left unreachable, never deleted. The fingerprint is the working tree via the
+  temporary-index capture `freeze_attempt` already uses, factored out (tracked and
+  untracked non-ignored content, the real index untouched), plus the real index's
+  tree, HEAD and the current branch ref — what a commit would record, and nothing a
+  commit could not (`execution` spec: Reviewer write discipline). The mismatch and a fingerprint failure are
+  distinct from the `RuntimeError` the resume wrappers recover from: they propagate
+  through `execute_task` and `run_final_review_loop` with no cold fallback and no
+  coverage retry; the mismatch is handled as a halt, the fingerprint failure as a
+  contract error (exit 1). `repo_fingerprint` also ships as a CLI (`snapshot` prints the
+  fingerprint; `verify <fingerprint>` exits non-zero naming the changed state) for the
+  Claude loop.
 - One definition in `forge_common` for each argument group — the single update point,
   as `TIER_MAP` is for models.
 - Other user config (provider, profile, instructions) still applies.
@@ -295,7 +318,8 @@ setup.
   string, which readers accept as a one-element set.
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
   escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
-  fields (`deferrals`, `seeded_findings`, `halt`) are the resume state.
+  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `halt`) are the
+  resume state.
 - The clean-tree precondition holds on resume too, **without exception**. Passed tasks
   are already committed and a halted task's attempt is frozen under a forge-owned ref
   off the mainline (`execution` spec, Halt resolution), so a clean tree is the normal
@@ -303,11 +327,19 @@ setup.
   boundary; the first non-passed task re-runs with base = HEAD = last committed
   checkpoint. The human is never asked to commit a half-finished attempt or discard it
   to get past the precondition.
-- **`--resolve <finding-id>=repair|defer`** (repeatable) carries a human decision into a
-  resumed run: `repair` means the human fixed it, `defer` stages it as a deferral. Either
-  way the id is exempt from further `scope-decision` halts this run. An id absent from
-  the halt record raises naming it — never silently ignored. The runner applies no fix of
-  its own under either value.
+- **`--resolve <id>=repair|defer|accept:<evidence>`** (repeatable) carries a human
+  decision into a resumed run. On a `scope-decision` halt: `repair` means the human
+  fixed it, `defer` stages it as a deferral; either way the id is exempt from further
+  `scope-decision` halts this run (recorded in `run.json`'s run-level `approved`).
+  On an `unverified` stage halt (`execution` spec: The disposition matrix) the id is an
+  unverified entry's: `accept:<evidence>` records the human's evidence (non-empty;
+  required for a coverage entry, which has no finding to repair), `defer` stages a
+  deferral, `repair` means the human fixed it by hand; the call is recorded on the
+  entry in `run.json`'s `unverified`, and the resumed run re-runs the final review,
+  halting again only on an entry still without a call. `accept` on a `scope-decision`
+  id, or `repair`/`defer` syntax carrying evidence, is a contract error. An id absent
+  from the halt record raises naming it — never silently ignored. The runner applies
+  no fix of its own under any value.
 - Resuming a run whose recorded `freeze_commit` no longer exists (a rebase or reset
   between invocations) raises naming the missing sha. Frozen work is never silently
   discarded.
@@ -320,13 +352,18 @@ record names a task or a stage), contract error is exit 1.
 - **Task escalation (exit 2)** — the loop stops on a task: receipt written with
   outstanding findings, plus the `halt` record that makes the run resumable; the
   orchestrator relays the receipt's contents to the user. Which conditions escalate is
-  the `execution` spec's halt taxonomy. Every halt class freezes the task's in-progress
-  attempt so the run resumes rather than restarts; `--resolve` applies only to
-  `scope-decision`, the one class that poses a question needing an answer.
-- **Stage escalation (exit 2)** — the final review or the terminal doc-sync stage halts.
+  the `execution` spec's halt taxonomy, `reviewer-wrote` among them (Worker isolation). Every halt class freezes the task's in-progress
+  attempt so the run resumes rather than restarts; `--resolve` applies only to the two
+  classes that pose a question needing an answer — `scope-decision`, and the final
+  review's `unverified` stage halt below.
+- **Stage escalation (exit 2)** — the final review or the terminal doc-sync stage halts,
+  or the final review **passes with an unverified entry lacking a human call** (halt
+  class `unverified`, stage `final-review`; `execution` spec: The disposition matrix).
   Its uncommitted edits are frozen under a stage-keyed ref the same way a task's attempt
   is, so the run exits clean; the record names the stage, not a task, and the stage
-  re-runs from scratch on the next invocation rather than replaying its freeze.
+  re-runs from scratch on the next invocation rather than replaying its freeze. An
+  `unverified` halt's outstanding list is the open entries, each with its reason;
+  `--status` prints them.
 - **Contract error (exit 1)** — malformed plan, brief/packet generation failure,
   unparseable reviewer verdict, reviewer process crash, or a dirty working tree at
   invocation start. Fails loudly to stderr naming the cause; no receipt. `run.json` is
@@ -486,7 +523,10 @@ bottom banner is painted; the semantic fill carries the state before a word is p
 - Halted (`escalated` / `escalated-final-review` / `escalated-doc-sync`): red-orange,
   two lines — `■ HALTED — task N escalated after K attempts` plus the first outstanding finding
   from the receipt (from `final-review.json` for a final-review halt) ·
-  `press q to exit`.
+  `press q to exit`. An `unverified` halt writes `escalated-final-review` and renders
+  `■ HALTED — final review: N unverified entries` plus the first open entry's id and
+  reason from `run.json`'s `unverified`, not from a receipt finding; `--status` prints
+  the same line and every open entry.
 - Contract error: red-orange — `■ CONTRACT ERROR — <reason>` · `press q to exit`. A
   task left mid-flight by a contract error renders `interrupted`, not a frozen spinner.
 - Banner ≤ 2 lines; a gentle pulse on the halt/error fill is allowed, respecting
@@ -539,8 +579,32 @@ staleness is never an exit condition.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
-  resume, final-review fixer cold and resume, doc-sync cold. The four reviewer shapes
-  carry `sandbox_mode="read-only"`; the five writer shapes do not.
+  resume, final-review fixer cold and resume, doc-sync cold. No shape carries a
+  `sandbox_mode` override.
+- Unchanged-repository check: the fingerprint changes on a tracked edit, a new
+  untracked file, a tracked deletion, a `git add`, a commit and a branch switch, and is
+  stable across a write to an ignored path; it never touches the real index (`git
+  status` identical before and after). A reviewer stub that writes one file halts the
+  run with halt class `reviewer-wrote` (exit 2) and that path in the halt reason, on
+  each of the four reviewer shapes, with no further reviewer dispatch and no commit, the
+  pre-review capture frozen under the task or stage ref (the stray file absent from the
+  freeze commit and named in the halt record) and the tree clean; a
+  resumed reviewer stub that writes and then succeeds, crashes, or times out terminates
+  the same way — no cold fallback, no coverage retry; a stub that commits, and one that
+  switches branch, each halt `reviewer-wrote` with HEAD and the branch restored to the
+  recorded sha and the stub's commit sha in the halt record; a stub that writes nothing
+  passes through; a fingerprint git failure is a contract error (exit 1). The
+  CLI's `verify` exits non-zero and names the changed state.
+- Acceptance in the packet: a task discovery packet contains `## Acceptance results`
+  with the do-not-re-run assertion and the prose-clause note, and one row per command
+  clause carrying command, stated outcome, exit code, passed and output tail; a task
+  whose acceptance is prose-only renders the section with no rows; verification and
+  final-review packets contain no such section.
+- Agent contracts: `agents/forge-standard.md` and `agents/forge-deep.md` each state the
+  scratch-copy rule, forbid `git stash`, and carry the break-the-code step; neither
+  says "never modify files".
+- A workspace-write reviewer actually running a harness is deferred verification on a
+  Codex install, like stream texture below.
 - Spec sets: a plan declaring two spec files runs with no `--spec`, and every brief,
   checklist, packet and lint call receives both; `--spec` alongside a header is a
   contract error (exit 1) with no run dir; a legacy plan with `--spec` runs as before;
@@ -549,7 +613,7 @@ staleness is never an exit condition.
   contract error naming the difference; a legacy `run.json` with `"spec"` is read as a
   one-element set; the final-review packet and doc-sync brief contain spec paths and
   named sections and no spec text.
-- A read-only reviewer opening a spec file by path is deferred verification on a Codex
+- A reviewer opening a spec file by path is deferred verification on a Codex
   install, like stream texture below.
 - Live `codex exec` stream texture is deferred verification on a Codex install, not a
   unit test; the format contract is the phase headers plus verbatim passthrough, which
@@ -595,6 +659,9 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
+2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)
+2026-10-05: reviewer dispatches drop `sandbox_mode="read-only"`; the write guarantee moves to `forge_git.repo_fingerprint` — working tree, index, HEAD, branch — taken before every reviewer dispatch and on every exit, a mismatch halting non-recoverably as a contract error; task discovery packets carry command-clause acceptance results (#127)
 2026-10-03: amended by [pipeline] — `TIER_MAP` gains one guarded mirror: the Codex column of the planning skill's routing table and the document-review command in `codex-execution.md`, kept equal by test, because spec and plan reviewers are started by the session and never pass through the runner. Verified live on codex-cli 0.160.0: the command runs with `gpt-6.1-sol`, and a read-only reviewer opens a file given only its path (`tests/live/check_codex_spec_by_path.sh` passes)
 2026-10-03: amended by [pipeline] — `--spec` is optional: the runner reads a plan's specs from its `**Spec files:**` header and passes that set to every brief, checklist, packet and lint call; `--spec` remains for legacy plans. The final-review packet and doc-sync brief carry spec paths, not spec text; `run.json` records `specs` as a list and a resumed run's spec set must match it (#62)
 2026-10-03: the Claude marketplace drops the `forge-beta` channel — it had tracked stable since 0.13.0; `forge` is the single sha-pinned entry

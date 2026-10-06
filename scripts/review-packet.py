@@ -45,8 +45,10 @@ def git_diff(cwd, base):
     untracked files, and the runner only stages a task's work in the commit
     *after* review — without this, a task creating only new files reviewed as
     "no changes" (fixed 2026-09-02). Read-only: no ``git add``, no index
-    mutation, so the single-commit discipline and ``git stash create``
-    snapshots are undisturbed. Raises RuntimeError naming the cause on a git
+    mutation, so the single-commit discipline is undisturbed. This is the
+    packet's full diff against the base; the verification lap's repair delta
+    is a separate tree-against-tree capture (``forge_git.repair_delta``), so
+    an unchanged untracked file is not re-shown there. Raises RuntimeError naming the cause on a git
     failure (a packet-generation error — halt per the Halt spec)."""
     def run(args):
         try:
@@ -289,9 +291,41 @@ def build_citable_section(ids):
     return "\n".join(lines) + "\n"
 
 
+ACCEPTANCE_ASSERTION = (
+    "These command clauses have already been run by the runner and are not to "
+    "be re-run on this tree; prose clauses remain the reviewer's to check."
+)
+
+
+def build_acceptance_section(results):
+    """Render '## Acceptance results': the ACCEPTANCE_ASSERTION, then one block
+    per result dict (``command``, ``outcome``, ``exit_code``, ``passed``,
+    ``output_tail``). An empty list renders the heading and assertion with no
+    rows (a prose-only acceptance). The tail sits in a fence sized past its
+    longest backtick run. A result missing a key raises KeyError."""
+    lines = ["## Acceptance results", "", ACCEPTANCE_ASSERTION]
+    for r in results:
+        tail = r["output_tail"]
+        longest = max((len(m.group(0)) for m in re.finditer(r"`+", tail)), default=0)
+        fence = "`" * max(3, longest + 1)
+        lines.extend([
+            "",
+            "- command: {}".format(r["command"]),
+            "  - outcome: {}".format(r["outcome"]),
+            "  - exit_code: {}".format(r["exit_code"]),
+            "  - passed: {}".format(r["passed"]),
+            "  - output_tail:",
+            "",
+            fence,
+            tail.rstrip("\n"),
+            fence,
+        ])
+    return "\n".join(lines) + "\n"
+
+
 def build_packet(task_block, base, diff_output, prior_findings=None,
                   checklist=None, review_kind=None, *, spec_sections=None,
-                  citable=None):
+                  citable=None, acceptance_results=None):
     """``review_kind`` (None by default) opts into the '## Review kind'
     marker — the CLI (main(), below) never passes it, so its output stays
     byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
@@ -308,7 +342,11 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
 
     ``citable`` (keyword-only, None by default) is the review's citable id set,
     rendered as a '## Citable refs' section after the checklist; ``None``
-    omits it and leaves the packet unchanged."""
+    omits it and leaves the packet unchanged.
+
+    ``acceptance_results`` (None by default) is a list of result dicts rendered
+    as '## Acceptance results' after the diff; ``None`` omits the section, an
+    empty list renders it with no rows."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -325,6 +363,8 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
     packet = task_block.rstrip("\n") + "\n\n" + diff_section
     if spec_sections:
         packet += "\n" + build_spec_context_section(spec_sections)
+    if acceptance_results is not None:
+        packet += "\n" + build_acceptance_section(acceptance_results)
     if checklist is not None:
         packet += "\n" + build_checklist_section(checklist)
     if citable is not None:

@@ -19,6 +19,7 @@ SCRIPTS = str(pathlib.Path(__file__).resolve().parent.parent / "scripts")
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
+import forge_receipts  # noqa: E402
 import forge_status  # noqa: E402
 from _forge_support import (  # noqa: E402
     MINIMAL_SPEC,
@@ -795,6 +796,10 @@ class IncrementalRunJsonTests(unittest.TestCase):
                 json.dump([{"exit": 0, "msg": ""},
                            {"exit": 0, "msg": "totally not a verdict"}], f)
             fake = write_fake_codex(d)
+            # Harness files written during the review must not look like a
+            # reviewer write to the unchanged-repository check.
+            with open(os.path.join(d, ".gitignore"), "w") as f:
+                f.write("run/\ncodex.log\nresponses.json\n.forge/\n")
             # Commit everything so the working tree is clean at run start (else the
             # clean-tree precondition trips before the run dir is created).
             subprocess.run(["git", "add", "-A"], cwd=d, check=True)
@@ -918,6 +923,47 @@ class ProgressFieldsTests(unittest.TestCase):
             self._write_ex(d, "running", [_summary(1, "passed")])
             st = forge_status.read_run_state(d, now=time.time() + 10000)
             self.assertIn("STALLED?", forge_status.render_status(st))
+
+
+class FinalReviewReviewerWroteStatusTests(unittest.TestCase):
+    CHANGES = ["tree: A stray.txt", "branch: refs/heads/main -> refs/heads/other"]
+
+    def _halt(self, freeze=None):
+        return {
+            "stage": "final-review", "freeze_commit": freeze,
+            "freeze_base": "b" * 40, "halt_reason": "reviewer-wrote",
+            "changes": self.CHANGES, "reviewer_head": None,
+        }
+
+    def test_receipt_carries_class_and_paths_into_status_and_banner_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+                       halt=self._halt())
+            forge_receipts.write_final_review_halt(
+                d, "reviewer-wrote", self.CHANGES)
+            state = forge_status.read_run_state(d)
+            self.assertEqual(state["halt_class"], "reviewer-wrote")
+            first = state["final_review"]["findings"][0]
+            self.assertIn("stray.txt", first)
+            out = forge_status.render_status(state)
+            self.assertIn("(reviewer-wrote)", out)
+            self.assertIn("stray.txt", out)
+
+    def test_receipt_replaces_an_earlier_laps_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_final_review(d, findings=["old"], halt_reason="scope-decision")
+            forge_receipts.write_final_review_halt(
+                d, "reviewer-wrote", self.CHANGES)
+            with open(os.path.join(d, "final-review.json")) as f:
+                data = json.load(f)
+            self.assertEqual(data["halt_reason"], "reviewer-wrote")
+            self.assertNotIn("old", json.dumps(data))
+
+    def test_nothing_to_freeze_prints_the_none_wording_not_a_sha(self):
+        lines = "\n".join(forge_status.render_halt(self._halt(freeze=None)))
+        self.assertIn("nothing to freeze", lines)
+        self.assertNotIn("frozen edits: None", lines)
+        self.assertIn("stray.txt", lines)
 
 
 if __name__ == "__main__":
@@ -1059,3 +1105,58 @@ class StagedDeferralDuplicateIdTests(unittest.TestCase):
             state = forge_status.read_run_state(d)
             text = "\n".join(forge_status.render_staged_deferrals(state, run_path))
             self.assertNotIn("--occurrence", text)
+
+
+_UNVERIFIED = [
+    {"kind": "finding", "id": "f1", "reason": "no prod data", "call": None},
+    {"kind": "coverage", "id": "t1", "reason": "needs a snapshot", "call": None},
+    {"kind": "finding", "id": "f0", "reason": "settled", "call":
+        {"verb": "repair", "evidence": None}},
+]
+
+
+def _write_unverified_halt(d):
+    halt = {
+        "stage": "final-review", "freeze_commit": None, "freeze_base": "b" * 40,
+        "halt_reason": "unverified",
+        "outstanding": [{"kind": e["kind"], "id": e["id"], "reason": e["reason"]}
+                        for e in _UNVERIFIED if e["call"] is None],
+    }
+    _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+               halt=halt, unverified=_UNVERIFIED)
+
+
+class UnverifiedHaltStatusTests(unittest.TestCase):
+    def test_render_prints_the_halt_line_and_every_open_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertIn("HALTED — final review: 2 unverified entries", out)
+        self.assertIn("finding f1: no prod data", out)
+        self.assertIn("coverage t1: needs a snapshot", out)
+        self.assertNotIn("f0", out)
+        self.assertNotIn("task None", out)
+
+    def test_status_cli_prints_the_same(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            r = _run_cli(["--status", "--run-dir", d])
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("HALTED — final review: 2 unverified entries", r.stdout)
+        self.assertIn("coverage t1: needs a snapshot", r.stdout)
+
+    def test_banner_lines_are_the_halt_line_plus_first_open_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_unverified_halt(d)
+            state = forge_status.read_run_state(d)
+        self.assertEqual(
+            forge_status.unverified_halt_lines(state),
+            ["HALTED — final review: 2 unverified entries",
+             "finding f1: no prod data"])
+
+    def test_no_banner_lines_for_other_halts(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated-final-review", [_summary(1, "passed")],
+                       unverified=_UNVERIFIED)
+            state = forge_status.read_run_state(d)
+        self.assertIsNone(forge_status.unverified_halt_lines(state))
