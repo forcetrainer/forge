@@ -24,7 +24,7 @@
 - Test: `tests/test_forge_convergence.py`
 - Test: `tests/test_forge_dispose.py`
 
-**Spec:** [execution] Reviewer verdict contract, [execution] The shared decision helper, [execution] Rework loop and convergence
+**Spec:** [execution] Reviewer verdict contract, [execution] The shared decision helper, [execution] Rework loop and convergence, [execution] The `convergence: "resolved"` label is honored
 
 **Interface:**
 - `forge_common.Finding.identity: str | None = None` — set by the runner, never by the reviewer; serialized by `finding_to_dict` under the key `identity`.
@@ -92,6 +92,8 @@
 - a halt record whose findings lack identity raises on resume naming run.json
 - status prints outstanding identities and a resume command naming them
 - the status resume command round-trips into --resolve without error
+- a task receipt's findings each carry their runner-stamped identity
+- a final-review receipt's findings each carry their runner-stamped identity
 
 **Acceptance:**
 - `python3 -m unittest tests.test_forge_resume tests.test_forge_final_review tests.test_forge_seed tests.test_forge_status` passes

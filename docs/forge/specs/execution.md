@@ -742,12 +742,12 @@ as resolved" behaves identically to "omitted". Otherwise a reviewer following th
 contract literally causes the loop to re-dispatch a repair for something already
 repaired, indefinitely, until the backstop.
 
-**Guard:** the label is honored only when the finding's canonical id (`carried_from`,
-else `id`) is in the prior attempt's carried-fix set. A `resolved` label on an id the
+**Guard:** the label is honored only when the finding's identity (Reviewer verdict
+contract) is in the prior attempt's carried-fix set. A `resolved` label on an identity the
 runner never tracked as outstanding is meaningless and is ignored — the finding is
 dispositioned normally — otherwise a reviewer could dismiss any finding it invented by
-self-labeling it resolved. A false claim is still caught: the id reappearing later trips
-the regression rule against the runner's authoritative resolved-id set. The convergence
+self-labeling it resolved. A false claim is still caught: the identity reappearing later
+trips the regression rule against the runner's authoritative resolved-id set. The convergence
 decision itself is not modified; a dropped finding never reaches it.
 
 ## Rework loop and convergence
@@ -763,9 +763,9 @@ acceptance-stuck and backstop rules. Then the decision is taken deterministicall
 
 1. **Gate mode** and any reviewer finding → **halt** (`gate`). A transient execution
    failure is exempt: it carries no impact.
-2. Any **halt-disposition** finding → **halt** (`scope-decision`). A canonical finding
-   id carried in as human-approved (Halt resolution) is exempt from this step for the
-   rest of the run; the regression rule (3) still applies to it.
+2. Any **halt-disposition** finding → **halt** (`scope-decision`). A finding whose
+   identity is carried in as human-approved (Halt resolution) is exempt from this step
+   for the rest of the run; the regression rule (3) still applies to it.
 3. **Regression** → **halt**: a finding the runner previously recorded resolved
    reappears, or acceptance went green→red since the prior attempt. This is the
    "shuffling one bad state into another" case — a fix undid an earlier fix, or broke
