@@ -721,11 +721,23 @@ class FindingIdentityTests(unittest.TestCase):
         f = _finding(id="f9", carried_from="f1")
         self.assertEqual(forge_dispose.finding_identity(f, "t2"), "t2:f1")
 
-    def test_keeps_carried_from_that_already_carries_a_scope(self):
+    def test_keeps_a_scoped_carried_from_naming_a_supplied_prior_identity(self):
         f = _finding(id="f1", carried_from="t2:f1")
-        self.assertEqual(forge_dispose.finding_identity(f, "final"), "t2:f1")
+        self.assertEqual(
+            forge_dispose.finding_identity(f, "final", frozenset({"t2:f1"})),
+            "t2:f1")
         g = _finding(id="f1", carried_from="final:f3")
-        self.assertEqual(forge_dispose.finding_identity(g, "t5"), "final:f3")
+        self.assertEqual(
+            forge_dispose.finding_identity(g, "t5", frozenset({"final:f3"})),
+            "final:f3")
+
+    def test_scoped_carried_from_outside_the_prior_set_raises_naming_it(self):
+        f = _finding(id="f7", carried_from="t2:f1")
+        for prior in (frozenset(), frozenset({"t3:f1"})):
+            with self.assertRaises(ValueError) as cm:
+                forge_dispose.finding_identity(f, "t5", prior)
+            self.assertIn("t2:f1", str(cm.exception))
+            self.assertIn("f7", str(cm.exception))
 
     def test_malformed_scope_raises_naming_it(self):
         f = _finding(id="f1")
@@ -741,7 +753,8 @@ class ClassifyStampsIdentityTests(unittest.TestCase):
         f2 = _finding(id="f2", carried_from="f1")
         f3 = _finding(id="f3", carried_from="t2:f7")
         v = forge_common.Verdict(kind="findings", findings=[f1, f2, f3])
-        forge_dispose.classify_findings(v, DIFF_SINGLE, "t4")
+        forge_dispose.classify_findings(
+            v, DIFF_SINGLE, "t4", prior_identities=frozenset({"t2:f7"}))
         self.assertEqual(
             [f.identity for f in v.findings], ["t4:f1", "t4:f1", "t2:f7"])
 
@@ -772,6 +785,42 @@ class ClassifyStampsIdentityTests(unittest.TestCase):
         self.assertEqual(len(run({"t2:f1"})), 1)
 
 
+class ValidateCarriedFromTests(unittest.TestCase):
+    def _verdict(self, *findings):
+        return forge_common.Verdict(kind="findings", findings=list(findings))
+
+    def test_scoped_carried_from_naming_a_supplied_identity_is_valid(self):
+        v = self._verdict(_finding(id="f1", carried_from="t2:f1"))
+        self.assertEqual(
+            forge_dispose.validate_carried_from(v, frozenset({"t2:f1"})), [])
+
+    def test_scoped_carried_from_naming_no_supplied_identity_is_a_defect(self):
+        v = self._verdict(_finding(id="f7", carried_from="t2:f1"))
+        defects = forge_dispose.validate_carried_from(v, frozenset({"t3:f1"}))
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f7", defects[0])
+        self.assertIn("t2:f1", defects[0])
+
+    def test_scoped_carried_from_on_a_review_with_no_prior_findings_is_a_defect(self):
+        v = self._verdict(_finding(id="f7", carried_from="final:f1"))
+        self.assertEqual(len(forge_dispose.validate_carried_from(v, frozenset())), 1)
+
+    def test_bare_carried_from_and_none_are_never_defects(self):
+        v = self._verdict(_finding(id="f1", carried_from="f0"),
+                          _finding(id="f2"))
+        self.assertEqual(forge_dispose.validate_carried_from(v, frozenset()), [])
+
+    def test_a_pass_verdict_has_no_defects(self):
+        self.assertEqual(forge_dispose.validate_carried_from(
+            forge_common.Verdict(kind="pass"), frozenset()), [])
+
+    def test_bare_carried_from_is_still_prefixed_with_the_scope(self):
+        f = _finding(id="f2", carried_from="f1")
+        v = self._verdict(f)
+        forge_dispose.classify_findings(v, DIFF_SINGLE, "t4")
+        self.assertEqual(f.identity, "t4:f1")
+
+
 class ScopedApprovalTests(unittest.TestCase):
     def _halt_finding(self, id, carried_from=None):
         return _finding(id=id, carried_from=carried_from, file="foo.py",
@@ -792,7 +841,8 @@ class ScopedApprovalTests(unittest.TestCase):
     def test_approving_t2_f1_exempts_final_finding_carried_from_it(self):
         f = self._halt_finding("f4", carried_from="t2:f1")
         v = forge_common.Verdict(kind="findings", findings=[f])
-        forge_dispose.classify_findings(v, DIFF_SINGLE, "final")
+        forge_dispose.classify_findings(
+            v, DIFF_SINGLE, "final", prior_identities=frozenset({"t2:f1"}))
         self.assertEqual(f.identity, "t2:f1")
         self.assertEqual(
             forge_dispose.convergence_decision(

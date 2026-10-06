@@ -407,6 +407,7 @@ class FinalReviewSeedPacketTests(_GitFixtureCase):
             id="seed1", summary="SEEDMARKER earlier-task issue", file="other.py",
             lines="5", provenance="in-run", impact="contract-breaking",
             contract_ref="Acceptance: `true`", disposition="seed",
+            identity="t1:seed1",
         ))]
 
         self._set_responses([

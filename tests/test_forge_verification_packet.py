@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from _forge_support import *  # noqa: F401,F403
 
@@ -606,6 +607,63 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(self.run_dir, "task-1-coverage-retry.md")))
         self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    # --- a scoped carried_from must name a prior finding the packet carried
+
+    def _spy_classify(self):
+        calls = []
+        real = forge_run.classify_findings
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs.get("prior_identities"))
+            return real(*args, **kwargs)
+
+        patcher = mock.patch.object(forge_run, "classify_findings", side_effect=spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_task_discovery_lap_borrowing_an_identity_is_a_defect_not_an_exemption(self):
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        borrowed = _fix_findings_msg(
+            "f1.txt", "2", "invented", id="f5", contract_ref="t1.a1",
+            carried_from="t2:f1")
+        self._set_responses([
+            {"exit": 0, "msg": ""},
+            {"exit": 0, "msg": borrowed},   # discovery review
+            {"exit": 0, "msg": borrowed},   # the one validation retry
+        ])
+        with self.assertRaises(RuntimeError) as cm:
+            forge_run.execute_task(
+                self._task1(plan), plan, self.spec, self.run_dir, self.fake,
+                self.d, {})
+        self.assertIn("t2:f1", str(cm.exception))
+        self.assertIn("f5", str(cm.exception))
+
+    def test_verification_lap_passes_the_outstanding_identities_and_keeps_a_verbatim_carry(self):
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        calls = self._spy_classify()
+        f1 = os.path.join(self.d, "f1.txt")
+        self._set_responses([
+            {"exit": 0, "msg": "", "stdout": _worker_event_stream_local("th-w1")},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs repair", contract_ref="t1.a1",
+            ), "stdout": _worker_event_stream_local("th-r1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "REPAIR\n"},
+            # the re-review names the outstanding finding by its identity
+            {"exit": 0, "msg": json.dumps({"verdict": "findings", "findings": [{
+                "id": "f9", "summary": "still wrong",
+                "location": {"file": "f1.txt", "lines": "2"},
+                "provenance": "in-diff", "impact": "improvement",
+                "contract_ref": None, "convergence": "carried",
+                "carried_from": "t1:f1", "repair_task": None}]})},
+        ])
+        outcome = forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {})
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(calls, [frozenset(), frozenset({"t1:f1"})])
 
 
 def _worker_event_stream_local(thread_id, text="ok"):

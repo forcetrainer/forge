@@ -133,7 +133,7 @@
 **Depends on:** Task 4.
 
 ### Task 4: A scoped carried_from must name a supplied prior finding
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`classify_findings` takes `prior_identities`; `validate_carried_from` reports a scoped `carried_from` outside that set; `finding_identity` takes the set and raises on an unknown scoped value; CLI gains `--prior-identities`)

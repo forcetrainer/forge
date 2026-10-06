@@ -336,6 +336,18 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             },
         )
 
+    def _seeded_h1(self):
+        # The task-1 finding the final reviewer is given (as a replayed seed)
+        # and re-raises by carrying it: only a prior finding the packet
+        # carried may be named by a scoped carried_from.
+        return [{
+            "id": "t1:h1", "identity": "t1:h1", "summary": "the legacy guard",
+            "location": {"file": "f1.txt", "lines": "99"},
+            "provenance": "in-run", "impact": "unverifiable",
+            "contract_ref": None, "convergence": None, "carried_from": None,
+            "repair_task": None, "disposition": "seed",
+        }]
+
     def test_unapproved_preexisting_finding_halts_scope_decision(self):
         run_base = self._init_repo_with_task_work()
         plan = self._plan()
@@ -343,9 +355,23 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         outcome = forge_run.run_final_review_loop(
             [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
+            seeded_findings=self._seeded_h1(),
         )
         self.assertEqual(outcome.status, "escalated")
         self.assertEqual(outcome.halt_reason, "scope-decision")
+
+    def test_final_finding_carried_from_a_task_identity_no_seed_supplied_is_a_contract_error(self):
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        msg = self._reraised_halt_msg()
+        self._responses([{"exit": 0, "msg": msg}, {"exit": 0, "msg": msg}])
+        with self.assertRaises(RuntimeError) as cm:
+            forge_run.run_final_review_loop(
+                [self.spec], run_base, self.run_dir, self.fake, self.d,
+                "standard", "auto", {}, plan_path=plan,
+                approved_ids=frozenset({"t1:h1"}),
+            )
+        self.assertIn("t1:h1", str(cm.exception))
 
     def test_approved_id_reraised_by_final_reviewer_passes(self):
         run_base = self._init_repo_with_task_work()
@@ -355,6 +381,7 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
             approved_ids=frozenset({"t1:h1"}),
+            seeded_findings=self._seeded_h1(),
         )
         self.assertEqual(outcome.status, "passed")
 
@@ -815,7 +842,7 @@ class FinalReviewCitableSetTests(unittest.TestCase):
         )
         f1 = os.path.join(self.d, "f1.txt")
         seeded = [{
-            "id": "s1", "summary": "seeded from task 1",
+            "id": "t1:s1", "identity": "t1:s1", "summary": "seeded from task 1",
             "location": {"file": "f1.txt", "lines": "2"},
             "provenance": "unverifiable", "impact": "contract-breaking",
             "contract_ref": "t1.t1", "convergence": None,
@@ -893,6 +920,24 @@ class FinalPacketCitableTests(unittest.TestCase):
         path = forge_git._final_packet([spec], "HEAD", "", d)
         with open(path) as f:
             self.assertNotIn("Citable refs", f.read())
+
+
+class PriorIdentitiesTests(unittest.TestCase):
+    def test_collects_the_identity_of_every_prior_finding(self):
+        self.assertEqual(
+            forge_run._prior_identities(
+                [{"id": "t2:f1", "identity": "t2:f1"},
+                 {"id": "f3", "identity": "t4:f3"}]),
+            frozenset({"t2:f1", "t4:f3"}))
+        self.assertEqual(forge_run._prior_identities([]), frozenset())
+        self.assertEqual(forge_run._prior_identities(None), frozenset())
+
+    def test_an_entry_without_identity_raises_naming_it(self):
+        for entry in ({"id": "f7", "summary": "x"},
+                      {"id": "f7", "identity": None}):
+            with self.assertRaises(ValueError) as cm:
+                forge_run._prior_identities([entry])
+            self.assertIn("f7", str(cm.exception))
 
 
 if __name__ == "__main__":

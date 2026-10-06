@@ -832,6 +832,22 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def _seed_the_approved_finding(self):
+        # A scoped carried_from may only name a prior finding the final review
+        # was given, so the final reviewer that re-raises the approved t1:h1
+        # is handed it as a replayed seed (run.json's seeded_findings).
+        path = os.path.join(self.run_dir, "run.json")
+        run = self._run_json()
+        run["seeded_findings"] = [{
+            "id": "t1:h1", "identity": "t1:h1", "summary": "the legacy guard",
+            "location": {"file": "f1.txt", "lines": "99"},
+            "provenance": "in-run", "impact": "unverifiable",
+            "contract_ref": None, "convergence": None, "carried_from": None,
+            "repair_task": None, "disposition": "seed",
+        }]
+        with open(path, "w") as f:
+            json.dump(run, f)
+
     def _in_process(self, responses, **kw):
         self._env_for(responses)
         return forge_run.run_plan(
@@ -842,6 +858,7 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         # The final reviewer re-raises the already-approved pre-existing
         # finding; only the runner threading approved_ids into the final
         # review's convergence lets that pass instead of halting again.
+        self._seed_the_approved_finding()
         res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1", carried_from="t1:h1")}])
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
@@ -910,6 +927,7 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         self.assertEqual(
             [d.get("identity") for d in run.get("deferrals") or []], ["t1:h1"])
         # The next resume neither re-halts nor loses the deferral.
+        self._seed_the_approved_finding()
         res = self._run([{"exit": 0, "msg": self._halt_msg(ref="t1", carried_from="t1:h1")}])
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(

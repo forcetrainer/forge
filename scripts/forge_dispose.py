@@ -43,19 +43,27 @@ SCOPE_PATTERN = re.compile(r"(?:t[0-9]+|final)")
 _SCOPED_PREFIX = re.compile(r"(?:t[0-9]+|final):")
 
 
-def finding_identity(finding, scope):
+def finding_identity(finding, scope, prior_identities=frozenset()):
     """The runner-owned, review-scoped identity of ``finding``: ``carried_from``
-    verbatim when it already begins with a scope (``t<N>:`` or ``final:`` — a
-    seeded per-task finding replayed into the final review keeps the identity it
-    was raised under), else ``scope + ":" + (carried_from or id)``. Raises
-    ValueError naming ``scope`` when it is not ``t<N>`` or ``final`` — never
-    defaulted, never guessed."""
+    verbatim when it already begins with a scope (``t<N>:`` or ``final:``) AND
+    names a member of ``prior_identities`` (the prior findings this review's
+    packet carried — a seeded per-task finding replayed into the final review
+    keeps the identity it was raised under), else ``scope + ":" +
+    (carried_from or id)``. A scoped ``carried_from`` outside
+    ``prior_identities`` raises ValueError naming the value and the finding id
+    — never prefixed, never kept. Raises ValueError naming ``scope`` when it is
+    not ``t<N>`` or ``final`` — never defaulted, never guessed."""
     if not isinstance(scope, str) or not SCOPE_PATTERN.fullmatch(scope):
         raise ValueError(
             "invalid finding scope {!r}: expected t<N> or final".format(scope)
         )
     carried = finding.carried_from
     if carried and _SCOPED_PREFIX.match(carried):
+        if carried not in prior_identities:
+            raise ValueError(
+                "finding {!r}: carried_from {!r} names no prior finding this "
+                "review was given".format(finding.id, carried)
+            )
         return carried
     return scope + ":" + (carried or finding.id)
 
@@ -368,7 +376,8 @@ def validate_locations(verdict):
 
 
 def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
-                          carried_ids=None, scope=None):
+                          carried_ids=None, scope=None,
+                          prior_identities=frozenset()):
     """Validate that every finding in the scope-decision cell carries its
     drafted ``repair_task`` (Reviewer verdict contract: required on a
     pre-existing x contract-breaking finding, optional on any other verifiable
@@ -401,6 +410,7 @@ def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
         classify_findings(
             probe, diff_text, "t0" if scope is None else scope,
             run_diff=run_diff, carried_ids=carried_ids,
+            prior_identities=prior_identities,
         )
         findings = probe.findings
     return [
@@ -455,6 +465,27 @@ def validate_finding_ids(verdict):
             "scope:id identity): " + ", ".join(colon_ids)
         )
     return defects
+
+
+def validate_carried_from(verdict, prior_identities):
+    """Validate that every scoped ``carried_from`` (``t<N>:`` or ``final:``)
+    names a prior finding this review's packet carried. Returns defect strings
+    — empty means valid — in the shape ``validate_finding_ids`` returns, so it
+    feeds the same retry-once-then-contract-error mechanism. A scoped value
+    outside ``prior_identities`` would let a reviewer borrow an approved
+    identity on a finding it invented, so it is never kept (and never
+    prefixed); a bare ``carried_from`` is not checked here — it is prefixed
+    with the review's scope."""
+    if verdict.kind != "findings":
+        return []
+    return [
+        "finding {}: carried_from {!r} names no prior finding this review was "
+        "given".format(finding.id, finding.carried_from)
+        for finding in verdict.findings or []
+        if finding.carried_from
+        and _SCOPED_PREFIX.match(finding.carried_from)
+        and finding.carried_from not in prior_identities
+    ]
 
 
 def validate_contract_refs(verdict, citable):
@@ -534,7 +565,7 @@ def derive_disposition(finding):
 
 
 def classify_findings(verdict, diff_text, scope, run_diff=None,
-                      carried_ids=None):
+                      carried_ids=None, prior_identities=frozenset()):
     """Set each finding's runner-verified provenance and derived disposition
     against ``diff_text`` (the review's actual diff), then return the verdict.
     A pass verdict is returned unchanged. The reviewer proposes classification;
@@ -550,7 +581,9 @@ def classify_findings(verdict, diff_text, scope, run_diff=None,
 
     ``scope`` (``t<N>`` or ``final``; ValueError otherwise) is the review's
     identity scope: every returned finding is stamped with its runner-owned
-    ``identity`` (``finding_identity``).
+    ``identity`` (``finding_identity``); a scoped ``carried_from`` is kept only
+    when it is in ``prior_identities``, else ValueError (callers validate with
+    ``validate_carried_from`` first).
 
     Before disposition, a finding carrying ``convergence == "resolved"`` is
     dropped when its identity is a member of ``carried_ids`` — the prior
@@ -574,7 +607,8 @@ def classify_findings(verdict, diff_text, scope, run_diff=None,
     run_ranges = diff_line_ranges(run_diff) if run_diff is not None else None
     kept = []
     for finding in verdict.findings:
-        finding.identity = finding_identity(finding, scope)
+        finding.identity = finding_identity(
+            finding, scope, prior_identities)
         if (
             carried_ids is not None
             and finding.convergence == "resolved"
@@ -986,6 +1020,14 @@ def main(argv=None):
              "still applies to it. Omitted: no exemptions, today's behavior.",
     )
     parser.add_argument(
+        "--prior-identities", default=None,
+        help="path to a JSON array of the identities of the prior findings "
+             "this review's packet carried (seeds on the final discovery "
+             "lap, outstanding findings on a verification lap). A scoped "
+             "carried_from outside this set is a defect. Omitted: the empty "
+             "set, so any scoped carried_from is a defect.",
+    )
+    parser.add_argument(
         "--failed-acceptance", default=None,
         help="the first failing command clause's command; valid only with "
              "--execution-failure and --acceptance-ok false (an acceptance "
@@ -1062,6 +1104,30 @@ def main(argv=None):
             )
             return 1
 
+    prior_identities = frozenset()
+    if args.prior_identities:
+        try:
+            with open(args.prior_identities, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read prior-identities file {}: {}".format(
+                    args.prior_identities, e
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        if not isinstance(loaded, list) or not all(
+            isinstance(i, str) for i in loaded
+        ):
+            print(
+                "error: prior-identities file {} must be a JSON array of "
+                "identity strings".format(args.prior_identities),
+                file=sys.stderr,
+            )
+            return 1
+        prior_identities = frozenset(loaded)
+
     verdict = None
     try:
         if args.execution_failure:
@@ -1102,6 +1168,14 @@ def main(argv=None):
                 # precedence as validate_locations above, so a
                 # contract-breaking claim citing a bogus ref never reaches a
                 # decision.
+                carried_defects = validate_carried_from(
+                    verdict, prior_identities
+                )
+                if carried_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid carried_from: "
+                        + "; ".join(carried_defects)
+                    )
                 if citable:
                     contract_ref_defects = validate_contract_refs(
                         verdict, citable
@@ -1119,7 +1193,7 @@ def main(argv=None):
                 # decision helper).
                 repair_defects = validate_repair_tasks(
                     verdict, diff_text, carried_ids=state.carried_ids,
-                    scope=args.scope,
+                    scope=args.scope, prior_identities=prior_identities,
                 )
                 if repair_defects:
                     raise RuntimeError(
@@ -1129,6 +1203,7 @@ def main(argv=None):
                 verdict = classify_findings(
                     verdict, diff_text, args.scope,
                     carried_ids=state.carried_ids,
+                    prior_identities=prior_identities,
                 )
             findings = verdict.findings
     except RuntimeError as e:

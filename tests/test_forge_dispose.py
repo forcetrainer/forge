@@ -71,7 +71,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
                     autofix="auto", state_path=None, checklist_path=None,
-                    citable_path=None, approved=None):
+                    citable_path=None, approved=None, prior_path=None):
         args = [
             "--verdict", verdict_path,
             "--base", self.base,
@@ -87,7 +87,48 @@ class ForgeDisposeCLITests(unittest.TestCase):
             args += ["--citable", citable_path]
         for approved_id in approved or []:
             args += ["--approved", approved_id]
+        if prior_path:
+            args += ["--prior-identities", prior_path]
         return args
+
+    # --- scoped carried_from must name a supplied prior finding -------------
+
+    def _carried_verdict(self, carried_from):
+        return self._write_json("vcf.json", {"verdict": "findings", "findings": [
+            {"id": "f4", "summary": "bug", "carried_from": carried_from,
+             "convergence": "carried",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "contract-breaking", "contract_ref": "AC-1"},
+        ]})
+
+    def test_prior_identities_flag_accepts_a_scoped_carried_from_in_the_set(self):
+        v = self._carried_verdict("t2:f1")
+        prior = self._write_json("prior.json", ["t2:f1"])
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fix = json.loads(result.stdout)["findings"]["fix"]
+        self.assertEqual([f["identity"] for f in fix], ["t2:f1"])
+
+    def test_scoped_carried_from_without_prior_identities_is_rejected(self):
+        v = self._carried_verdict("t2:f1")
+        result = self.run_dispose(self._base_args(v))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("f4", result.stderr)
+        self.assertIn("t2:f1", result.stderr)
+
+    def test_scoped_carried_from_outside_the_prior_identities_is_rejected(self):
+        v = self._carried_verdict("t2:f1")
+        prior = self._write_json("prior.json", ["t3:f1"])
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("t2:f1", result.stderr)
+
+    def test_prior_identities_file_must_be_a_json_array_of_strings(self):
+        v = self._carried_verdict(None)
+        prior = self._write_json("prior.json", {"t2:f1": 1})
+        result = self.run_dispose(self._base_args(v, prior_path=prior))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("prior-identities", result.stderr)
 
     # --- quadrant / decision.json shape -------------------------------------
 

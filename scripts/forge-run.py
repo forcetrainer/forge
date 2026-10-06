@@ -617,7 +617,14 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
     )
     defects += forge_dispose.validate_locations(verdict)
     ctx = classify_ctx() if classify_ctx is not None else {}
-    defects += forge_dispose.validate_repair_tasks(verdict, **ctx)
+    # A scoped carried_from outside the packet's prior findings is a defect on
+    # its own; the repair-task probe classifies the verdict and would raise on
+    # it, so that probe waits for the retry's corrected verdict.
+    carried_defects = forge_dispose.validate_carried_from(
+        verdict, ctx.get("prior_identities", frozenset()))
+    defects += carried_defects
+    if not carried_defects:
+        defects += forge_dispose.validate_repair_tasks(verdict, **ctx)
     defects += forge_dispose.validate_finding_ids(verdict)
     defects += forge_dispose.validate_contract_refs(
         verdict, citable if citable is not None else checklist
@@ -992,6 +999,23 @@ def _seed_record(finding):
     return record
 
 
+def _prior_identities(prior_findings):
+    """The ``identity`` of every prior finding dict placed in a review packet —
+    the only scoped ``carried_from`` values the review may keep. Raises
+    ValueError naming the entry when one lacks it (parsers-fail-loud: seeds and
+    outstanding findings are both stamped, so a missing identity is a caller
+    bug, never something to guess)."""
+    identities = set()
+    for entry in prior_findings or []:
+        identity = entry.get("identity") if isinstance(entry, dict) else None
+        if not identity:
+            raise ValueError(
+                "prior finding {!r} has no `identity`".format(
+                    entry.get("id") if isinstance(entry, dict) else entry))
+        identities.add(identity)
+    return frozenset(identities)
+
+
 def _local_id(identity):
     """The reviewer-local part of a ``<scope>:<id>`` identity."""
     return identity.partition(":")[2]
@@ -1280,6 +1304,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     citable=citable,
                     acceptance_results=[asdict(r) for r in acceptance],
                 )
+            # A scoped carried_from is kept only when it names a prior finding
+            # this packet carried: the outstanding findings on a verification
+            # lap, nothing on a discovery lap.
+            packet_prior_identities = (
+                _prior_identities(prior_findings)
+                if packet_review_kind == "verification" else frozenset()
+            )
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
             }
@@ -1324,6 +1355,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         "run_diff": _git_diff(cwd, run_base) if run_base else None,
                         "carried_ids": state.carried_ids,
                         "scope": "t{}".format(task.number),
+                        "prior_identities": packet_prior_identities,
                     },
                 )
             except forge_git.RepositoryChangedError as e:
@@ -1335,6 +1367,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     verdict, _git_diff(cwd, review_base),
                     "t{}".format(task.number), run_diff=run_diff_text,
                     carried_ids=state.carried_ids,
+                    prior_identities=packet_prior_identities,
                 )
                 review_verdict = verdict_to_dict(verdict)
                 findings = verdict.findings
@@ -2062,6 +2095,9 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             reviewer_resume_fallback = (
                 is_verification and review_resume_state["thread"] is None
             )
+            # The seeds on the discovery lap, the outstanding findings on a
+            # verification lap: exactly the prior findings the packet carried.
+            packet_prior_identities = _prior_identities(prior_findings)
 
             def _arm_final_reviewer_retry_resume():
                 review_resume_state["thread"] = threads.get(reviewer_role)
@@ -2095,6 +2131,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     classify_ctx=lambda: {
                         "diff_text": diff, "run_diff": diff,
                         "carried_ids": state.carried_ids, "scope": "final",
+                        "prior_identities": packet_prior_identities,
                     },
                 )
             except forge_git.RepositoryChangedError as e:
@@ -2123,6 +2160,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             classify_findings(
                 verdict, diff, "final", run_diff=diff,
                 carried_ids=state.carried_ids,
+                prior_identities=packet_prior_identities,
             )
             findings = verdict.findings
             unverified = _merge_unverified(unverified, _collect_unverified(verdict))
