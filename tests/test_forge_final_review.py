@@ -385,6 +385,36 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "passed")
 
+    def test_seed_carried_final_finding_keeps_its_identity_across_a_verification_lap(self):
+        # A final finding carried from seed t2:f1 (reviewer id f9) comes back
+        # on the verification packet under its identity, so echoing the
+        # packet's id keeps t2:f1 (and its approval exemption), never final:f9.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        seed = self._seeded_h1()
+        seed[0].update({"id": "t2:f1", "identity": "t2:f1"})
+        f1 = os.path.join(self.d, "f1.txt")
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "carried seed", id="f9", contract_ref="spec:Alpha section",
+                carried_from="t2:f1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "FIXED\n"},
+            {"exit": 0, "msg": self._reraised_halt_msg(carried_from="t2:f1").replace(
+                '"id": "h1"', '"id": "f9"')},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"t2:f1"}), seeded_findings=seed,
+        )
+        with open(os.path.join(self.run_dir, "final-review.md")) as f:
+            packet = f.read()
+        block = packet.split("```json\n", 1)[1].split("```", 1)[0]
+        prior = json.loads(block)
+        self.assertEqual([(e["id"], e["carried_from"], e["identity"]) for e in prior],
+                         [("t2:f1", None, "t2:f1")])
+        self.assertEqual(outcome.status, "passed")
+
     def test_final_review_raising_the_same_local_id_unlinked_is_not_exempt(self):
         # An approval of t1:h1 exempts only a finding the final reviewer
         # carries from it; the same local id raised afresh is final:h1.

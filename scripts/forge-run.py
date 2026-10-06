@@ -988,11 +988,12 @@ def _execution_failure_finding(detail):
 
 
 def _seed_record(finding):
-    """The persisted/replayed shape of a seed-disposition finding: its
-    ``finding_to_dict`` with ``id`` set to the runner-stamped identity and
-    ``carried_from`` cleared. Replayed into the final discovery packet, the
-    reviewer sees the identity as the prior id, and a finding it carries from
-    that seed keeps the identity (and any approval) it was raised under."""
+    """The shape of a prior finding placed in any review packet — a seed on
+    the final discovery lap, an outstanding finding on a verification lap:
+    its ``finding_to_dict`` with ``id`` set to the runner-stamped identity and
+    ``carried_from`` cleared. The reviewer sees the identity as the prior id,
+    so a finding it carries from that one keeps the identity (and any
+    approval) it was raised under."""
     record = finding_to_dict(finding)
     record["id"] = finding.identity
     record["carried_from"] = None
@@ -1090,7 +1091,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     ``finding_to_dict`` entry per ``seed``-dispositioned finding this task's
     review produces — logged, never reworked, never halted on.
 
-    ``approved_ids`` (canonical finding ids a human resolved with
+    ``approved_ids`` (finding identities a human resolved with
     ``--resolve``) threads into every ``convergence_decision`` call, exempting
     those findings from the scope-decision halt for the remainder of the run
     — and from that step alone: gate mode and the regression rule still see
@@ -1476,7 +1477,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # packet (the implicit crash marker carries no review identity).
         findings_carry = [f.summary for f in fix_findings]
         prior_findings = [
-            finding_to_dict(f) for f in fix_findings if f.impact is not None
+            _seed_record(f) for f in fix_findings if f.impact is not None
         ]
 
 
@@ -1825,7 +1826,7 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
 
 def _collect_unverified(verdict):
     """The unverified entries one final-review verdict contributes: every
-    ``seed``-disposition finding (``kind: "finding"``, canonical id, the
+    ``seed``-disposition finding (``kind: "finding"``, its identity, the
     reviewer's summary as the reason) and every coverage entry whose status is
     ``unverifiable`` (``kind: "coverage"``, the checklist id, the evidence as
     the reason — that status needs no backing finding, so without this entry
@@ -1899,7 +1900,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     fix-dispatch crash/timeout preempts the re-review as an implicit
     execution-failure finding, exactly like ``execute_task``. Halt carries the
     drafted ``repair_task``. ``approved_ids`` (the run-level human-approved
-    canonical finding ids) threads into every ``convergence_decision`` call, so
+    finding identities) threads into every ``convergence_decision`` call, so
     a final reviewer re-raising an answered scope finding does not halt the run
     again. ``plan_path`` (optional; omitted -> no checklist
     generated, coverage validation skipped) is required to build the final
@@ -2180,7 +2181,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # Carry only real reviewer fix findings (not the execution-failure
         # marker, which has no review identity) into the next re-review packet.
         prior_findings = [
-            finding_to_dict(f) for f in fix_findings if f.impact is not None
+            _seed_record(f) for f in fix_findings if f.impact is not None
         ]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
         halted = [f for f in findings if f.disposition == "halt"]

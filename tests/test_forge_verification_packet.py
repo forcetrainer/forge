@@ -641,6 +641,40 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         self.assertIn("t2:f1", str(cm.exception))
         self.assertIn("f5", str(cm.exception))
 
+    def test_outstanding_finding_keeps_its_task_identity_across_a_verification_lap(self):
+        # f9 carried from t1:f1 has identity t1:f1; the next lap's packet must
+        # present it as id t1:f1 (not the bare f9), carried_from null.
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        f1 = os.path.join(self.d, "f1.txt")
+        self._set_responses([
+            {"exit": 0, "msg": "", "stdout": _worker_event_stream_local("th-w1")},
+            # two findings so the carried one is not "stuck" on the next lap
+            {"exit": 0, "msg": json.dumps({"verdict": "findings", "findings": [
+                json.loads(_fix_findings_msg(
+                    "f1.txt", "2", "needs repair", id=fid, contract_ref="t1.a1",
+                ))["findings"][0] for fid in ("f1", "f2")]}),
+             "stdout": _worker_event_stream_local("th-r1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "REPAIR1\n"},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "still wrong", id="f9", contract_ref="t1.a1",
+                carried_from="t1:f1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "REPAIR2\n"},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        calls = self._spy_classify()
+        outcome = forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {})
+        self.assertEqual(outcome.status, "passed")
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            packet = f.read()
+        block = packet.split("```json\n", 1)[1].split("```", 1)[0]
+        prior = json.loads(block)
+        self.assertEqual([(e["id"], e["carried_from"], e["identity"]) for e in prior],
+                         [("t1:f1", None, "t1:f1")])
+        self.assertEqual(
+            calls, [frozenset(), frozenset({"t1:f1", "t1:f2"}), frozenset({"t1:f1"})])
+
     def test_verification_lap_passes_the_outstanding_identities_and_keeps_a_verbatim_carry(self):
         plan = self._plan(PLAN_STD_CHECKLIST)
         self._init_repo()

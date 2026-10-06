@@ -1106,7 +1106,13 @@ contract, different mechanism; no thread-id plumbing on the Claude path.
 ### Delta-scoped verification packets
 
 - A verification packet is the outstanding findings, the **repair delta**, the reduced
-  checklist and the `## Citable refs` section. Not the whole-plan diff, not the full
+  checklist and the `## Citable refs` section. Every prior finding placed in any packet —
+  a seed on the final discovery lap, an outstanding finding on a verification lap — is
+  presented under its **identity** as its `id`, so the echo the packet asks for
+  (`carried_from` = the prior id) is the identity verbatim and a finding keeps its
+  identity, its approval exemption and its carried/resolved tracking across laps; a
+  bare id there would re-scope a carried finding under the current review on the next
+  lap. Not the whole-plan diff, not the full
   spec — the resumed reviewer already holds both in session.
 - The repair delta is `git diff <pre-repair tree>`, where the pre-repair tree is
   captured before the repair dispatch by the same temporary-index capture the
@@ -1324,6 +1330,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-05: every prior finding placed in a packet is presented under its identity as `id`, not only seeds — the final review found a seed-carried finding re-scoped as `final:<id>` on its next lap (#128)
 2026-10-05: a scoped `carried_from` is kept only when it names a prior finding supplied to the review; any other is a validation defect — closes the identity-borrowing hole a security review of Task 1 found (#128)
 2026-10-05: Finding identity is runner-owned and review-scoped — `<scope>:<canonical id>`, `t<N>` or `final`; a scoped `carried_from` is kept verbatim; `approved`, `seeded_findings`, `unverified` and halt-record findings are keyed by identity; `--resolve` and the decision helper's `--approved` take identities and the helper requires `--scope`; a reviewer id containing `:` is a validation defect. Replaces the "never namespaced across a run" rule, under which approving `f1` in one task exempted an unrelated `f1` later (#128)
 2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as `reviewer-wrote` (a freezing escalation, not a contract error) on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
