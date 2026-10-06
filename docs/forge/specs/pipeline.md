@@ -182,6 +182,14 @@ in B, naming the changing system in brackets after `amended by`:
 The bracketed id must name a system that exists. This is what makes a cross-system
 change visible from the amended document, not only from the changing one.
 
+An entry states the new rule and the reason; it never quotes the retired one. The
+changelog is prose inside the document, and an agent reading or grepping the file
+matches it like any other paragraph — a quoted retired rule is an assertion the
+document no longer makes, sitting where a reader can take it for one. "Under the old
+rule X happened" names the consequence without restating the rule; that is enough for
+the record, and git holds the exact prior text. This is a writing convention adjudicated
+by the spec reviewer, not a lint rule.
+
 ### Merge method — anchor and fold
 
 When dated specs are consolidated into a system document: the newest source is the
@@ -568,6 +576,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
 2026-10-05: Agent files — review mutates only in a scratch copy, per execution spec Reviewer write discipline (#127)
 2026-10-03: a Codex session is told how to start a spec or plan reviewer — one `codex exec` command at the standard tier, read-only, with standard input closed — and the planning skill's routing table gains a Codex column, both test-guarded against `TIER_MAP`. Until now the review steps said only "a fresh agent", the skills named Claude models alone, and Codex sessions dispatched reviewers as `sonnet`, then fell back to reviewing their own document. A session that cannot start a cold reviewer now stops; it never self-reviews
 2026-10-03: a plan declares its spec files in a `**Spec files:**` header and its tasks name sections as `[<spec id>] <heading>`, so one plan implements any number of specs and every tool reads them from the plan; `--spec` remains for legacy plans only. An exact heading match now wins over a prefix match. Until now a run took one `--spec`, and a plan amending two specs got coverage checking on one and silence on the other (#62)
