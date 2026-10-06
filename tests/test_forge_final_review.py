@@ -385,6 +385,22 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "passed")
 
+    def test_approved_finding_contributes_no_repair_task_to_a_later_non_scope_halt(self):
+        # gate mode halts on any finding (step 1) before the scope check; the
+        # approved finding's repair_task must not ride along on that halt.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([{"exit": 0, "msg": self._reraised_halt_msg()}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "gate", {}, plan_path=plan,
+            approved_ids=frozenset({"t1:h1"}),
+            seeded_findings=self._seeded_h1(),
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "gate")
+        self.assertIsNone(outcome.repair_task)
+
     def test_seed_carried_final_finding_keeps_its_identity_across_a_verification_lap(self):
         # A final finding carried from seed t2:f1 (reviewer id f9) comes back
         # on the verification packet under its identity, so echoing the

@@ -423,6 +423,21 @@ def validate_repair_tasks(verdict, diff_text=None, run_diff=None,
     ]
 
 
+def malformed_id_defects(verdict):
+    """Defect strings for every finding whose ``id`` is missing, empty or not
+    a string, naming it by position. Callers gate the classify probe on this:
+    classification derives an identity from the id and would raise a raw
+    TypeError instead of letting the defect reach the retry path."""
+    if verdict.kind != "findings":
+        return []
+    return [
+        "finding #{}: id must be a non-empty string, got {!r}".format(
+            position, finding.id)
+        for position, finding in enumerate(verdict.findings or [], 1)
+        if not isinstance(finding.id, str) or not finding.id
+    ]
+
+
 def validate_finding_ids(verdict):
     """Validate that a reviewer verdict names each finding id at most once.
     Returns a list of human-readable defect strings — empty means valid — in
@@ -447,13 +462,15 @@ def validate_finding_ids(verdict):
     seen = []
     dup_ids = set()
     colon_ids = []
+    defects = malformed_id_defects(verdict)
     for finding in verdict.findings or []:
+        if not isinstance(finding.id, str) or not finding.id:
+            continue
         if finding.id in seen:
             dup_ids.add(finding.id)
         seen.append(finding.id)
         if ":" in finding.id and finding.id not in colon_ids:
             colon_ids.append(finding.id)
-    defects = []
     if dup_ids:
         defects.append(
             "duplicate finding id(s) in one verdict: "
@@ -478,14 +495,27 @@ def validate_carried_from(verdict, prior_identities):
     with the review's scope."""
     if verdict.kind != "findings":
         return []
-    return [
-        "finding {}: carried_from {!r} names no prior finding this review was "
-        "given".format(finding.id, finding.carried_from)
-        for finding in verdict.findings or []
-        if finding.carried_from
-        and _SCOPED_PREFIX.match(finding.carried_from)
-        and finding.carried_from not in prior_identities
-    ]
+    defects = []
+    for position, finding in enumerate(verdict.findings or [], 1):
+        carried = finding.carried_from
+        if not carried:
+            continue
+        name = (
+            "finding {}".format(finding.id)
+            if isinstance(finding.id, str) and finding.id
+            else "finding #{}".format(position)
+        )
+        if not isinstance(carried, str):
+            defects.append(
+                "{}: carried_from must be a string or null, got {!r}".format(
+                    name, carried)
+            )
+        elif _SCOPED_PREFIX.match(carried) and carried not in prior_identities:
+            defects.append(
+                "{}: carried_from {!r} names no prior finding this review was "
+                "given".format(name, carried)
+            )
+    return defects
 
 
 def validate_contract_refs(verdict, citable):
@@ -1175,6 +1205,12 @@ def main(argv=None):
                     raise RuntimeError(
                         "reviewer verdict has invalid carried_from: "
                         + "; ".join(carried_defects)
+                    )
+                id_defects = malformed_id_defects(verdict)
+                if id_defects:
+                    raise RuntimeError(
+                        "reviewer verdict has invalid finding id(s): "
+                        + "; ".join(id_defects)
                     )
                 if citable:
                     contract_ref_defects = validate_contract_refs(

@@ -623,7 +623,7 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
     carried_defects = forge_dispose.validate_carried_from(
         verdict, ctx.get("prior_identities", frozenset()))
     defects += carried_defects
-    if not carried_defects:
+    if not carried_defects and not forge_dispose.malformed_id_defects(verdict):
         defects += forge_dispose.validate_repair_tasks(verdict, **ctx)
     defects += forge_dispose.validate_finding_ids(verdict)
     defects += forge_dispose.validate_contract_refs(
@@ -1306,12 +1306,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     acceptance_results=[asdict(r) for r in acceptance],
                 )
             # A scoped carried_from is kept only when it names a prior finding
-            # this packet carried: the outstanding findings on a verification
-            # lap, nothing on a discovery lap.
-            packet_prior_identities = (
-                _prior_identities(prior_findings)
-                if packet_review_kind == "verification" else frozenset()
-            )
+            # this packet carried, whichever packet shape was built: the
+            # packet embeds `prior_findings` whenever there are any.
+            packet_prior_identities = _prior_identities(prior_findings)
             review_resume_state = {
                 "thread": threads.get(reviewer_role) if is_verification else None,
             }
@@ -2184,7 +2181,13 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             _seed_record(f) for f in fix_findings if f.impact is not None
         ]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
-        halted = [f for f in findings if f.disposition == "halt"]
+        # An approved identity stays disposition "halt" but was already
+        # actioned by a human; filter it as execute_task does so its
+        # repair_task never rides on a later non-scope halt.
+        halted = [
+            f for f in findings
+            if f.disposition == "halt" and f.identity not in approved_ids
+        ]
         repair_task = halted[0].repair_task if halted else None
         outstanding = [f.summary for f in findings] if action == "halt" else []
 

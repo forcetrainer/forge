@@ -840,6 +840,46 @@ class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
         self.assertEqual(
             self._derived_defects(self._claimed("pre-existing", "2-2")), [])
 
+    def test_validate_repair_tasks_carried_ids_without_scope_raises(self):
+        verdict = forge_dispose._verdict_from_obj(
+            self._claimed("in-diff", "50-51"))
+        diff = self._git("diff", self.base)
+        with self.assertRaises(ValueError):
+            forge_dispose.validate_repair_tasks(
+                verdict, diff, carried_ids={"t1:f1"})
+
+    def test_validate_repair_tasks_carried_ids_with_scope_classifies(self):
+        verdict = forge_dispose._verdict_from_obj(
+            self._claimed("in-diff", "50-51"))
+        diff = self._git("diff", self.base)
+        defects = forge_dispose.validate_repair_tasks(
+            verdict, diff, run_diff=diff, carried_ids={"t1:f1"}, scope="t1")
+        self.assertEqual(defects, [
+            "f1: repair_task is required on a pre-existing contract-breaking "
+            "finding"])
+
+    def _missing_id_obj(self):
+        obj = self._claimed("in-diff", "50-51")
+        del obj["findings"][0]["id"]
+        return obj
+
+    def test_verdict_defects_reports_a_missing_id_instead_of_raising(self):
+        verdict = forge_dispose._verdict_from_obj(self._missing_id_obj())
+        diff = self._git("diff", self.base)
+        defects = forge_run._verdict_defects(
+            verdict, [], "verification", None,
+            classify_ctx=lambda: {"diff_text": diff, "run_diff": diff,
+                                  "carried_ids": set(), "scope": "t1"},
+        )
+        self.assertTrue(any("finding #1" in d and "id" in d for d in defects),
+                        defects)
+
+    def test_cli_reports_a_missing_id_as_an_error_not_a_traceback(self):
+        result = self._dispose(self._missing_id_obj(), "auto")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("finding #1", result.stderr)
+
     def test_validation_does_not_mutate_the_verdict(self):
         verdict = forge_dispose._verdict_from_obj(
             self._claimed("in-diff", "50-51"))

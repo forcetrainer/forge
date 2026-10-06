@@ -821,6 +821,54 @@ class ValidateCarriedFromTests(unittest.TestCase):
         self.assertEqual(f.identity, "t4:f1")
 
 
+def _with_id(bad_id, **kw):
+    """A Finding whose id is malformed (the helper cannot derive an identity
+    from a non-string id, so it is built valid and the id overwritten)."""
+    f = _finding(id="x", **kw)
+    f.id = bad_id
+    return f
+
+
+class MalformedIdentityFieldDefectTests(unittest.TestCase):
+    def _verdict(self, *findings):
+        return forge_common.Verdict(kind="findings", findings=list(findings))
+
+    def test_missing_id_is_a_defect_naming_the_position(self):
+        v = self._verdict(_finding(id="f1"), _with_id(None))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #2", defects[0])
+        self.assertIn("id", defects[0])
+
+    def test_non_string_id_is_a_defect_naming_the_position(self):
+        v = self._verdict(_with_id(7))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #1", defects[0])
+        self.assertIn("id", defects[0])
+
+    def test_a_bad_id_does_not_hide_a_duplicate_among_the_good_ones(self):
+        v = self._verdict(_finding(id="f1"), _with_id(None),
+                          _finding(id="f1"))
+        defects = forge_dispose.validate_finding_ids(v)
+        self.assertEqual(len(defects), 2)
+        self.assertTrue(any("duplicate" in d and "f1" in d for d in defects))
+
+    def test_non_string_carried_from_is_a_defect_naming_finding_and_field(self):
+        v = self._verdict(_finding(id="f3", carried_from=5))
+        defects = forge_dispose.validate_carried_from(v, frozenset())
+        self.assertEqual(len(defects), 1)
+        self.assertIn("f3", defects[0])
+        self.assertIn("carried_from", defects[0])
+
+    def test_non_string_carried_from_on_a_finding_without_an_id_names_position(self):
+        v = self._verdict(_with_id(None, carried_from=["t1:f1"]))
+        defects = forge_dispose.validate_carried_from(v, frozenset())
+        self.assertEqual(len(defects), 1)
+        self.assertIn("finding #1", defects[0])
+        self.assertIn("carried_from", defects[0])
+
+
 class ScopedApprovalTests(unittest.TestCase):
     def _halt_finding(self, id, carried_from=None):
         return _finding(id=id, carried_from=carried_from, file="foo.py",

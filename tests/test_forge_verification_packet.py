@@ -675,6 +675,33 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         self.assertEqual(
             calls, [frozenset(), frozenset({"t1:f1", "t1:f2"}), frozenset({"t1:f1"})])
 
+    def test_prior_identities_follow_the_packet_prior_findings_without_a_snapshot(self):
+        # No repair snapshot -> a discovery-shaped packet, which still embeds
+        # the outstanding findings; their identities must be supplied anyway.
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        calls = self._spy_classify()
+        f1 = os.path.join(self.d, "f1.txt")
+        self._set_responses([
+            {"exit": 0, "msg": "", "stdout": _worker_event_stream_local("th-w1")},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "needs repair", contract_ref="t1.a1",
+            ), "stdout": _worker_event_stream_local("th-r1")},
+            {"exit": 0, "msg": "", "append_file": f1, "append_text": "REPAIR\n"},
+            {"exit": 0, "msg": json.dumps({"verdict": "findings", "findings": [{
+                "id": "f9", "summary": "still wrong",
+                "location": {"file": "f1.txt", "lines": "2"},
+                "provenance": "in-diff", "impact": "improvement",
+                "contract_ref": "t1.a1", "convergence": "carried",
+                "carried_from": "t1:f1", "repair_task": None}]})},
+        ])
+        with mock.patch.object(forge_git, "snapshot_tree", return_value=None):
+            outcome = forge_run.execute_task(
+                self._task1(plan), plan, self.spec, self.run_dir, self.fake,
+                self.d, {})
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(calls, [frozenset(), frozenset({"t1:f1"})])
+
     def test_verification_lap_passes_the_outstanding_identities_and_keeps_a_verbatim_carry(self):
         plan = self._plan(PLAN_STD_CHECKLIST)
         self._init_repo()
