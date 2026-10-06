@@ -54,7 +54,7 @@ python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> [--spec <spec.md>] 
 **`--spec <spec.md>`** is optional and only for a legacy plan with no `**Spec files:**` header. The plan's specs come from that header, and every brief, checklist, packet and lint call the runner makes uses that set. Passing `--spec` alongside a header is a plan lint error (contract error, exit 1). A plan with neither has no spec.
 
 **`--resolve <id>=repair|defer|accept:<evidence>`** (repeatable, resume-only): carries the human's
-resolution of a halt's open question into the re-invocation. Two halts take it.
+resolution of a halt's open question into the re-invocation. `<id>` is the finding's review-scoped identity (`t<N>:<id>` or `final:<id>`) as `--status` prints it; a bare local id is accepted when exactly one outstanding identity carries it and raises listing the candidates otherwise. Two halts take it.
 - **`scope-decision`** (the drafted `repair_task`): `repair` means the human fixed it, `defer` files it for later; either exempts that finding id from the `scope-decision` halt for the rest of the run. An id from any other halt class, or an id the runner never raised, is a contract error naming it.
 - **`unverified`** (the final review left an open seed finding or `unverifiable` coverage entry): one call per open entry — `accept:<evidence>` (the evidence text is recorded), `defer` or `repair`. A bare id that is both a finding and a coverage entry raises as ambiguous; qualify it `finding:ID` or `coverage:ID`, e.g. `--resolve coverage:C3=accept:ran it by hand`.
 

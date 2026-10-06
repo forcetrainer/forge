@@ -112,7 +112,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: Skill text names the identity
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/codex-execution.md` (`--resolve` paragraphs name the identity form and the bare-id rule)
