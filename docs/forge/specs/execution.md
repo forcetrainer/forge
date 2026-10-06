@@ -126,6 +126,14 @@ left**, enforced by the orchestrator, not by a sandbox.
   unrelated failure is inconclusive, not a kill. A test that stays green on a broken
   behavior is a finding; the mutation is its evidence. This is a standing review step
   in the shared agent contracts, not a per-prompt addition.
+- **One mutant per test case.** The behaviors the step covers are exactly the task's
+  `**Tests:**` bullets — the test-case ids the reviewer is handed — and the budget is
+  one mutant per bullet, at most. A `**Tests:** none` task has no mutants. A bullet the
+  reviewer cannot map to a test is a finding (the test is absent), not a reason to
+  explore. Edge cases, branches and behaviors outside that list are not mutated,
+  however tempting; a reviewer that wants to is reporting on tests the plan should have
+  named, which is a finding too. Observed 2026-10-05 — a Task 1 review made 23 mutations
+  in its scratch copy and outspent the build (#134).
 - **Never re-run acceptance against the worker's tree.** The orchestrator has already
   run every acceptance **command clause** and hands the results to the reviewer
   (Reviewer input, below); repeating them on the unchanged tree is waste. Running a
@@ -1330,6 +1338,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)
 2026-10-05: every prior finding placed in a packet is presented under its identity as `id`, not only seeds — the final review found a seed-carried finding re-scoped as `final:<id>` on its next lap (#128)
 2026-10-05: a scoped `carried_from` is kept only when it names a prior finding supplied to the review; any other is a validation defect — closes the identity-borrowing hole a security review of Task 1 found (#128)
 2026-10-05: Finding identity is runner-owned and review-scoped — `<scope>:<canonical id>`, `t<N>` or `final`; a scoped `carried_from` is kept verbatim; `approved`, `seeded_findings`, `unverified` and halt-record findings are keyed by identity; `--resolve` and the decision helper's `--approved` take identities and the helper requires `--scope`; a reviewer id containing `:` is a validation defect. Ids were previously unscoped across a run, so approving `f1` in one task exempted an unrelated `f1` later (#128)

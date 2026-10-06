@@ -625,7 +625,8 @@ def test_agent_contracts_carry_the_break_the_code_step_and_no_read_only_claim():
     for path in AGENT_PATHS:
         text = path.read_text()
         for phrase in ("scratch copy", "git stash", "baseline", "one mutant",
-                       "restore", "attributable", "stays green"):
+                       "restore", "attributable", "stays green",
+                       "one mutant per `**Tests:**` bullet", "none` task gets no mutants"):
             assert phrase in text, (path.name, phrase)
         assert "never modify files" not in text, path.name
 
