@@ -805,7 +805,8 @@ def _reconcile_brief(task, run_dir, restored, resolution_delta, frozen_diff,
             }.get(entry.get("resolution"), "")
             resolved_lines.append(
                 "- {} ({}) — {}{}".format(
-                    entry.get("id", "?"), entry.get("resolution", "resolved"),
+                    entry.get("identity") or entry.get("id", "?"),
+                    entry.get("resolution", "resolved"),
                     entry.get("summary", ""), gloss,
                 )
             )
@@ -975,7 +976,61 @@ def _execution_failure_finding(detail):
     return Finding(
         id="exec-failure", summary=detail, file=None, lines=None,
         provenance=None, impact=None, disposition="fix",
+        identity="exec-failure",
     )
+
+
+def _seed_record(finding):
+    """The persisted/replayed shape of a seed-disposition finding: its
+    ``finding_to_dict`` with ``id`` set to the runner-stamped identity and
+    ``carried_from`` cleared. Replayed into the final discovery packet, the
+    reviewer sees the identity as the prior id, and a finding it carries from
+    that seed keeps the identity (and any approval) it was raised under."""
+    record = finding_to_dict(finding)
+    record["id"] = finding.identity
+    record["carried_from"] = None
+    return record
+
+
+def _local_id(identity):
+    """The reviewer-local part of a ``<scope>:<id>`` identity."""
+    return identity.partition(":")[2]
+
+
+def _resolve_identity(name, outstanding):
+    """Resolve a ``--resolve`` name to an outstanding finding identity: ``name``
+    itself when it is one, else the one identity whose local part is ``name``.
+    Raises RuntimeError listing the outstanding identities when nothing
+    matches, and naming each candidate when several do — never guesses a
+    scope."""
+    outstanding = list(outstanding)
+    if name in outstanding:
+        return name
+    matches = [i for i in outstanding if _local_id(i) == name]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise RuntimeError(
+            "--resolve names {} that no halt record carries — outstanding "
+            "identities: {}".format(name, ", ".join(sorted(outstanding)) or "(none)"))
+    raise RuntimeError(
+        "--resolve {} is ambiguous: {} all carry it — name one by its full "
+        "identity".format(name, ", ".join(sorted(matches))))
+
+
+def _check_halt_identities(halt_record, run_dir):
+    """A halt record whose findings lack ``identity`` predates the scoped-id
+    rule; resuming against it raises naming run.json rather than guessing a
+    scope (parsers-fail-loud)."""
+    for f in (halt_record or {}).get("findings") or []:
+        if not (isinstance(f, dict) and f.get("identity")):
+            raise RuntimeError(
+                "{}: the halt record's finding {!r} has no `identity` — it "
+                "was written before findings were review-scoped, so its scope "
+                "cannot be guessed; re-run the halted task from a fresh run "
+                "directory".format(
+                    os.path.join(run_dir, "run.json"),
+                    f.get("id") if isinstance(f, dict) else f))
 
 
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
@@ -1268,6 +1323,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         "diff_text": _git_diff(cwd, review_base),
                         "run_diff": _git_diff(cwd, run_base) if run_base else None,
                         "carried_ids": state.carried_ids,
+                        "scope": "t{}".format(task.number),
                     },
                 )
             except forge_git.RepositoryChangedError as e:
@@ -1276,14 +1332,15 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 review_attempts += 1
                 run_diff_text = _git_diff(cwd, run_base) if run_base else None
                 classify_findings(
-                    verdict, _git_diff(cwd, review_base), run_diff=run_diff_text,
+                    verdict, _git_diff(cwd, review_base),
+                    "t{}".format(task.number), run_diff=run_diff_text,
                     carried_ids=state.carried_ids,
                 )
                 review_verdict = verdict_to_dict(verdict)
                 findings = verdict.findings
                 if seeded_findings is not None:
                     seeded_findings.extend(
-                        finding_to_dict(f) for f in findings if f.disposition == "seed"
+                        _seed_record(f) for f in findings if f.disposition == "seed"
                     )
 
         if reviewer_wrote is not None:
@@ -1343,7 +1400,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     "restored": resume.restored,
                     "resumed_from_attempt": attempt_offset,
                     "resolved": [
-                        f.get("id") for f in resume.findings
+                        f.get("identity") or f.get("id") for f in resume.findings
                         if isinstance(f, dict)
                     ],
                 }
@@ -2037,7 +2094,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     arm_retry_resume=_arm_final_reviewer_retry_resume,
                     classify_ctx=lambda: {
                         "diff_text": diff, "run_diff": diff,
-                        "carried_ids": state.carried_ids,
+                        "carried_ids": state.carried_ids, "scope": "final",
                     },
                 )
             except forge_git.RepositoryChangedError as e:
@@ -2063,7 +2120,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             # base, so in-run is unreachable here (In-run provenance and the
             # seed disposition spec) — passed anyway so both classify_findings
             # call sites in the runner are wired identically.
-            classify_findings(verdict, diff, run_diff=diff, carried_ids=state.carried_ids)
+            classify_findings(
+                verdict, diff, "final", run_diff=diff,
+                carried_ids=state.carried_ids,
+            )
             findings = verdict.findings
             unverified = _merge_unverified(unverified, _collect_unverified(verdict))
 
@@ -2517,6 +2577,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # into one clear error rather than a confusing partial read that would look
     # like a fresh run starting against a frozen tree (_read_halt).
     halt_record = _read_halt(run_dir)
+    _check_halt_identities(halt_record, run_dir)
     # `halt_state` is what this invocation PERSISTS: the record carried
     # forward while the halted task is unresolved, cleared the moment it
     # resolves, replaced when a new scope-decision halt freezes. It rides
@@ -2560,11 +2621,23 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         for name, resolution in resolve.items():
             # `ID` addresses the one open entry with that id; `KIND:ID`
             # (kind = finding | coverage) addresses it when two share one.
+            # A finding entry's id is its identity, so a bare local id also
+            # reaches it; a bare id carried by several open entries is
+            # ambiguous and raises listing them, never guessed.
             kind, sep, bare = name.partition(":")
             if sep and kind in ("finding", "coverage"):
-                matches = [k for k in open_keys if k == (kind, bare)]
+                matches = [
+                    k for k in open_keys
+                    if k[0] == kind and (
+                        k[1] == bare
+                        or (kind == "finding" and _local_id(k[1]) == bare))
+                ]
             else:
-                matches = [k for k in open_keys if k[1] == name]
+                matches = [
+                    k for k in open_keys
+                    if k[1] == name
+                    or (k[0] == "finding" and _local_id(k[1]) == name)
+                ]
             if not matches:
                 raise RuntimeError(
                     "--resolve names {} that the unverified halt record in "
@@ -2572,10 +2645,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                         name, run_dir, listing))
             if len(matches) > 1:
                 raise RuntimeError(
-                    "--resolve {} is ambiguous: {} are both open entries — "
-                    "name one as finding:{} or coverage:{}".format(
-                        name, " and ".join("{}:{}".format(*m) for m in matches),
-                        name, name))
+                    "--resolve {} is ambiguous: {} are all open entries — "
+                    "name one as <kind>:<id> (finding:<identity> or "
+                    "coverage:<id>)".format(
+                        name, " and ".join("{}:{}".format(*m) for m in matches)))
             key = matches[0]
             if key in targets:
                 raise RuntimeError(
@@ -2610,10 +2683,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 ", ".join("{}=accept:".format(i) for i in accepted),
                 _describe_halt(halt_record)))
     if resolve:
-        # Canonical ids (carried_from else id) — the same identity
-        # convergence_decision matches on, so a finding re-issued under a new
-        # id is resolvable by the id the human was shown. `--resolve` and the
-        # approved-finding exemption are scope-decision-only (Halt
+        # Identities (`t<N>:<id>` / `final:<id>`) — the key
+        # convergence_decision matches on and `--status` prints; a bare local
+        # id resolves only when exactly one outstanding identity carries it.
+        # `--resolve` and the approved-finding exemption are scope-decision-only (Halt
         # resolution): a halt record from any other class contributes no
         # known ids here, so an id it carries is rejected exactly like an
         # unknown one — the other classes pose no scope question for
@@ -2623,21 +2696,22 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             if (halt_record or {}).get("halt_reason") == "scope-decision"
             else []
         )
-        known = {
-            (f.get("carried_from") or f.get("id")): f for f in record_findings
-        }
-        unknown = sorted(set(resolve) - set(known) - record_approved)
-        if unknown:
-            raise RuntimeError(
-                "--resolve names finding id(s) {} that no halt record in {} "
-                "carries — {}".format(
-                    ", ".join(unknown), run_dir,
-                    "this run has no halt record to resolve against"
-                    if halt_record is None else
-                    "outstanding id(s): {}".format(
-                        ", ".join(sorted(known)) or "(none)"),
-                )
+        known = {f["identity"]: f for f in record_findings}
+        outstanding = [i for i in known if i not in record_approved]
+        resolved_by_identity = {}
+        for name, resolution in resolve.items():
+            # An identity the record already approved is accepted again (an
+            # idempotent restatement); anything else resolves against the
+            # outstanding identities.
+            identity = (
+                name if name in known or name in record_approved
+                else _resolve_identity(name, outstanding)
             )
+            if identity in resolved_by_identity:
+                raise RuntimeError(
+                    "--resolve names the finding {} twice".format(identity))
+            resolved_by_identity[identity] = resolution
+        resolve = resolved_by_identity
         approved.update(resolve)
     if halt_record is not None:
         halt_record["approved"] = approved  # accumulates across resumes
@@ -2698,10 +2772,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     if halt_record is not None:
         stage_deferrals(
             deferrals,
-            [f for canon, f in (
-                ((g.get("carried_from") or g.get("id")), g)
-                for g in halt_record.get("findings") or []
-            ) if approved.get(canon) == "defer"],
+            [g for g in halt_record.get("findings") or []
+             if approved.get(g["identity"]) == "defer"],
             task_number=halt_record.get("task"), carried=carried_deferrals,
         )
     # A `defer` call on an unverified entry stages like any other deferral,
@@ -2803,10 +2875,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # a resume with no --resolve resolves nothing at all).
             resolved_entries = []
             for entry in halt_record.get("findings") or []:
-                canon = entry.get("carried_from") or entry.get("id")
-                if canon in approved:
+                if entry["identity"] in approved:
                     resolved_entries.append(
-                        dict(entry, resolution=approved[canon])
+                        dict(entry, resolution=approved[entry["identity"]])
                     )
             resume_ctx = HaltResume(
                 restored=restored,

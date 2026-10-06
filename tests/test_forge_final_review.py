@@ -323,12 +323,12 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
-    def _reraised_halt_msg(self):
+    def _reraised_halt_msg(self, carried_from="t1:h1"):
         # Line 99 is outside the reviewed diff -> pre-existing x
         # contract-breaking, the scope-decision cell.
         return _fix_findings_msg(
             "f1.txt", "99", "the legacy guard is wrong", id="h1",
-            contract_ref="spec:Alpha section",
+            contract_ref="spec:Alpha section", carried_from=carried_from,
             repair_task={
                 "title": "Fix the legacy guard", "files": ["f1.txt"],
                 "spec": "Alpha section", "tests": ["the guard holds"],
@@ -354,9 +354,24 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
         outcome = forge_run.run_final_review_loop(
             [self.spec], run_base, self.run_dir, self.fake, self.d,
             "standard", "auto", {}, plan_path=plan,
-            approved_ids=frozenset({"h1"}),
+            approved_ids=frozenset({"t1:h1"}),
         )
         self.assertEqual(outcome.status, "passed")
+
+    def test_final_review_raising_the_same_local_id_unlinked_is_not_exempt(self):
+        # An approval of t1:h1 exempts only a finding the final reviewer
+        # carries from it; the same local id raised afresh is final:h1.
+        run_base = self._init_repo_with_task_work()
+        plan = self._plan()
+        self._responses([
+            {"exit": 0, "msg": self._reraised_halt_msg(carried_from=None)}])
+        outcome = forge_run.run_final_review_loop(
+            [self.spec], run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto", {}, plan_path=plan,
+            approved_ids=frozenset({"t1:h1"}),
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
 
     def test_reviewer_cold_at_discovery_resumed_at_verification(self):
         run_base = self._init_repo_with_task_work()
@@ -1062,7 +1077,7 @@ class UnverifiedHaltTests(UnverifiedCase):
         self.assertEqual(rc, 2, err)
         run = self.run_json()
         self.assertEqual(run["halt"]["halt_reason"], "unverified")
-        self.assertEqual([e["id"] for e in run["unverified"]], ["f1"])
+        self.assertEqual([e["id"] for e in run["unverified"]], ["final:f1"])
         self.assertIsNone(run["unverified"][0]["call"])
         self.assertEqual(self.dispatches("doc-sync-last"), [])
 
@@ -1075,11 +1090,11 @@ class UnverifiedHaltTests(UnverifiedCase):
             ["--resolve", "f1=repair"])
         self.assertEqual(rc, 2, err)
         run = self.run_json()
-        self.assertEqual([e["id"] for e in run["unverified"]], ["f1", "f2"])
-        self.assertEqual(self.entry("f1")["call"],
+        self.assertEqual([e["id"] for e in run["unverified"]], ["final:f1", "final:f2"])
+        self.assertEqual(self.entry("final:f1")["call"],
                          {"verb": "repair", "evidence": None})
-        self.assertIsNone(self.entry("f2")["call"])
-        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["f2"])
+        self.assertIsNone(self.entry("final:f2")["call"])
+        self.assertEqual([o["id"] for o in run["halt"]["outstanding"]], ["final:f2"])
 
     def test_final_review_receipt_lists_every_unverified_entry(self):
         self.run_main(self.first_call(self.seed_msg(
@@ -1087,7 +1102,7 @@ class UnverifiedHaltTests(UnverifiedCase):
         with open(os.path.join(self.run_dir, "final-review.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["unverified"], [
-            {"kind": "finding", "id": "f1", "reason": "no prod data",
+            {"kind": "finding", "id": "final:f1", "reason": "no prod data",
              "call": None},
-            {"kind": "finding", "id": "f2", "reason": "race untimed",
+            {"kind": "finding", "id": "final:f2", "reason": "race untimed",
              "call": None}])

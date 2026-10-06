@@ -63,7 +63,7 @@
 **Depends on:** nothing.
 
 ### Task 2: Identity through the runner, resume and status
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (`execute_task` passes scope `t<N>`, `run_final_review_loop` passes `final`; seeded findings persisted with `id` replaced by identity and `carried_from` null; `_collect_unverified` keys finding entries by identity; `--resolve` validation and the reconciliation brief match identities with bare-id disambiguation; halt-record findings lacking `identity` raise naming run.json)
