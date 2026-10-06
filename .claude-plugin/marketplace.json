@@ -10,9 +10,9 @@
       "source": {
         "source": "url",
         "url": "https://github.com/forcetrainer/forge.git",
-        "sha": "5f5c95b52bcb72f63eebd6fb48739c56e425e616"
+        "sha": "4cf51b3b257df54821b96869db6a0670b95ea144"
       },
-      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI (0.13.7)."
+      "description": "A development process for coding agents: brainstorm → spec → plan → TDD execution with approval gates, tiered workers, and project memory. Claude Code + Codex CLI (0.13.8)."
     }
   ]
 }
