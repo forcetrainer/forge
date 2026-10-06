@@ -408,7 +408,9 @@ No forge-only marker label exists. `forge:deferral`, `forge:backlog`, `via:repor
   collapsed.
 - A reviewer verdict naming two findings with one id is malformed and is rejected (retry
   once, then contract error), like a duplicate coverage id. Ids are unique within a
-  verdict, never namespaced across a run.
+  verdict; across reviews the runner's identity (`execution` spec, Reviewer verdict
+  contract: `t<N>:<id>` or `final:<id>`) tells them apart, and the staged entry's
+  `(task_number, stage, id)` key above is that identity by another spelling.
 - Staged deferrals persist across a resume. A deferral, once staged, is never lost and
   never re-emitted as unfiled once it carries an `issue`.
 - `--occurrence` selects among entries sharing a finding id by ordinal position. That key
@@ -522,6 +524,7 @@ and no `docs/forge/` gets a one-time `git mv` offer rather than two read paths f
 
 ## Changelog
 
+2026-10-05: ids are unique within a verdict and told apart across reviews by the runner's review-scoped identity, no longer "never namespaced across a run" (#128)
 2026-09-05: consolidated from four dated specs — project-memory-engine, deferrals-as-issues, constraints, retire-roadmap (#47)
 2026-09-05: dropped every source's "Testing", "Acceptance", "Out of scope", "Migration" and "Documentation and skill changes" section — one-time phase gates and migration worklists, all satisfied and expired; the standing rules a few of them carried are stated in place (the no-`gh project` rule under Status is not forge's, the no-repair-subcommand rule under Partial failure, the no-hierarchy-checks rule under audit-issues, the no-migration-tooling rule under Legacy repos, the agency rule under Deferrals, and issue #49's session-start jurisdiction question under Session-start hook) (#47)
 2026-09-05: dropped the engine spec's "Program end state" and the three "Motivating defect"/"Motivating evidence" sections that exist — the engine spec's (`DECISIONS.md`'s prose-expanded `Why`), the deferrals spec's (`DEFERRALS.md`'s 25 over-budget entries) and retire-roadmap's (`ROADMAP.md`'s status drift) — a forecast of this document plus the arrival narratives of three now-archived files; the constraints spec has no such section, and its equivalent argument survives under What a constraint is. The standing rule those narratives argued for, that budgets are per-field character counts enforced as errors because structural validation alone cannot see drift inside a valid field, is kept under Records (#47)

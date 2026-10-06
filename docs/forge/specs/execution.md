@@ -455,8 +455,20 @@ identical contract.
 - A finding id names exactly one finding within a verdict. Duplicate ids inside one
   verdict are a validation defect: the id is the runner's only handle on a finding, and
   the carried/resolved sets, the honored `resolved` label and staged-deferral selection
-  all treat it as unique. Ids are reviewer-authored per review and deliberately not
-  namespaced across a run.
+  all treat it as unique. Ids are reviewer-authored per review; a reviewer-authored
+  `id` containing `:` is a validation defect, because the runner reserves that
+  character for the identity below.
+- **Finding identity is runner-owned and scoped to the review that raised it.** The
+  runner stamps every classified finding with an `identity` of the form
+  `<scope>:<canonical id>` — scope `t<N>` for task N's review and `final` for the
+  final review, canonical id `carried_from` else `id`. A `carried_from` that already
+  carries a scope prefix (`t<N>:` or `final:`) is taken verbatim: that is how a seeded
+  per-task finding replayed into the final review keeps the identity it was raised
+  under. One identity serves every comparison — the carried/resolved sets within a
+  review, the honored `resolved` label, and every run-wide set (`approved`,
+  `seeded_findings`, `unverified`, a halt record's outstanding findings). Reviewers
+  may reuse `f1` in every review; the runner never confuses task 2's `f1` with task
+  5's, and an approval given to `t2:f1` exempts exactly that finding (#128).
 - An unparseable verdict is a loud failure naming the cause — a contract error (exit 1),
   distinct from a task halt (exit 2). Never guessed at, never silently retried.
 
@@ -862,11 +874,16 @@ them clearing the halt "is not your job" would forbid the work the resume exists
 them do.
 
 **Approved findings.** A human resolution — `repair` (I fixed it) or `defer` (file it
-for later) — exempts that canonical finding id from the `scope-decision` halt for the
+for later) — exempts that finding's **identity** (Reviewer verdict contract) from the
+`scope-decision` halt for the
 remainder of the run — every later task review **and the final review**, whose
 convergence takes the same approved set — so a resumed run does not stop again on a
-question already answered. On Codex it arrives as `--resolve` on the resumed invocation (`codex-runner`
-spec); on Claude the human states it in the conversation. **Regression is narrower than the
+question already answered, and never exempts a different review's finding that happens
+to share the reviewer's local id. On Codex it arrives as `--resolve` on the resumed invocation (`codex-runner`
+spec), naming the identity as `--status` prints it; a bare local id is accepted only when
+exactly one outstanding identity carries it, otherwise the runner raises listing the
+candidates. On Claude the human states it in the conversation and the orchestrator passes
+the identity to the decision helper. **Regression is narrower than the
 exemption:** rule 3 catches a finding already recorded as resolved; an approved
 finding is exempted, not recorded as resolved, so approval alone does not verify that
 the human's repair took. The approver owns that verification.
@@ -927,7 +944,9 @@ python3 forge_dispose.py \
   --attempt <N> \
   --acceptance-ok <true|false> \
   --failed-acceptance <command> \ # first failing command clause's command; only with --execution-failure for an acceptance failure
-  --autofix <auto|gate>
+  --autofix <auto|gate> \
+  --scope <t<N>|final> \          # the review's identity scope (Reviewer verdict contract); required
+  [--approved <identity> ...]      # human-resolved finding identities (Halt resolution)
 ```
 
 The CLI computes the authoritative diff itself and writes `decision.json` to stdout:
@@ -950,7 +969,9 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
 ```
 
 `fix`, `defer` and `halt` are always present; `seeded` appears only when a seed finding
-exists. `ConvergenceState` round-trips through `--state` as sorted lists.
+exists. Every finding in `decision.json` carries its `identity`, and `state`'s id lists
+hold identities. `ConvergenceState` round-trips through `--state` as sorted lists. A
+missing `--scope` is a usage error, never defaulted.
 `prev_failed_acceptance` is the attempt's first failing command clause's command when
 acceptance was its execution failure, else `null`; every attempt overwrites it. A state
 file without the key reads as `null`. `--failed-acceptance` without
@@ -1103,8 +1124,10 @@ context, at the plan's highest task tier. It is not a single-shot gate: it runs 
 **same** disposition matrix, the same convergence rule, the same backstop and the same
 halt payload as a task review. Its diff base is `base_commit`, the run-start HEAD. Its
 discovery packet carries every seed-disposition finding accumulated across the run as
-pre-seeded prior findings, so a cross-task defect that never halted a task is judged
-here. The "worker" on rework is a fix dispatch scoped to the outstanding fix findings
+pre-seeded prior findings, each presented under its identity (`t<N>:<id>`) as its `id`,
+so a cross-task defect that never halted a task is judged
+here and a finding the final reviewer carries from a seed keeps the identity — and any
+approval — it was raised under. The "worker" on rework is a fix dispatch scoped to the outstanding fix findings
 against the whole-plan diff, landing as a single `fix: final-review` commit on pass.
 
 Its job is the integration defects a per-task review cannot see — an interface mismatch
@@ -1228,7 +1251,11 @@ is open work (issue #52).
   is cleared each invocation. A session handle goes stale the moment a human hand-edits
   code; a seeded finding is a finding about code, and dropping it on resume would silently
   ship the defect it names.
-- Task receipts carry each finding's `provenance`, `impact`, `contract_ref`, `convergence`
+- Every persisted finding — on a receipt, in `seeded_findings`, in a halt record's
+  `findings` — carries its runner-stamped `identity`, and `approved` and `unverified`
+  are keyed by it. A halt record whose findings lack `identity` is from before this
+  rule and a resume against it raises naming the file rather than guessing a scope.
+- Task receipts carry each finding's `identity`, `provenance`, `impact`, `contract_ref`, `convergence`
   and derived `disposition`, the verdict's `coverage` array, and on halt the drafted
   `repair_task`. Receipt status is `passed` | `rework` | `escalated`, with escalated
   receipts naming the halt reason.
@@ -1291,6 +1318,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-10-05: Finding identity is runner-owned and review-scoped — `<scope>:<canonical id>`, `t<N>` or `final`; a scoped `carried_from` is kept verbatim; `approved`, `seeded_findings`, `unverified` and halt-record findings are keyed by identity; `--resolve` and the decision helper's `--approved` take identities and the helper requires `--scope`; a reviewer id containing `:` is a validation defect. Replaces the "never namespaced across a run" rule, under which approving `f1` in one task exempted an unrelated `f1` later (#128)
 2026-10-05: Reviewer write discipline — reviewers lose the read-only sandbox on both harnesses and mutate only in a self-made scratch copy; break-the-code is a standing review step with evidence rules; the orchestrator fingerprints working tree, index, HEAD and branch around every reviewer dispatch and halts non-recoverably as `reviewer-wrote` (a freezing escalation, not a contract error) on a change; discovery packets carry command-clause acceptance results with a do-not-re-run assertion, Claude reviewers get the same records by path (#127). Contract checklist: final citable refs are coverage items plus task test-case ids, not an equal set. Disposition matrix: a final-review `seed` is terminal — recorded `unverified` and presented at the close-out gate, never silently passed. Autonomy flag: a gate halt drafts a `repair_task` only in the scope-decision cell, and the verdict contract's `repair_task` rule names that cell rather than "will halt". Halt resolution: approved ids reach final-review convergence too. Shared decision helper: the Claude CLI's missing run diff is named as the one parity gap (#89), and the opening and doc-sync parity claims are qualified to match. Delta-scoped verification packets: the pre-repair snapshot uses the fingerprint's temporary-index capture, so untracked files are in the repair delta. Receipts: `unverified` (seed findings and unverifiable final coverage entries) and run-level `approved` ids live in `run.json` and are read back on resume. On Codex the close-out gate for unverified entries is the `unverified` stage halt, answered by `--resolve <id>=accept:<evidence>|defer|repair`
 2026-10-03: amended by [pipeline] — a plan declares its spec files and names sections by spec id: Plan lint runs its changed-section rule once per declared spec and gains four rows (the header parses, `--spec` not given alongside it, `[<spec id>]` entries resolve, and a warning for a changed spec left undeclared); `spec:` ids and plan-review `section` values carry `[<spec id>]` when a plan declares more than one spec (#62)
 2026-10-03: amended by [pipeline] — Plan review: the Document review contract gains a plan review verdict (`coverage` per named spec section, findings of kind `uncovered` | `contradiction` | `spec-defect`); the Contract checklist gains the plan-review-only `t<N>.c<M>` id for acceptance command clauses; Plan lint also runs at plan authoring (#97)
