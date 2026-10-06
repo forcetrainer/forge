@@ -22,7 +22,7 @@ Routing test: creates new architecture → gear 3 (full flow below); operates wi
 2. Present the design in conversation, one paragraph max.
 3. One approval gate.
 4. Hand off directly to the tdd skill — no spec file, no plan file, planning skill skipped.
-5. After execution: amend the owning spec in place, changelog line (step 6 below); commit the amendment with the change.
+5. After execution: amend the owning spec in place, changelog line (step 6 below) that states the new rule and never quotes the retired one — the changelog is matchable prose; commit the amendment with the change.
 
 **Gear 3** — full flow below.
 
