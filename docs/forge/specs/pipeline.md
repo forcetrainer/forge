@@ -86,7 +86,8 @@ decides and is never the only check.
 set, never a hardcoded list), symbol-shaped (identifier, dotted name, or
 `name()`), or neither — flags, enum values and constraint ids are neither and are
 dropped, so the table is signal rather than noise. Each path/symbol reference resolves
-against the repo or does not. An unresolved reference is **legal**: a spec for a system
+against the repo or does not; a symbol resolves against text files only, since a spec
+never refers to bytes inside a binary file. An unresolved reference is **legal**: a spec for a system
 not yet built names files that do not exist. The table is therefore a **checklist, not a
 rule** — it is not a sixth lint rule, and Lint's five stand.
 
@@ -96,7 +97,9 @@ verdict (schema: `execution` spec). This is what makes the mechanical half enfor
 rather than advisory: no claim the spec makes about the codebase can go unexamined.
 
 **Hunting list.** The reviewer's guidance is `skills/brainstorming/design-anti-patterns.md`,
-loaded by the `@design-anti-patterns.md` on-demand reference form, never inlined.
+loaded by the `@design-anti-patterns.md` on-demand reference form, never inlined. The
+packet names it by its absolute path under the plugin root: the reviewer runs in the repo
+under review, where a plugin-relative path names nothing.
 **To change what the reviewer looks for, change that file.** It is the single tuning
 surface; no other file restates a Gate. Entries use the Trigger / Gate / Instead format
 of `testing-anti-patterns.md`. An entry enters on **two independent observations** — one
@@ -612,3 +615,4 @@ and a session restart to apply.
 2026-09-05: dropped living-specs' enumerated citation-migration list — a one-time worklist; the standing rule is kept under Citations (#47)
 
 2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text
+2026-10-31: the spec-review packet names the hunting list by absolute plugin path; reference resolution skips binary files and fails loud on any other grep output shape

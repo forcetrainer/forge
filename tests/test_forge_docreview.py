@@ -1494,6 +1494,61 @@ class ClassificationPrecisionTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIsNotNone(refs[0].found_at)
 
 
+class BinaryFileMatchTests(TempGitRepoMixin, unittest.TestCase):
+    """A spec never refers to bytes inside a binary file: a symbol matching
+    one resolves against text files only, never crashing on git's
+    `Binary file <path> matches` line."""
+
+    def setUp(self):
+        self._init_repo()
+
+    def _track_bytes(self, relpath, data):
+        with open(os.path.join(self.repo, relpath), "wb") as f:
+            f.write(data)
+        subprocess.run(["git", "add", relpath], cwd=self.repo, check=True,
+                        capture_output=True, text=True)
+
+    def test_symbol_matching_a_binary_listed_first_resolves_to_the_text_file(self):
+        self._track_bytes("a.png", b"\x00\x01 rpm \x02")
+        self._track("z.txt", content="the rpm value\n")
+        refs = d.extract_references("Reads `rpm` from the sensor.", self.repo)
+        self.assertEqual(refs[0].shape, "symbol")
+        self.assertTrue(refs[0].resolved)
+        self.assertEqual(refs[0].found_at, "z.txt:1")
+
+    def test_symbol_matching_only_a_binary_is_unresolved(self):
+        self._track_bytes("a.png", b"\x00\x01 rpm \x02")
+        refs = d.extract_references("Reads `rpm` from the sensor.", self.repo)
+        self.assertFalse(refs[0].resolved)
+        self.assertIsNone(refs[0].found_at)
+
+    def test_grep_output_line_not_shaped_path_line_text_raises_naming_it(self):
+        # git grep -I cannot be made to emit another line shape on demand,
+        # so the subprocess result is substituted (parsers-fail-loud).
+        odd = subprocess.CompletedProcess([], 0, stdout="no colons here\n", stderr="")
+        with mock.patch.object(d.subprocess, "run", return_value=odd):
+            with self.assertRaises(RuntimeError) as ctx:
+                d._resolve_symbol("rpm", self.repo)
+        self.assertIn("no colons here", str(ctx.exception))
+
+
+class HuntingListPathTests(TempGitRepoMixin, unittest.TestCase):
+    """The reviewer runs in the repo under review, not the plugin: the
+    packet names the hunting list by an absolute path under the plugin
+    root, which a reviewer in any repo can open."""
+
+    def setUp(self):
+        self._init_repo()
+        self._track("docs/spec.md", content="# Spec\n\nNothing referenced.\n")
+
+    def test_packet_names_hunting_list_by_absolute_plugin_path(self):
+        packet = d.build_packet(os.path.join(self.repo, "docs/spec.md"), self.repo)
+        expected = REPO_ROOT / "skills" / "brainstorming" / "design-anti-patterns.md"
+        self.assertTrue(expected.is_file())
+        self.assertIn("@{} ".format(expected), packet)
+        self.assertNotIn("@skills/", packet)
+
+
 class PipelineSpecClassificationPrecisionTests(unittest.TestCase):
     """t44 — against the real repo (not the isolated fixture repo above):
     the measurement the Interface cites."""
