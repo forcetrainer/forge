@@ -182,14 +182,22 @@ def _resolve_symbol(ref, repo_root, pathspec=None):
     the check silently weaker while looking stronger, the same proxy
     failure this run kept finding elsewhere."""
     search_text = ref[:-2] if ref.endswith("()") else ref
-    argv = ["git", "grep", "-n", "-F", "-w", "-e", search_text]
+    # -I: a spec never refers to bytes inside a binary file, and git reports
+    # a binary match as `Binary file <path> matches`, with no line number.
+    argv = ["git", "grep", "-I", "-n", "-F", "-w", "-e", search_text]
     if pathspec is not None:
         argv += ["--", pathspec]
     result = subprocess.run(
         argv, cwd=repo_root, capture_output=True, text=True,
     )
     if result.returncode == 0:
-        path, line, _ = result.stdout.splitlines()[0].split(":", 2)
+        first = result.stdout.splitlines()[0]
+        fields = first.split(":", 2)
+        if len(fields) != 3:
+            raise RuntimeError(
+                f"git grep output for `{ref}` is not `path:line:text`: {first!r}"
+            )
+        path, line, _ = fields
         return True, f"{path}:{line}"
     if result.returncode == 1:
         return False, None
@@ -771,7 +779,12 @@ def dispose(findings, repo_root):
 # --- packet build (spec: Spec review, reviewer packet) -----------------------
 
 
-_ANTI_PATTERNS_DOC = "skills/brainstorming/design-anti-patterns.md"
+# Absolute, resolved from this script's location: the reviewer runs in the
+# repo under review, where a plugin-relative path names nothing.
+_ANTI_PATTERNS_DOC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "skills", "brainstorming", "design-anti-patterns.md",
+)
 
 
 def _required_verdict_fields_text():
