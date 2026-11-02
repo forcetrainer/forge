@@ -430,6 +430,43 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
         # Outstanding finding text carried into the packet.
         self.assertIn("still missing the marker", packet)
 
+    def _rework_lap_touching(self, path, text):
+        """Attempt 1 reviews a fix finding on f1.txt; attempt 2's resumed
+        worker appends ``text`` to ``path``; attempt 2's review passes."""
+        self._set_responses([
+            {"exit": 0, "msg": "", "stdout": _worker_event_stream_local("th-w1")},
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "still missing the marker", contract_ref="t1.a1",
+            ), "stdout": _worker_event_stream_local("th-r1")},
+            {"exit": 0, "msg": "", "append_file": path, "append_text": text},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+
+    def test_repair_touching_a_file_outside_the_task_halts_out_of_scope(self):
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        g = os.path.join(self.d, "g.txt")
+        with open(g, "w") as f:
+            f.write("base\n")
+        self._git("add", "g.txt")
+        self._git("commit", "-m", "g")
+        self._rework_lap_touching(g, "DRIFT\n")
+        outcome = forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "repair-out-of-scope")
+        self.assertIn("g.txt", " ".join(outcome.findings))
+
+    def test_repair_within_the_task_files_passes(self):
+        plan = self._plan(PLAN_STD_CHECKLIST)
+        self._init_repo()
+        self._rework_lap_touching(os.path.join(self.d, "f1.txt"), "REPAIRED\n")
+        outcome = forge_run.execute_task(
+            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
+        )
+        self.assertEqual(outcome.status, "passed")
+
     def _repair_ops(self):
         d = self.d
         return [
@@ -690,7 +727,7 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
             {"exit": 0, "msg": "", "append_file": f1, "append_text": "REPAIR\n"},
             {"exit": 0, "msg": json.dumps({"verdict": "findings", "findings": [{
                 "id": "f9", "summary": "still wrong",
-                "location": {"file": "f1.txt", "lines": "2"},
+                "location": {"file": "f1.txt", "lines": "99"},
                 "provenance": "in-diff", "impact": "improvement",
                 "contract_ref": "t1.a1", "convergence": "carried",
                 "carried_from": "t1:f1", "repair_task": None}]})},
@@ -716,7 +753,7 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
             # the re-review names the outstanding finding by its identity
             {"exit": 0, "msg": json.dumps({"verdict": "findings", "findings": [{
                 "id": "f9", "summary": "still wrong",
-                "location": {"file": "f1.txt", "lines": "2"},
+                "location": {"file": "f1.txt", "lines": "99"},
                 "provenance": "in-diff", "impact": "improvement",
                 "contract_ref": None, "convergence": "carried",
                 "carried_from": "t1:f1", "repair_task": None}]})},

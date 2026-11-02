@@ -856,7 +856,8 @@ class ConstantsTests(unittest.TestCase):
     def test_halt_reasons(self):
         self.assertEqual(
             forge_common.HALT_REASONS,
-            ("scope-decision", "regression", "stuck", "backstop", "gate"),
+            ("scope-decision", "regression", "stuck", "backstop", "gate",
+             "repair-out-of-scope"),
         )
 
 

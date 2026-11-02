@@ -53,6 +53,39 @@ def _exec_fail():
     )
 
 
+class RepairScopeDecisionTests(unittest.TestCase):
+    """convergence_decision's repair-scope rule: any out-of-scope path halts
+    `repair-out-of-scope`, ahead of every rule but gate."""
+
+    def test_out_of_scope_paths_halt(self):
+        self.assertEqual(
+            forge_common_decision([], scope_violations=["other.py"]),
+            ("halt", "repair-out-of-scope"))
+
+    def test_out_of_scope_wins_over_scope_decision_and_fix(self):
+        self.assertEqual(
+            forge_common_decision([_halt(), _fix()], scope_violations=["x.py"]),
+            ("halt", "repair-out-of-scope"))
+
+    def test_gate_still_wins(self):
+        self.assertEqual(
+            forge_common_decision([_fix()], scope_violations=["x.py"], mode="gate"),
+            ("halt", "gate"))
+
+    def test_no_violations_is_todays_decision(self):
+        self.assertEqual(forge_common_decision([], scope_violations=[]), ("pass", None))
+
+    def test_halt_reasons_name_it(self):
+        self.assertIn("repair-out-of-scope", forge_common.HALT_REASONS)
+
+
+def forge_common_decision(findings, scope_violations, mode="auto"):
+    return forge_run.convergence_decision(
+        findings, forge_run.ConvergenceState(), True, 2, mode,
+        scope_violations=scope_violations,
+    )
+
+
 class ConvergenceDecisionTests(unittest.TestCase):
     """convergence_decision: the deterministic precedence over a classified
     finding set, the running state, acceptance, the attempt count, and the

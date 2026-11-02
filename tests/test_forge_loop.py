@@ -212,6 +212,11 @@ class LoopSubprocessTests(unittest.TestCase):
         self.assertIn("acceptance", cause)
         self.assertIn("same", cause)
 
+    def test_repair_out_of_scope_halt_cause_names_the_files_outside_the_diff(self):
+        cause = forge_run.HALT_CAUSE_FOR_WORKER["repair-out-of-scope"]
+        self.assertIn("repair-out-of-scope", cause)
+        self.assertIn("outside", cause)
+
     def test_malformed_plan_bad_heading_exits_one_naming_cause(self):
         plan = self._plan(PLAN_BAD_HEADING)
         res = self._run(plan)
