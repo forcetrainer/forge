@@ -283,9 +283,9 @@ class DeriveDispositionTests(unittest.TestCase):
                      contract_ref="AC1: acceptance passes")
         self.assertEqual(forge_run.derive_disposition(f), "fix")
 
-    def test_in_diff_improvement_is_defer(self):
+    def test_in_diff_improvement_is_fix(self):
         f = _finding(provenance="in-diff", impact="improvement", contract_ref=None)
-        self.assertEqual(forge_run.derive_disposition(f), "defer")
+        self.assertEqual(forge_run.derive_disposition(f), "fix")
 
     def test_pre_existing_contract_breaking_is_halt(self):
         f = _finding(provenance="pre-existing", impact="contract-breaking",
@@ -309,12 +309,11 @@ class DeriveDispositionTests(unittest.TestCase):
         f = _finding(provenance="in-run", impact="contract-breaking", contract_ref=None)
         self.assertEqual(forge_run.derive_disposition(f), "defer")
 
-    def test_null_contract_ref_downgrades_contract_breaking_to_defer(self):
-        # in-diff + contract-breaking would be `fix`, but a null contract_ref
-        # strips the contract-breaking claim (named-evidence rule) → improvement
-        # → defer.
+    def test_null_contract_ref_in_diff_still_fixes(self):
+        # On the diff provenance alone decides: the named-evidence downgrade
+        # applies only off the diff, so an uncited claim here is still `fix`.
         f = _finding(provenance="in-diff", impact="contract-breaking", contract_ref=None)
-        self.assertEqual(forge_run.derive_disposition(f), "defer")
+        self.assertEqual(forge_run.derive_disposition(f), "fix")
 
     def test_null_contract_ref_downgrades_pre_existing_halt_to_defer(self):
         # pre-existing + contract-breaking would be `halt`, but a null contract_ref
@@ -512,13 +511,13 @@ class ClassifyFindingsTests(unittest.TestCase):
         self.assertEqual(f2.provenance, "pre-existing")
         self.assertEqual(f2.disposition, "halt")
 
-    def test_null_contract_ref_defers_in_classify(self):
+    def test_null_contract_ref_in_diff_fixes_in_classify(self):
         f = _finding(id="f1", file="foo.py", lines="13", provenance="in-diff",
                      impact="contract-breaking", contract_ref=None)
         v = forge_common.Verdict(kind="findings", findings=[f])
         forge_run.classify_findings(v, DIFF_SINGLE, "t1")
         self.assertEqual(f.provenance, "in-diff")
-        self.assertEqual(f.disposition, "defer")
+        self.assertEqual(f.disposition, "fix")
 
 
 class ClassifyFindingsRunDiffTests(unittest.TestCase):

@@ -647,16 +647,13 @@ class ValidateContractRefsUnitTests(unittest.TestCase):
         self.assertIn("still invalid after one retry", str(ctx.exception))
         self.assertIn("spec:BOGUS", str(ctx.exception))
 
-    def test_rejected_ref_downgrades_to_defer_at_disposition(self):
+    def test_rejected_ref_nulled_on_retry_reaches_disposition_by_provenance(self):
         # The first verdict's contract-breaking claim cites a ref outside
         # the packet's citable set; the retry-defect path forces a
         # re-dispatch, and a well-behaved reviewer's fixed verdict nulls the
         # ref rather than inventing a real one. validate_contract_refs
-        # accepts a null ref (no membership claim left to check), and
-        # derive_disposition's unchanged named-evidence rule — non-null
-        # contract_ref required for contract-breaking — then defers it
-        # exactly like an `improvement` finding, never reaching
-        # fix/seed/halt.
+        # accepts a null ref (no membership claim left to check), and the
+        # finding is in-diff, where provenance alone decides: `fix`.
         citable = _checklist(["spec:A"])
         bad_msg = json.dumps({
             "verdict": "findings",
@@ -704,7 +701,7 @@ class ValidateContractRefsUnitTests(unittest.TestCase):
             )
         self.assertTrue(retried)
         classified = forge_dispose.classify_findings(verdict, diff_text, "t1")
-        self.assertEqual(classified.findings[0].disposition, "defer")
+        self.assertEqual(classified.findings[0].disposition, "fix")
 
 
 class ReviewKindGatingTests(unittest.TestCase):

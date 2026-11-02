@@ -24,6 +24,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+import forge_git
 from forge_common import (
     AUTOFIX_MODES,
     rp,
@@ -565,33 +566,47 @@ def validate_contract_refs(verdict, citable):
 
 def derive_disposition(finding):
     """Disposition matrix over (verified provenance × contract-gated impact).
-    Impact is ``contract-breaking`` only when the reviewer named the violated
-    acceptance criterion / spec section in ``contract_ref`` — a null contract_ref
-    downgrades it to ``improvement`` (named-evidence rule, mirroring the
-    tier-policy floor). Quadrants: in-diff×contract-breaking → ``fix`` (the only
-    auto-fix cell); in-run×contract-breaking → ``seed`` (Task 4: a finding
-    against code this run wrote but outside this task's own diff — logged, the
-    run continues, and it is carried into the final review's discovery packet
-    rather than halting this task over another task's work);
-    pre-existing×contract-breaking → ``halt`` (a real scope decision); every
-    improvement → ``defer``. ``unverifiable`` collapses the provenance axis
-    deliberately — what the reviewer cannot settle from this diff is not a
-    question of where the code sits, so it routes to ``seed`` at every
-    provenance (including a null ``contract_ref``, which never applies to
-    this axis in the first place) rather than being downgraded like an
-    ungrounded contract-breaking claim."""
+    Provenance decides the fix: every ``in-diff`` finding → ``fix``, whatever
+    its impact label — the runner-verified diff, not the reviewer's judgment
+    of severity, is what makes a finding this task's to repair. Off the diff
+    nothing is fixed in-loop, and impact applies: it is ``contract-breaking``
+    only when the reviewer named the violated acceptance criterion / spec
+    section in ``contract_ref`` — a null contract_ref downgrades it to
+    ``improvement`` (named-evidence rule). in-run×contract-breaking → ``seed``
+    (code this run wrote outside this task's diff, carried into the final
+    review's discovery packet); pre-existing×contract-breaking → ``halt`` (a
+    real scope decision); an off-diff improvement → ``defer``.
+    ``unverifiable`` collapses the provenance axis deliberately — what the
+    reviewer cannot settle from this diff is not a question of where the code
+    sits, so it routes to ``seed`` at every provenance, in-diff included."""
     if finding.impact == "unverifiable":
         return "seed"
+    if finding.provenance == "in-diff":
+        return "fix"
     contract_breaking = (
         finding.impact == "contract-breaking" and finding.contract_ref is not None
     )
     if not contract_breaking:
         return "defer"
-    if finding.provenance == "in-diff":
-        return "fix"
     if finding.provenance == "in-run":
         return "seed"
     return "halt"
+
+
+def repair_scope_violations(cwd, base, snapshot_tree):
+    """Paths a repair touched outside its scope: each file the repair delta
+    (``snapshot_tree`` against a fresh capture of the working tree) modifies or
+    deletes that the pre-repair diff (``base`` against ``snapshot_tree``) never
+    touched. A file the repair creates is exempt — a new file changes no
+    existing code. Sorted. Raises RuntimeError naming ``--repair-snapshot`` on
+    a git failure (an unknown snapshot sha, a bad base)."""
+    try:
+        original = {p for _, p in forge_git.changed_paths(cwd, base, snapshot_tree)}
+        delta = forge_git.changed_paths(
+            cwd, snapshot_tree, forge_git.capture_tree(cwd))
+    except (RuntimeError, forge_git.FingerprintError) as e:
+        raise RuntimeError("--repair-snapshot {}: {}".format(snapshot_tree, e))
+    return sorted({p for s, p in delta if s != "A" and p not in original})
 
 
 def classify_findings(verdict, diff_text, scope, run_diff=None,
@@ -844,7 +859,7 @@ def _is_execution_failure(findings):
 
 def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
                          backstop=MAX_ATTEMPTS_BACKSTOP, approved_ids=frozenset(),
-                         failed_acceptance=None):
+                         failed_acceptance=None, scope_violations=()):
     """Decide one attempt deterministically from the classified findings, the
     running state, acceptance, the attempt count, and the autofix mode. Returns
     ``(action, halt_reason)`` with ``action`` in {"pass", "rework", "halt"} and a
@@ -853,6 +868,9 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
 
     1. ``gate`` mode + any reviewer finding -> halt/``gate`` (a transient
        execution failure is exempt: it carries no impact).
+    1a. any ``scope_violations`` (repair_scope_violations: paths the repair
+       modified or deleted outside the pre-repair diff) ->
+       halt/``repair-out-of-scope``, never auto-passed.
     2. any halt-disposition finding (pre-existing x contract-breaking) ->
        halt/``scope-decision``. A finding whose ``identity`` is in
        ``approved_ids`` (identities, never bare ids) — a human resolution carried in from a prior halt (Halt
@@ -877,6 +895,8 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
         _identity(f)
     if autofix_mode == "gate" and any(f.impact is not None for f in findings):
         return ("halt", "gate")
+    if scope_violations:
+        return ("halt", "repair-out-of-scope")
     if any(f.disposition == "halt" and f.identity not in approved_ids
            for f in findings):
         return ("halt", "scope-decision")
@@ -1063,6 +1083,15 @@ def main(argv=None):
              "--execution-failure and --acceptance-ok false (an acceptance "
              "failure). A repeat of the prior attempt's value halts `stuck`.",
     )
+    parser.add_argument(
+        "--repair-snapshot", default=None,
+        help="tree sha of the working tree captured just before this "
+             "attempt's repair dispatch (forge_fingerprint.py snapshot's "
+             "`tree`); given on every rework lap. A repair that modifies or "
+             "deletes a file outside the pre-repair diff halts "
+             "`repair-out-of-scope`, and decision.json gains "
+             "repair_out_of_scope (the paths). Omitted: no scope check.",
+    )
     args = parser.parse_args(argv)
 
     if args.execution_failure and args.verdict:
@@ -1242,6 +1271,10 @@ def main(argv=None):
                     prior_identities=prior_identities,
                 )
             findings = verdict.findings
+        scope_violations = (
+            repair_scope_violations(os.getcwd(), args.base, args.repair_snapshot)
+            if args.repair_snapshot else []
+        )
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
@@ -1250,10 +1283,13 @@ def main(argv=None):
         findings, state, acceptance_ok, args.attempt, args.autofix,
         approved_ids=frozenset(args.approved),
         failed_acceptance=args.failed_acceptance,
+        scope_violations=scope_violations,
     )
     advance_state(state, findings, acceptance_ok, args.failed_acceptance)
 
     decision = _build_decision(action, halt_reason, findings, state)
+    if args.repair_snapshot:
+        decision["repair_out_of_scope"] = scope_violations
     if checklist is not None and verdict is not None:
         defects = validate_coverage(verdict, checklist, citable)
         decision["coverage_valid"] = not defects

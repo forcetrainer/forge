@@ -86,7 +86,8 @@ AUTOFIX_MODES = ("auto", "gate")
 
 # Halt reasons surfaced on an escalated TaskOutcome / final review (Disposition
 # matrix + Rework loop & convergence specs).
-HALT_REASONS = ("scope-decision", "regression", "stuck", "backstop", "gate")
+HALT_REASONS = ("scope-decision", "regression", "stuck", "backstop", "gate",
+                "repair-out-of-scope")
 
 # Default subprocess timeout (seconds) for worker and reviewer `codex exec`
 # calls; overridable via --timeout. A hung worker/reviewer must not hang the

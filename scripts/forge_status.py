@@ -233,7 +233,7 @@ def read_run_state(run_dir, now=None):
         )
 
     # Halt-reason class (Disposition matrix spec: scope-decision | regression |
-    # stuck | backstop | gate) rides the escalated receipt — the escalated
+    # stuck | backstop | gate | repair-out-of-scope) rides the escalated receipt — the escalated
     # task's own attempt receipt for a task halt, or `final-review.json`'s
     # `halt_reason` field for a final-review halt. Absent on older/no-receipt
     # runs; `halt_class` stays None there, tolerated by render_status.

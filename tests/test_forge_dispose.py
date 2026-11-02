@@ -147,7 +147,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         self.assertEqual(decision["findings"]["defer"], [])
         self.assertEqual(decision["findings"]["halt"], [])
 
-    def test_in_diff_improvement_defers_and_continues(self):
+    def test_in_diff_improvement_is_fixed_in_loop(self):
         v = self._write_json("v2.json", {"verdict": "findings", "findings": [
             {"id": "f1", "summary": "extract a helper",
              "location": {"file": "src.txt", "lines": "2-2"},
@@ -156,8 +156,9 @@ class ForgeDisposeCLITests(unittest.TestCase):
         result = self.run_dispose(self._base_args(v))
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)
-        self.assertEqual(decision["action"], "pass")
-        self.assertEqual([f["id"] for f in decision["findings"]["defer"]], ["f1"])
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
+        self.assertEqual(decision["findings"]["defer"], [])
 
     def test_pre_existing_contract_breaking_halts_scope_decision(self):
         v = self._write_json("v3.json", {"verdict": "findings", "findings": [
@@ -217,11 +218,13 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     # --- null contract_ref downgrade -----------------------------------------
 
-    def test_null_contract_ref_downgrades_to_defer(self):
+    def test_null_contract_ref_downgrades_pre_existing_to_defer(self):
         v = self._write_json("v7.json", {"verdict": "findings", "findings": [
             {"id": "f1", "summary": "maybe an issue",
-             "location": {"file": "src.txt", "lines": "2-2"},
-             "impact": "contract-breaking", "contract_ref": None},
+             "location": {"file": "src.txt", "lines": "50-51"},
+             "impact": "contract-breaking", "contract_ref": None,
+             "repair_task": {"title": "t", "files": ["src.txt"], "spec": "x",
+                              "tests": [], "acceptance": [], "tier": "standard"}},
         ]})
         result = self.run_dispose(self._base_args(v))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1159,8 +1162,8 @@ class ForgeDisposeCLIContractRefMembershipTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)
-        self.assertEqual(decision["action"], "pass")
-        self.assertEqual([f["id"] for f in decision["findings"]["defer"]], ["f1"])
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual([f["id"] for f in decision["findings"]["fix"]], ["f1"])
 
     def test_checklist_without_citable_does_not_enforce_membership(self):
         """--checklist alone (no --citable) must not enforce membership, even
@@ -1210,6 +1213,156 @@ class ForgeDisposeCLIContractRefMembershipTests(unittest.TestCase):
         self.assertIn("location", result.stderr)
         self.assertNotIn("citable ref", result.stderr)
 
+
+
+class ProvenanceDispositionTests(unittest.TestCase):
+    """derive_disposition keys the fix on runner-verified provenance: every
+    in-diff finding is fixed whatever its impact label; code outside this
+    diff is never fixed in-loop."""
+
+    def _finding(self, provenance, impact, contract_ref=None):
+        return forge_common.Finding(
+            id="f1", summary="s", file="src.txt", lines="2-2",
+            provenance=provenance, impact=impact, contract_ref=contract_ref,
+        )
+
+    def test_in_diff_improvement_fixes(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("in-diff", "improvement")), "fix")
+
+    def test_in_diff_uncited_contract_breaking_fixes(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("in-diff", "contract-breaking")), "fix")
+
+    def test_in_run_improvement_defers(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("in-run", "improvement")), "defer")
+
+    def test_in_run_cited_contract_breaking_seeds(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("in-run", "contract-breaking", "AC-1")), "seed")
+
+    def test_pre_existing_improvement_defers(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("pre-existing", "improvement")), "defer")
+
+    def test_pre_existing_uncited_contract_breaking_defers(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("pre-existing", "contract-breaking")), "defer")
+
+    def test_pre_existing_cited_contract_breaking_halts(self):
+        self.assertEqual(forge_dispose.derive_disposition(
+            self._finding("pre-existing", "contract-breaking", "AC-1")), "halt")
+
+
+class RepairScopeCLITests(unittest.TestCase):
+    """--repair-snapshot: a repair that modifies or deletes a file outside the
+    pre-repair diff halts `repair-out-of-scope` naming the paths; a file the
+    repair creates is exempt."""
+
+    def setUp(self):
+        self.repo_dir = tempfile.mkdtemp(prefix="forge-dispose-scope-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        self._git("init")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        self._write("src.txt", "line1\nline2\nline3\n")
+        self._write("other.txt", "untouched\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "base")
+        self.base = self._out("rev-parse", "HEAD").strip()
+        # The task's own change, then the pre-repair snapshot.
+        self._write("src.txt", "line1\nCHANGED\nline3\n")
+        import forge_git
+        self.snapshot = forge_git.capture_tree(self.repo_dir)
+        self.workdir = tempfile.mkdtemp(prefix="forge-dispose-scope-work-")
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
+                       capture_output=True, text=True)
+
+    def _out(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
+                              capture_output=True, text=True).stdout
+
+    def _write(self, name, text):
+        with open(os.path.join(self.repo_dir, name), "w") as f:
+            f.write(text)
+
+    def _dispose(self, verdict, scope="t1", snapshot=None):
+        vpath = os.path.join(self.workdir, "v.json")
+        with open(vpath, "w") as f:
+            json.dump(verdict, f)
+        return subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
+             "--scope", scope, "--attempt", "2", "--acceptance-ok", "true",
+             "--autofix", "auto", "--repair-snapshot", snapshot or self.snapshot],
+            cwd=self.repo_dir, capture_output=True, text=True,
+        )
+
+    def _decision(self, verdict, **kw):
+        r = self._dispose(verdict, **kw)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_repair_within_the_diff_passes(self):
+        self._write("src.txt", "line1\nCHANGED AGAIN\nline3\n")
+        d = self._decision({"verdict": "pass"})
+        self.assertEqual(d["action"], "pass")
+        self.assertEqual(d["repair_out_of_scope"], [])
+
+    def test_repair_modifying_an_untouched_file_halts(self):
+        self._write("other.txt", "drifted\n")
+        d = self._decision({"verdict": "pass"})
+        self.assertEqual(d["action"], "halt")
+        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
+        self.assertEqual(d["repair_out_of_scope"], ["other.txt"])
+
+    def test_repair_deleting_an_untouched_file_halts(self):
+        os.remove(os.path.join(self.repo_dir, "other.txt"))
+        d = self._decision({"verdict": "pass"})
+        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
+        self.assertEqual(d["repair_out_of_scope"], ["other.txt"])
+
+    def test_repair_creating_a_new_file_passes(self):
+        self._write("test_new.py", "def test_x(): pass\n")
+        d = self._decision({"verdict": "pass"})
+        self.assertEqual(d["action"], "pass")
+        self.assertEqual(d["repair_out_of_scope"], [])
+
+    def test_out_of_scope_halts_ahead_of_outstanding_fix_findings(self):
+        self._write("other.txt", "drifted\n")
+        d = self._decision({"verdict": "findings", "findings": [
+            {"id": "f1", "summary": "still wrong",
+             "location": {"file": "src.txt", "lines": "2-2"},
+             "impact": "improvement"}]})
+        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
+
+    def test_final_scope_applies_the_same_rule_against_its_base(self):
+        self._write("other.txt", "drifted\n")
+        d = self._decision({"verdict": "pass"}, scope="final")
+        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
+
+    def test_unknown_snapshot_fails_loud(self):
+        r = self._dispose({"verdict": "pass"}, snapshot="0" * 40)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--repair-snapshot", r.stderr)
+
+    def test_without_the_flag_no_scope_key(self):
+        vpath = os.path.join(self.workdir, "v.json")
+        with open(vpath, "w") as f:
+            json.dump({"verdict": "pass"}, f)
+        self._write("other.txt", "drifted\n")
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+             "--autofix", "auto"],
+            cwd=self.repo_dir, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual(d["action"], "pass")
+        self.assertNotIn("repair_out_of_scope", d)
 
 
 if __name__ == "__main__":

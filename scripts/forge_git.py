@@ -416,6 +416,18 @@ def tree_diff(cwd, old_tree, new_tree):
     return _git(cwd, ["diff", old_tree, new_tree], "git diff for tree delta")
 
 
+def changed_paths(cwd, old, new):
+    """``(status, path)`` for each file differing between two tree-ishes, one
+    status letter per path (``A``/``M``/``D``/``T``) — renames are split into a
+    delete and an add (``--no-renames``) so a moved file counts as both.
+    NUL-separated, so no path is quoted. Raises RuntimeError naming the cause
+    on a git failure."""
+    out = _git(cwd, ["diff", "--name-status", "--no-renames", "-z", old, new],
+               "git diff --name-status")
+    parts = out.split("\0")
+    return [(parts[i][0], parts[i + 1]) for i in range(0, len(parts) - 1, 2)]
+
+
 def repair_delta(cwd, snapshot_tree):
     """The repair delta a verification packet carries: the pre-repair
     ``snapshot_tree`` against a fresh ``capture_tree`` — tree against tree, so

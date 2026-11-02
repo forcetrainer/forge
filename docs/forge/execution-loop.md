@@ -50,7 +50,7 @@ Cross the two and every finding lands in exactly one cell with a different actio
 
 |                  | contract-breaking             | improvement-only         |
 | ---------------- | ----------------------------- | ------------------------ |
-| **in-diff**      | ✅ **fix** — rework in-loop   | 📝 **defer** — log it    |
+| **in-diff**      | ✅ **fix** — rework in-loop   | ✅ **fix** — rework in-loop |
 | **in-run**       | 🌱 **seed** — to final review | 📝 **defer** — log it    |
 | **pre-existing** | ⚠️ **halt** — human decides   | 📝 **defer** — log it    |
 
@@ -62,14 +62,24 @@ vertical-slice history the per-task review base depends on. In the final review
 the run base *is* the diff base, so `in-run` and `in-diff` coincide and `seed`
 cannot arise there.
 
-**Only the top-left cell is ever auto-fixed.** Everything else seeds, defers or halts.
-That bias is deliberate: an autonomous fixer's failure mode is *over*-fixing, and
-over-fixing is just diff over-scoping in disguise — the exact thing per-task
-commit discipline exists to prevent. So the rule is fix-what-you-broke-against-
-the-contract, and nothing else.
+**Only the in-diff row is ever auto-fixed** — and all of it is. Whether a finding
+in code this task just wrote is a "real" defect or polish is a judgment call, and
+reviewers made it badly: in an audit of 13 runs, 37 of 43 genuine new-code defects
+were labeled "improvement" and only got fixed because a human insisted. Provenance,
+by contrast, is a mechanical fact the runner checks against the diff. So the line
+is drawn there: fix everything this task wrote; never fix in-loop what it didn't.
+
+The other half of that line guards the fix itself. An autonomous fixer's failure
+mode is *over*-fixing — wandering into code that wasn't part of the problem. After
+every rework lap the runner checks the repair: if it modified or deleted a file
+the task hadn't already touched, the run **halts** (`repair-out-of-scope`) naming
+the files. Creating a new file (a test, a helper) is fine; it changes no existing
+code. The check is file-level, so an edit elsewhere inside an already-touched file
+passes it.
 
 This also answers "harmless vs. harmful deferral." A harmless deferral is an
-improvement — it is staged as a deferral and the run continues. A *harmful* one —
+improvement to code this task didn't write — it is staged as a deferral and the run
+continues. A *harmful* one —
 a real contract-breaking bug that's **pre-existing** (our change surfaced it, or
 depends on it) — is the one cell that must never be silently deferred *or*
 silently fixed (fixing it expands scope past the task). That's a genuine human
@@ -97,6 +107,7 @@ into the review packet) and labels each current finding:
 The runner then decides deterministically, in this precedence:
 
 1. **Gate mode** + any finding → **halt** (the conservative escape hatch, below).
+   A repair that touched a file outside the task's diff → **halt** (`repair-out-of-scope`).
 2. Any **halt-disposition** finding (pre-existing × contract-breaking) → **halt** (scope decision).
 3. **Regression** → **halt**: a previously *resolved* finding reappears, or acceptance went green→red. This is the "shuffling bad state to bad state" case — a fix undid an earlier fix, or broke the build.
 4. **Stuck** → **halt**: a fix finding is *carried* across two consecutive attempts with nothing resolved — the worker can't crack it.
@@ -133,7 +144,7 @@ doesn't hold end-to-end.
 
 **Terminal doc-sync** — after an all-green run, one reconcile-only pass updates
 existing docs the diff made stale (references, signatures, changelogs) — it never
-authors new docs (that would be the gold-plating the matrix forbids). If it finds
+authors new docs (that would be new scope the run never takes on unasked). If it finds
 a doc/contract contradiction it can't mechanically reconcile, it halts with the
 contradiction named. It runs *after* everything else is green, so it can never
 mask a code defect as doc drift.

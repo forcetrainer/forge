@@ -677,19 +677,26 @@ Crossed with contract impact:
 
 | | contract-breaking | improvement | unverifiable |
 |---|---|---|---|
-| `in-diff` | **fix** | defer | **seed** |
+| `in-diff` | **fix** | **fix** | **seed** |
 | `in-run` | **seed** | defer | **seed** |
 | `pre-existing` | **halt** | defer | **seed** |
+
+On the diff, provenance alone decides: every verifiable `in-diff` finding is fixed,
+whatever its impact label — whether a finding in code this task wrote is a defect or
+polish is the reviewer's judgment, and the runner-verified diff is not. Off the diff,
+impact applies, with the named-evidence downgrade (Reviewer verdict contract): an
+uncited `contract-breaking` claim is an `improvement`.
 
 `unverifiable` collapses the provenance axis deliberately: what the runner cannot
 settle is *where the answer lives*, not where the code sits, and every cell routes to
 the final review for the same reason.
 
-- **fix** — reworked in-loop. The only auto-fix cell. An autonomous fixer's failure mode
-  is over-fixing, and over-fixing is diff over-scoping wearing a new hat, so the rule is
-  fix-what-you-broke-against-the-contract and nothing else.
-- **defer** — logged, never fixed. The whole right column, our own new code included: no
-  gold-plating what this plan just wrote.
+- **fix** — reworked in-loop: the task's own new code. An autonomous fixer's failure
+  mode is over-fixing, and over-fixing is diff over-scoping wearing a new hat, so the
+  rule is fix-what-this-task-wrote and nothing else — enforced on the repair itself by
+  the repair-scope check below.
+- **defer** — logged, never fixed: an improvement off the diff (`in-run` or
+  `pre-existing`).
 - **seed** — logged, the run **continues**, and the finding is carried into the final
   review's **discovery packet** as a pre-seeded prior finding. Two routes reach it, for
   one reason. A cross-task defect (`in-run × contract-breaking`) is an integration
@@ -704,6 +711,16 @@ the final review for the same reason.
   be silently fixed *or* silently deferred, and never fixed autonomously. The halt
   surfaces the drafted `repair_task` for the human and freezes the paused task, so the
   run is resumable once they resolve it (Halt resolution).
+
+**Repair-scope check.** After every rework lap — task or final — the runner compares the
+repair delta (the pre-repair tree against the working tree after the repair, the same
+capture as Delta-scoped verification packets) with the pre-repair diff (review base
+against the pre-repair tree; for the final review the review base is `run_base`). A
+repair that **modifies or deletes** a file the pre-repair diff never touched halts
+`repair-out-of-scope`, naming every such path; it is never auto-passed. A file the
+repair **creates** is exempt — a new file changes no existing code. A rename counts as
+a delete plus an add. The check is file-level: an edit inside a file the task already
+touched passes it.
 
 In the final review, `run_base` **is** the diff base, so `in-run` and `in-diff` coincide
 and the cross-task route to `seed` is unreachable. The `unverifiable` route is not:
@@ -745,8 +762,8 @@ punished for precision.
 An absent or unparseable location on a finding claiming `impact: "contract-breaking"` is
 a **verdict validation defect**: re-dispatched once naming the defect, then a contract
 error, through the same retry mechanism coverage validation uses. It never degrades
-silently into `pre-existing`. An improvement finding may still carry no location; it
-defers regardless of provenance.
+silently into `pre-existing`. An improvement finding may still carry no location; with no
+location it cannot intersect the diff, so it reads `pre-existing` and defers.
 
 ### The `convergence: "resolved"` label is honored
 
@@ -776,6 +793,8 @@ acceptance-stuck and backstop rules. Then the decision is taken deterministicall
 
 1. **Gate mode** and any reviewer finding → **halt** (`gate`). A transient execution
    failure is exempt: it carries no impact.
+1a. A **repair-scope violation** (The disposition matrix: Repair-scope check) →
+   **halt** (`repair-out-of-scope`), whatever the findings.
 2. Any **halt-disposition** finding → **halt** (`scope-decision`). A finding whose
    identity is carried in as human-approved (Halt resolution) is exempt from this step
    for the rest of the run; the regression rule (3) still applies to it.
@@ -803,11 +822,11 @@ surface another — and converging work runs to completion. The backstop is a se
 against slow oscillation, not the primary stop. The runner owns the authoritative
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
 still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
-`backstop`, `gate` — `forge_common.HALT_REASONS`, what `convergence_decision` can
-return. Two further halt **classes** are raised outside it and never appear in
-`decision.json`: `reviewer-wrote` (Reviewer write discipline) and `unverified` (The
-disposition matrix). The receipt and halt-record `halt_reason` field accepts all
-seven.
+`backstop`, `gate`, `repair-out-of-scope` — `forge_common.HALT_REASONS`, what
+`convergence_decision` can return. Two further halt **classes** are raised outside it and
+never appear in `decision.json`: `reviewer-wrote` (Reviewer write discipline) and
+`unverified` (The disposition matrix). The receipt and halt-record `halt_reason` field
+accepts all eight.
 
 ## Halt resolution — freeze, resolve, reconcile
 
@@ -960,7 +979,8 @@ python3 forge_dispose.py \
   --autofix <auto|gate> \
   --scope <t<N>|final> \          # the review's identity scope (Reviewer verdict contract); required
   [--approved <identity> ...] \   # human-resolved finding identities (Halt resolution)
-  [--prior-identities <json>]     # identities of the prior findings this review's packet carried; omitted = none, so any scoped carried_from is a defect
+  [--prior-identities <json>] \   # identities of the prior findings this review's packet carried; omitted = none, so any scoped carried_from is a defect
+  [--repair-snapshot <tree>]      # pre-repair tree sha (forge_fingerprint.py snapshot's `tree`); given on every rework lap — the repair-scope check
 ```
 
 The CLI computes the authoritative diff itself and writes `decision.json` to stdout:
@@ -968,8 +988,9 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
 ```json
 {
   "action": "pass" | "rework" | "halt",
-  "halt_reason": "scope-decision" | "regression" | "stuck" | "backstop" | "gate" | null,
-                 // convergence's five; `reviewer-wrote` and `unverified` are halt classes
+  "halt_reason": "scope-decision" | "regression" | "stuck" | "backstop" | "gate"
+                 | "repair-out-of-scope" | null,
+                 // convergence's six; `reviewer-wrote` and `unverified` are halt classes
                  // raised outside `convergence_decision` and appear only on receipts and
                  // the halt record, never in decision.json
   "findings": {
@@ -978,7 +999,8 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
     "halt":   [ {"…": "…", "repair_task": {"…": "…"}} ],
     "seeded": [ {"…": "…"} ]
   },
-  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null}
+  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null},
+  "repair_out_of_scope": ["path", "…"]   // only with --repair-snapshot; sorted, empty when in scope
 }
 ```
 
@@ -990,7 +1012,8 @@ missing `--scope` is a usage error, never defaulted.
 acceptance was its execution failure, else `null`; every attempt overwrites it. A state
 file without the key reads as `null`. `--failed-acceptance` without
 `--execution-failure`, or with `--acceptance-ok true`, is a usage error (exit non-zero,
-naming the conflict), never ignored.
+naming the conflict), never ignored. An unknown `--repair-snapshot` sha is an error
+(exit 1, naming the flag), never a skipped check.
 
 **Authority.** `forge_dispose` computes the diff it verifies against. The reviewer's own
 diff view is advisory and its provenance claims are overridden regardless, so a reviewer
@@ -1221,7 +1244,7 @@ never be masked as doc drift — one dispatch reconciles **existing** documentat
 the shipped whole-plan diff: stale references, changed signatures or behavior, spec
 changelog entries the diff made inaccurate. It is bounded to reconciliation: it never
 authors new documentation, never touches code, and never reconciles issue status, because
-authoring new docs would be exactly the gold-plating the matrix forbids.
+authoring new docs is new scope, which the run never takes on unasked.
 
 Its verdict is one JSON object: `{"doc_sync": "reconciled"}` when edits landed,
 `{"doc_sync": "clean"}` when nothing needed changing, or `{"doc_sync": "contradiction",
@@ -1338,6 +1361,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.
 2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)
 2026-10-05: every prior finding placed in a packet is presented under its identity as `id`, not only seeds — the final review found a seed-carried finding re-scoped as `final:<id>` on its next lap (#128)
 2026-10-05: a scoped `carried_from` is kept only when it names a prior finding supplied to the review; any other is a validation defect — closes the identity-borrowing hole a security review of Task 1 found (#128)
