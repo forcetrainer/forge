@@ -92,8 +92,13 @@ not yet built names files that do not exist. The table is therefore a **checklis
 rule** — it is not a sixth lint rule, and Lint's five stand.
 
 **The reviewer owes a disposition on every unresolved reference** — `intended-new`,
-`wrong`, or `unverifiable`, each with evidence. A missing disposition invalidates the
-verdict (schema: `execution` spec). This is what makes the mechanical half enforced
+`wrong`, or `unverifiable`, each with evidence: exactly one entry per listed reference,
+and none for a reference not listed. A missing disposition, or an extra one, invalidates
+the verdict (schema: `execution` spec).
+
+**Section names.** The packet lists every heading of the spec, each as a JSON string so
+its exact text has unambiguous ends. A finding's `section` is copied from that list
+verbatim (schema: `execution` spec, Document review contract). This is what makes the mechanical half enforced
 rather than advisory: no claim the spec makes about the codebase can go unexamined.
 
 **Hunting list.** The reviewer's guidance is `skills/brainstorming/design-anti-patterns.md`,
@@ -415,7 +420,8 @@ changed-section rule relies on.
 
 **Packet** — `scripts/forge_docreview.py --plan <plan> [--spec <spec>] [--out <path>]`.
 Carries the plan path and every spec path, never their pasted content; a **section
-table**; a **promise table**; the two reviewer questions; the required verdict fields.
+table**; a **spec headings** list; a **promise table**; the two reviewer questions; the
+required verdict fields.
 `--spec` is given only for a legacy plan. `--plan` on a plan with no spec — no
 `**Spec files:**` and no `--spec` — is a usage error.
 
@@ -423,6 +429,11 @@ table**; a **promise table**; the two reviewer questions; the required verdict f
   identified by its resolved heading text, whitespace-collapsed, prefixed `[<spec id>] `
   when the plan declares more than one spec file: the text of its `spec:` id. When a section and one of its subsections are both named, each is
   its own entry and the subsection's requirements are listed under the subsection only.
+  Each heading is printed as a JSON string, so its exact text has unambiguous ends.
+- **Spec headings** — every heading of every declared spec, by the same text (prefixed
+  the same way, printed the same way): the names a `contradiction` or `spec-defect`
+  finding may cite. Every `section`, coverage or finding, is copied verbatim from one of
+  the two lists.
 - **Promise table** — every promise id with its text, built by
   `scripts/forge_checklist.py` (ids: `execution` spec, Contract checklist).
 
@@ -616,3 +627,4 @@ and a session restart to apply.
 
 2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text
 2026-10-31: the spec-review packet names the hunting list by absolute plugin path; reference resolution skips binary files and fails loud on any other grep output shape
+2026-11-02: the spec-review packet lists every heading as a Section names JSON string and says a finding's `section` is one of them copied verbatim; the reviewer owes exactly one reference entry per listed ref and none other; the plan-review packet prints section-table headings as JSON strings and adds a Spec headings list for `contradiction`/`spec-defect` findings — 45 of 256 document-review verdicts were rejected for names not copied as listed

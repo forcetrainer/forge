@@ -439,10 +439,17 @@ def _validate_required_fields(entries_by_type, defects):
                     )
 
 
+# ``dependencies_read[].file``: a tracked path, optionally with ``:N`` or
+# ``:N-M`` (1-based line numbers). Anything else is the path itself and must
+# be tracked as written, so a malformed suffix fails as an untracked file.
+_FILE_WITH_LINES = re.compile(r"(?P<path>.+?)(?::[1-9][0-9]*(?:-[1-9][0-9]*)?)?")
+
+
 def _validate_dependencies_read(entries, defects, repo_root):
     """Structural verification of ``dependencies_read`` — a field carrying a
     claim about the repository is verified, not merely non-blank (spec: Spec
-    review, Structural verification). ``file`` must name a tracked file;
+    review, Structural verification). ``file`` must name a tracked file,
+    optionally with a ``:N``/``:N-M`` line suffix (``_FILE_WITH_LINES``);
     ``symbol`` must actually appear in that file, checked by reusing
     ``_resolve_symbol`` (Task 1's symbol resolution) scoped to the one file,
     never a second grep implementation. Skips a field already reported blank
@@ -454,7 +461,9 @@ def _validate_dependencies_read(entries, defects, repo_root):
         file_val = entry.get("file")
         if _is_blank(file_val):
             continue
-        if not isinstance(file_val, str) or file_val not in tracked_set:
+        m = _FILE_WITH_LINES.fullmatch(file_val) if isinstance(file_val, str) else None
+        path = m.group("path") if m else None
+        if path not in tracked_set:
             defects.append(
                 "dependencies_read entry {!r} names file {!r} which is not "
                 "a tracked file".format(label, file_val)
@@ -463,7 +472,7 @@ def _validate_dependencies_read(entries, defects, repo_root):
         symbol_val = entry.get("symbol")
         if _is_blank(symbol_val) or not isinstance(symbol_val, str):
             continue
-        found, _found_at = _resolve_symbol(symbol_val, repo_root, pathspec=file_val)
+        found, _found_at = _resolve_symbol(symbol_val, repo_root, pathspec=path)
         if not found:
             defects.append(
                 "dependencies_read entry {!r} names symbol {!r} which does "
@@ -823,10 +832,16 @@ def _required_verdict_fields_text():
     )
     lines.append(
         "- `dependencies_read[]` is verified against the repository: `file` "
-        "is exactly a tracked repo path with no line number "
-        "(`scripts/x.py`, never `scripts/x.py:88`), and `symbol` is one name "
-        "that appears literally in that file (`main`, never `module.main` "
-        "or a description). One symbol per entry."
+        "is a tracked repo path, optionally with a line or line range "
+        "(`scripts/x.py`, `scripts/x.py:88` or `scripts/x.py:88-120`), and "
+        "`symbol` is one name that appears literally in that file (`main`, "
+        "never `module.main` or a description). One symbol per entry."
+    )
+    lines.append(
+        "- `findings[].section` is exactly one name from Section names, "
+        "copied verbatim as listed. A finer location (a bullet, a clause, a "
+        "quote) goes in `evidence`, never in `section`; a finding about two "
+        "sections is two findings."
     )
     lines.append(
         "- `replaced_system.applies` (boolean) is required; when true, "
@@ -870,6 +885,14 @@ def _render_unresolved_list(unresolved):
         else:
             lines.append("- `{}`".format(r.ref))
     return "\n".join(lines) + "\n"
+
+
+def _render_name_list(names):
+    """One bullet per name as a JSON string, so its exact text — backticks,
+    brackets and all — has unambiguous ends to copy from."""
+    if not names:
+        return "(none)\n"
+    return "".join("- {}\n".format(json.dumps(n, ensure_ascii=False)) for n in names)
 
 
 def _all_spec_section_names(spec_lines):
@@ -925,10 +948,16 @@ def build_packet(spec_path, repo_root):
     parts.append("# Unresolved references requiring disposition\n\n")
     parts.append(
         "The reviewer owes a disposition — `intended-new`, `wrong`, or "
-        "`unverifiable`, each with evidence — on every reference below. A "
-        "missing disposition invalidates the verdict.\n\n"
+        "`unverifiable`, each with evidence — on every reference below: "
+        "exactly one `references` entry for each reference below, and no "
+        "others, with `ref` copied as listed. A missing entry, or an entry "
+        "for a reference not listed here, invalidates the verdict.\n\n"
     )
     parts.append(_render_unresolved_list(unresolved))
+    parts.append("\n")
+
+    parts.append("# Section names\n\n")
+    parts.append(_render_name_list(_all_spec_section_names(lines)))
     parts.append("\n")
 
     parts.append("# Required verdict fields\n\n")

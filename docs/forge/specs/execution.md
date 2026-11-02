@@ -566,7 +566,13 @@ One JSON object:
 - `references` — one entry per **unresolved** reference in the packet's table. A missing
   entry, or one naming a ref not in the table, invalidates the verdict.
 - `dependencies_read` — the functions the design depends on and what they actually do.
-  Empty is legal only with a non-null `dependencies_waiver`.
+  Empty is legal only with a non-null `dependencies_waiver`. `file` is a tracked path,
+  optionally with a 1-based line or line range: `path`, `path:N` or `path:N-M`. Any other
+  form is the path as written and must be tracked, so a malformed suffix fails as an
+  untracked file.
+- `findings[].section` — exactly one name from the packet's Section names list, copied
+  verbatim. A finer location goes in `evidence`; a finding about two sections is two
+  findings.
 - `replaced_system` — `applies: false` requires no `guarantees`; `applies: true` requires
   a non-empty list. This is the field behind "what does the old path re-derive that the
   new one computes once".
@@ -1361,6 +1367,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.
 2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)
 2026-10-05: every prior finding placed in a packet is presented under its identity as `id`, not only seeds — the final review found a seed-carried finding re-scoped as `final:<id>` on its next lap (#128)

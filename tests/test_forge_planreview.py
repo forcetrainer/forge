@@ -438,10 +438,10 @@ class BuildPacketTests(PlanCliMixin, unittest.TestCase):
         self.assertNotIn("Modify: `x.py`", packet)
 
     def test_section_table_lists_each_heading_with_its_tasks(self):
-        packet = self.packet()
-        self.assertIn("- Alpha — tasks 1, 2", packet)
-        self.assertIn("- Inner rules — tasks 1", packet)
-        self.assertNotIn("Gamma", packet)
+        table = self.packet().split("# Section table\n", 1)[1].split("\n# ", 1)[0]
+        self.assertIn('- "Alpha" — tasks 1, 2', table)
+        self.assertIn('- "Inner rules" — tasks 1', table)
+        self.assertNotIn("Gamma", table)
 
     def test_promise_table_lists_every_id_with_text(self):
         packet = self.packet()
@@ -669,8 +669,15 @@ class MultiSpecPlanTests(PlanCliMixin, unittest.TestCase):
         packet = p.build_packet(self.two)
         self.assertIn("docs/a.md", packet)
         self.assertIn("docs/b.md", packet)
-        self.assertIn("- [alpha-sys] Alpha \u2014 tasks 1", packet)
-        self.assertIn("- [beta-sys] Beta \u2014 tasks 2", packet)
+        self.assertIn('- "[alpha-sys] Alpha" \u2014 tasks 1', packet)
+        self.assertIn('- "[beta-sys] Beta" \u2014 tasks 2', packet)
+
+    def test_two_spec_packet_lists_every_spec_heading_prefixed_and_quoted(self):
+        packet = p.build_packet(self.two)
+        listed = packet.split("# Spec headings\n", 1)[1].split("\n# ", 1)[0]
+        for heading in p._spec_headings(p._load_spec_set(self.two, None)):
+            self.assertIn("- " + json.dumps(heading, ensure_ascii=False), listed)
+        self.assertIn('"[beta-sys] Hidden"', listed)
 
     def test_prefixed_coverage_validates(self):
         result = p.run(self.two, None, self.verdict_file(self.two_spec_verdict()),
@@ -707,7 +714,7 @@ class MultiSpecPlanTests(PlanCliMixin, unittest.TestCase):
             normalized(p.build_packet(self.one), self.one),
             normalized(p.build_packet(self.legacy, spec), self.legacy),
         )
-        self.assertIn("- Alpha \u2014 tasks 1, 2", p.build_packet(self.one))
+        self.assertIn('- "Alpha" \u2014 tasks 1, 2', p.build_packet(self.one))
         result = self.run_cli(["--plan", self.one, "--verdict", self.verdict_file(
             {"verdict": "findings", "coverage": [{"section": "Alpha", "requirements": [
                 {"requirement": "r", "covered_by": ["t1.t1"], "na": None}]}],
