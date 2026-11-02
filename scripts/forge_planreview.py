@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import forge_checklist
 import forge_common
 import forge_plan
-from forge_docreview import _all_spec_section_names, _emit, _is_blank
+from forge_docreview import _all_spec_section_names, _emit, _is_blank, _render_name_list
 
 
 _FINDING_KINDS = ("uncovered", "contradiction", "spec-defect")
@@ -290,7 +290,8 @@ def _render_section_table(section_table):
     lines = []
     for entry in section_table:
         lines.append("- {} — tasks {}".format(
-            entry.heading, ", ".join(str(n) for n in entry.tasks)
+            json.dumps(entry.heading, ensure_ascii=False),
+            ", ".join(str(n) for n in entry.tasks),
         ))
     return "\n".join(lines) + "\n"
 
@@ -322,7 +323,9 @@ def _verdict_fields_text():
         "- finding `kind` — one of: {kinds}. An `uncovered` finding is "
         "required for each uncovered requirement, names its section, and is "
         "allowed only for one. `contradiction` and `spec-defect` `section` is "
-        "any spec heading by its exact text.\n"
+        "any one name from Spec headings. Every `section` — coverage or "
+        "finding — is copied verbatim as listed; a finer location goes in "
+        "`evidence`, never in `section`.\n"
     ).format(
         verdicts=", ".join(_VERDICT_VALUES),
         fields=", ".join("`{}`".format(f) for f in _FINDING_REQUIRED_FIELDS),
@@ -382,6 +385,10 @@ def build_packet(plan_path, spec_path=None):
 
     parts.append("# Section table\n\n")
     parts.append(_render_section_table(section_table))
+    parts.append("\n")
+
+    parts.append("# Spec headings\n\n")
+    parts.append(_render_name_list(_spec_headings(spec_set)))
     parts.append("\n")
 
     parts.append("# Promise table\n\n")

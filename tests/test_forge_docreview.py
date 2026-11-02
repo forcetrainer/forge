@@ -729,13 +729,26 @@ class BuildPacketTests(unittest.TestCase):
         self.assertIn("dependencies_read", packet)
 
     def test_packet_states_how_dependencies_read_is_verified(self):
-        # `_validate_dependencies_read` requires `file` to be exactly a
-        # tracked path and `symbol` to appear literally in it. A reviewer
-        # told neither writes `path.py:88` and `module.func`, and both are
-        # rejected — observed 2026-10-03, two reviewers, one retry each.
+        # `file` is a tracked path, optionally with `:N` or `:N-M`, and
+        # `symbol` must appear literally in it.
         packet = d.build_packet(self.spec_path, str(REPO_ROOT))
-        self.assertIn("no line number", packet)
+        self.assertIn("`scripts/x.py:88-120`", packet)
         self.assertIn("appears literally in that file", packet)
+
+    def test_packet_lists_every_section_name_as_a_quoted_string(self):
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        listed = packet.split("# Section names\n", 1)[1].split("\n# ", 1)[0]
+        for name in ("Alpha section", "Beta section"):
+            self.assertIn('- "{}"'.format(name), listed)
+
+    def test_packet_states_section_is_one_listed_name_copied_verbatim(self):
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        self.assertIn("`findings[].section` is exactly one name from Section names", packet)
+        self.assertIn("two findings", packet)
+
+    def test_packet_states_references_are_exactly_the_listed_set(self):
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        self.assertIn("exactly one `references` entry for each reference below, and no others", packet)
 
     def test_packet_states_the_top_level_verdict_envelope(self):
         # A fresh reviewer's entire prompt is this packet — a field the
@@ -1165,6 +1178,38 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         ])
         result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
         self.assertTrue(result.valid, result.defects)
+
+    def _deps_result(self, file_val, symbol="REPO_ROOT"):
+        verdict = _valid_verdict(dependencies_read=[
+            {"symbol": symbol, "file": file_val, "behavior": "x"},
+        ])
+        return d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+
+    def test_file_with_a_line_suffix_is_valid(self):
+        result = self._deps_result("scripts/forge_common.py:12")
+        self.assertTrue(result.valid, result.defects)
+
+    def test_file_with_a_line_range_suffix_is_valid(self):
+        result = self._deps_result("scripts/forge_common.py:12-40")
+        self.assertTrue(result.valid, result.defects)
+
+    def test_line_suffix_on_an_untracked_path_is_a_defect(self):
+        result = self._deps_result("scripts/does_not_exist_at_all.py:12")
+        self.assertFalse(result.valid)
+        self.assertTrue(any("not a tracked file" in x for x in result.defects))
+
+    def test_malformed_line_suffix_is_a_defect_naming_the_value(self):
+        for bad in ("scripts/forge_common.py:", "scripts/forge_common.py:abc",
+                    "scripts/forge_common.py:12-", "scripts/forge_common.py:-4",
+                    "scripts/forge_common.py:12:3"):
+            result = self._deps_result(bad)
+            self.assertFalse(result.valid, bad)
+            self.assertTrue(any(repr(bad) in x for x in result.defects), (bad, result.defects))
+
+    def test_symbol_is_still_checked_against_the_file_behind_a_line_suffix(self):
+        result = self._deps_result("scripts/forge_common.py:12", symbol=NO_SUCH_SYMBOL)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(NO_SUCH_SYMBOL in x for x in result.defects))
 
     # --- f3a: word-boundary symbol matching (final review) ------------------
 
