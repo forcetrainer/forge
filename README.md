@@ -174,7 +174,7 @@ after a halt, and known Codex caveats — is in
 | `skills/project-memory` | Formats and rules for constraints and GitHub issues (deferrals, programs, phases). |
 | `agents/` | The three tier workers (forge-light, forge-standard, forge-deep), model pinned per harness. |
 | `scripts/` — briefs & packets | `extract-brief.py` (plan+spec → worker brief) and `review-packet.py` (task block + diff → review packet). Stdlib; used by both harnesses. |
-| `scripts/` — document checks | `forge_docreview.py` (spec review and plan review — builds the reviewer's packet, validates its verdict) and `forge_lint.py` (plan and spec grammar, run when a plan is written and again before anything dispatches). Stdlib; used by both harnesses. |
+| `scripts/` — document checks | `forge_docreview.py` (spec review and plan review — builds the reviewer's packet, validates its verdict) and `forge_lint.py` (plan and spec grammar, run on a spec at spec review, on a plan when it is written, and again before anything dispatches). Stdlib; used by both harnesses. |
 | `scripts/` — Codex runtime | `forge-run.py` (the deterministic plan runner — one `codex exec`/task, receipts, per-task commits), `forge-monitor.py` (the live `rich` TUI), and the `forge_*` / `forge_status` helper modules. Stdlib except the monitor, which needs `rich`. |
 | `hooks/session-start` | Injects ~60 words of flow context, only in repos with `docs/forge/` (or legacy `docs/theforge/`, with a rename nudge). Silent everywhere else. |
 
