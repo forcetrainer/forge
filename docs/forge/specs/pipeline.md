@@ -227,7 +227,9 @@ reference is legal and is adjudicated by the reviewer, not by lint.
 4. `## Changelog` is present, and every entry matches `YYYY-MM-DD: <text>`.
 5. Every bracketed id in a cross-spec `amended by` entry names a system that exists.
 
-Applied to each spec a plan declares at run start, plus a corpus mode —
+Applied to each spec a plan declares at run start; to the spec under review, before
+spec review builds its packet or validates its verdict — any defect is a non-zero exit
+listing every defect, and only that spec is linted, never the corpus; plus a corpus mode —
 `forge_lint.py --specs` — that lints every file in `docs/forge/specs/`. Frontmatter is
 parsed without a YAML library: the two keys are a fixed grammar, and `stdlib-only`
 binds. A dated spec under `archive/` is never linted — the archive is frozen and its
@@ -628,3 +630,4 @@ and a session restart to apply.
 2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text
 2026-10-31: the spec-review packet names the hunting list by absolute plugin path; reference resolution skips binary files and fails loud on any other grep output shape
 2026-11-02: the spec-review packet lists every heading as a Section names JSON string and says a finding's `section` is one of them copied verbatim; the reviewer owes exactly one reference entry per listed ref and none other; the plan-review packet prints section-table headings as JSON strings and adds a Spec headings list for `contradiction`/`spec-defect` findings — 45 of 256 document-review verdicts were rejected for names not copied as listed
+2026-11-02: spec review lints the spec under review before building its packet or validating its verdict, so a `system` id that disagrees with its filename fails when the spec is written or amended (#142)
