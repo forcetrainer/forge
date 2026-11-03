@@ -25,6 +25,7 @@ import unicodedata
 from dataclasses import dataclass
 
 import forge_common
+import forge_lint
 
 
 
@@ -1022,6 +1023,18 @@ def main(argv=None):
         # top-level import would be circular.
         import forge_planreview
         return forge_planreview.run(args.plan, args.spec, args.verdict, args.out)
+
+    # The reviewed spec — never the corpus — must pass the living-spec lint
+    # rules before review proceeds, so a bad `system` id fails when the spec
+    # is written or amended, not when a plan first declares it (#142).
+    try:
+        lint_defects = forge_lint.lint_living_spec(args.spec, repo_root=args.repo_root)
+    except RuntimeError as e:
+        lint_defects = ["{}: {}".format(args.spec, e)]
+    if lint_defects:
+        for defect in lint_defects:
+            print("error: {}".format(defect), file=sys.stderr)
+        return 1
 
     try:
         packet = build_packet(args.spec, args.repo_root)

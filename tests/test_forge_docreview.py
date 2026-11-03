@@ -673,7 +673,10 @@ class DisposeTests(unittest.TestCase):
 # Built with NO_SUCH_SYMBOL (never a contiguous literal — see that constant's
 # comment) so this fixture's unresolved symbol reference stays unresolved
 # even once this test file's own bytes are searched by `git grep -F`.
+# A valid living spec when written as ``spec.md``: the CLI lints the reviewed
+# spec before building its packet (#142).
 SPEC_FIXTURE = (
+    "---\nsystem: spec\n---\n\n"
     "# Fixture spec\n"
     "\n"
     "### Alpha section\n"
@@ -684,6 +687,10 @@ SPEC_FIXTURE = (
     "### Beta section\n"
     "\n"
     "Beta references `scripts/does_not_exist_at_all.py`.\n"
+    "\n"
+    "## Changelog\n"
+    "\n"
+    "2026-11-02: fixture\n"
 )
 
 
@@ -1734,7 +1741,10 @@ class RepoRootTests(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
         self.spec_path = os.path.join(self.elsewhere, "spec.md")
         with open(self.spec_path, "w", encoding="utf-8") as f:
-            f.write("# Target\n\nUses `pkg/thing.py` and `{}`.\n".format(self.MARKER))
+            f.write(
+                "---\nsystem: spec\n---\n\n# Target\n\nUses `pkg/thing.py` and `{}`.\n"
+                "\n## Changelog\n\n2026-11-02: fixture\n".format(self.MARKER)
+            )
         self.packet_path = os.path.join(self.elsewhere, "packet.md")
 
     def _run(self, *args, cwd):
@@ -1785,4 +1795,82 @@ class RepoRootTests(unittest.TestCase):
             "--spec", self.spec_path, "--verdict", verdict_path, "--repo-root", self.repo,
             cwd=self.elsewhere,
         )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class SpecReviewLintsReviewedSpecTests(unittest.TestCase):
+    """Issue #142: spec review runs the living-spec lint rules on the spec
+    under review, so a bad ``system`` id fails when the spec is written or
+    amended — not later, when a multi-spec plan first declares it. Only the
+    reviewed spec is linted, never the corpus."""
+
+    VALID = (
+        "---\nsystem: {stem}\n---\n\n# Fixture\n\n### Alpha\n\nText.\n\n"
+        "## Changelog\n\n2026-11-02: initial\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="forge-docreview-lint-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.specs_dir = os.path.join(self.tmp, "docs", "forge", "specs")
+        os.makedirs(self.specs_dir)
+        subprocess.run(["git", "init", "-q"], cwd=self.tmp, check=True)
+        self.out_path = os.path.join(self.tmp, "packet.md")
+
+    def _write(self, name, content):
+        path = os.path.join(self.specs_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, SCRIPT, *args, "--repo-root", self.tmp],
+            cwd=self.tmp, capture_output=True, text=True,
+        )
+
+    def test_system_id_disagreeing_with_stem_fails_packet_build(self):
+        spec = self._write("qc-005-api.md", self.VALID.format(stem="qc-005"))
+        proc = self._run("--spec", spec, "--out", self.out_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("system 'qc-005' disagrees with filename stem 'qc-005-api'",
+                      proc.stderr)
+        self.assertFalse(os.path.exists(self.out_path))
+
+    def test_every_lint_defect_is_reported_in_one_run(self):
+        spec = self._write(
+            "qc-005-ui.md", "---\nsystem: qc-005\n---\n\n# Fixture\n\nNo changelog.\n",
+        )
+        proc = self._run("--spec", spec, "--out", self.out_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("disagrees with filename stem", proc.stderr)
+        self.assertIn("missing '## Changelog' section", proc.stderr)
+
+    def test_malformed_frontmatter_fails_naming_the_file(self):
+        spec = self._write("broken.md", "---\nsystem broken\n---\n\n# Fixture\n")
+        proc = self._run("--spec", spec, "--out", self.out_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn(spec, proc.stderr)
+        self.assertIn("not a 'key: value' line", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_verdict_validation_also_refuses_a_defective_spec(self):
+        spec = self._write("qc-005-api.md", self.VALID.format(stem="qc-005"))
+        verdict_path = os.path.join(self.tmp, "verdict.json")
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump({"verdict": "pass", "references": [], "findings": []}, f)
+        proc = self._run("--spec", spec, "--verdict", verdict_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("disagrees with filename stem", proc.stderr)
+
+    def test_valid_spec_builds_its_packet(self):
+        spec = self._write("qc-005-api.md", self.VALID.format(stem="qc-005-api"))
+        proc = self._run("--spec", spec, "--out", self.out_path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(self.out_path))
+
+    def test_other_defective_specs_in_the_corpus_do_not_block_review(self):
+        self._write("qc-003-model-usage.md", self.VALID.format(stem="qc-003"))
+        spec = self._write("qc-005-api.md", self.VALID.format(stem="qc-005-api"))
+        proc = self._run("--spec", spec, "--out", self.out_path)
         self.assertEqual(proc.returncode, 0, proc.stderr)
