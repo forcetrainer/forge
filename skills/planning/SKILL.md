@@ -17,7 +17,7 @@ Plan prose is agent-consumed, not narrative: apply the brainstorming skill's sen
 
 ## Scope
 
-One plan per subsystem. Each plan must produce working, testable software on its own. If the spec covers multiple independent subsystems, split into separate plans.
+One plan per shippable change, not per spec. A change that touches several specs (a data layer, its API, its UI) is one plan: declare every touched spec in `**Spec files:**`, and let a task name sections from more than one spec when the work cuts across them. Split into separate plans only when a piece works and ships on its own. Being in a different spec is never a reason to split. Each plan must produce working, testable software on its own.
 
 ## File structure first
 
