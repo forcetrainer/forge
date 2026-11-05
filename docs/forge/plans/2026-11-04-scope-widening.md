@@ -336,14 +336,16 @@
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`scope_widenings` takes the checkpoint; scope read from the plan at the checkpoint; existence, deletion, final run-diff paths, pruning and line counts checkpoint-relative; `--checkpoint` on `widened` and the decision CLI)
 - Modify: `scripts/forge-run.py` (record each stage's checkpoint once per invocation before its first worker dispatch, task and final, hold it across rework laps, and pass it; never read `HEAD` for detection afterwards; after every worker turn a commit other than the runner's own escalates `worker-committed`, frozen, no `--resolve`)
+- Modify: `scripts/forge_git.py` (the `worker-committed` freeze parks commits and uncommitted work relative to the checkpoint and resets the branch ref to it)
 - Modify: `scripts/forge_status.py` (`worker-committed` rendered with its commits)
+- Test: `tests/test_forge_resume.py`
 - Test: `tests/test_forge_status.py`
 - Test: `tests/test_forge_widening.py`
 - Test: `tests/test_forge_dispose.py`
 - Test: `tests/test_forge_loop.py`
 - Test: `tests/test_forge_final_review.py`
 
-**Spec:** [execution] Scope widening, [execution] The shared decision helper, [execution] Commit discipline, [execution] Rework loop and convergence, [codex-runner] Task loop, [codex-runner] Testing
+**Spec:** [execution] Scope widening, [execution] The shared decision helper, [execution] Commit discipline, [execution] Rework loop and convergence, [execution] Reviewer write discipline, [codex-runner] Task loop, [codex-runner] Worker isolation, [codex-runner] Testing
 
 **Interface:**
 - `forge_dispose.scope_widenings(cwd, plan_path, spec_path, scope, base, checkpoint, state, record_path) -> WideningResult` — `checkpoint` is a commit sha; the plan's `**Files:**` are parsed from `git show <checkpoint>:<plan_path>`; raises `RuntimeError` naming the cause when the plan does not exist at the checkpoint or `checkpoint` is not a commit.
@@ -365,9 +367,10 @@
 - an orchestrator amendment to a running task's Files committed alone moves that task's checkpoint and review base to the amendment commit
 - a worker that commits during a task turn halts worker-committed naming the commit before detection runs
 - a final-review fixer that commits halts worker-committed
-- the runner's own plan-amendment commit does not halt worker-committed
 - --resolve naming a worker-committed halt is a contract error
-- a resumed run whose human kept the worker's commit records a fresh checkpoint containing it and lists nothing from it
+- the worker-committed freeze leaves the branch at the checkpoint with the worker's commit unreachable and its committed and uncommitted work parked together
+- on resume the frozen worker-committed work replays as uncommitted changes and its out-of-scope edit is detected as a widening
+- a commit the human makes before resuming sits inside the fresh checkpoint and is not a widening
 - status renders a worker-committed halt with its commits
 - a checkpoint that is not a commit raises naming the cause and the CLI exits 1
 - omitting --checkpoint is a usage error naming the flag
@@ -378,6 +381,7 @@
 - `python3 -m unittest discover -s tests -p test_forge_loop.py` passes
 - `python3 -m unittest discover -s tests -p test_forge_final_review.py` passes
 - `python3 -m unittest discover -s tests -p test_forge_status.py` passes
+- `python3 -m unittest discover -s tests -p test_forge_resume.py` passes
 - `python3 -m unittest discover -s tests` passes
 
 **Tier:** standard

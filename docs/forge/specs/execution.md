@@ -162,7 +162,8 @@ left**, enforced by the orchestrator, not by a sandbox.
   class-aware brief names the reviewer write as the cause of the halt. Because the
   fingerprint also records HEAD and the branch, the halt path restores them too — the
   branch ref is pointed back at the recorded HEAD sha and HEAD re-attached to that
-  branch — the one place the orchestrator ever moves a ref, so a reviewer-made commit
+  branch — one of the two places the orchestrator ever moves a ref (the other is the
+  `worker-committed` freeze, Scope widening), so a reviewer-made commit
   or branch switch cannot survive into the resumed run; such a commit's sha is named in
   the halt record and otherwise left unreachable, never deleted. It is not a contract error (which writes no receipt and
   freezes nothing). The freeze, the ref restore and the tree's return to the checkpoint
@@ -823,10 +824,15 @@ commit.
 **A worker commit halts.** After every worker turn, before detection, the orchestrator
 compares `HEAD` with the stage's checkpoint plus any amendment commit it made itself; any
 other commit halts `worker-committed`, naming each commit. Workers never commit (Commit
-discipline), and a commit that survived a halt would sit inside the resumed invocation's
-fresh checkpoint, out of detection's reach — so the human decides on resume whether it
-stays. It freezes like every halt class (Halt resolution) and takes no `--resolve`; the
-resumed invocation's fresh checkpoint includes whatever commits the human kept.
+discipline), and a commit left on the branch would sit inside the resumed invocation's
+fresh checkpoint, out of detection's reach. So its freeze parks the worker's work
+**relative to the checkpoint** — the commits and any uncommitted changes together — then
+points the branch ref back at the checkpoint and re-attaches `HEAD`, as the
+`reviewer-wrote` halt restores its recorded `HEAD`; the commits are named by sha in the
+halt record and left unreachable, never deleted. Nothing a worker committed reaches the
+mainline: on resume the frozen work replays as uncommitted changes under a fresh
+checkpoint, where detection and review see it. A commit the human makes before
+re-invoking is the human's, and sits inside that checkpoint. It takes no `--resolve`.
 
 **A widening** is a path, existing at the checkpoint, that the checkpoint against the
 working tree modifies, outside scope. Comparing from the recorded checkpoint, not
