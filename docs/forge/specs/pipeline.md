@@ -266,13 +266,15 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
 - **Task heading** is `### Task N:` — three `#`, colon. The extraction scripts require
   it.
 - **`**Files:**`** is required on every task and **machine-read**: its paths are the
-  task's scope (`execution` spec: Scope widening). The marker stands alone on its line,
-  followed by one `-` bullet per entry, the block ending as the field clause grammar's
-  bulleted form does. An entry is a kind — `Create:`, `Modify:` or `Test:` — then one or
+  task's scope (`execution` spec: Scope widening). It takes the field clause grammar's
+  bulleted form **only**: the marker alone on its line, one `-` bullet per entry, the
+  block ending as that form's does, continuation lines joined to their bullet before the
+  entry is parsed. The marker with a value on its line, and a marker followed by no
+  bullet, are errors. An entry is a kind — `Create:`, `Modify:` or `Test:` — then one or
   more backticked repo-relative paths separated by `, `, then optionally one
-  parenthetical note running to the end of the line; inside the note, backticks are
+  parenthetical note running to the end of the joined entry; inside the note, backticks are
   literal text. All three kinds put their paths in scope. Errors, each naming the task
-  and line and quoting the entry: an unknown kind; an entry with no backticked path;
+  and the line the entry starts on and quoting the entry: an unknown kind; an entry with no backticked path;
   text between paths or after the last path that is neither `, ` nor the note; a path
   containing `*`, `?` or `[`, or ending in `/`; a path resolving outside the repository
   root. A path is never checked for existence — an earlier task may create it. A file
@@ -336,7 +338,8 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   denylist of two literal names, and an acceptance command that could never pass because
   its word was the file's own vocabulary.
 - **Field clause grammar** governs every machine-read multi-clause field —
-  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`, `**Spec files:**`. Exactly two forms are legal:
+  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`, `**Spec files:**`, and
+  `**Files:**`, which admits the first form only (`**Files:**`, above). Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
   at the first blank line, next `**Field:**`, or any heading line (`#` through `######` at
   column 0), whichever comes first; or the **marker with a value** on the same
