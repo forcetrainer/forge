@@ -1476,6 +1476,11 @@ is open work (issue #52).
 - Each task and final receipt carries the review's `widenings` block from
   `decision.json`; `run.json` aggregates the accepted entries under `widenings`, each
   tagged with its review scope, and reads them back on resume like `deferrals`.
+- A trivial-tier task's receipt carries its widenings as `widenings.unarbitrated` —
+  path, lines added and removed, the record's `reason` and `serves` — and `run.json`
+  aggregates them from its passing receipt beside the accepted entries, marked
+  `unarbitrated`, so they survive a halt and resume like any other. The close-out list
+  shows them as not reviewed.
 - A lint failure is a contract error before any receipt exists, consistent with a
   malformed plan.
 
