@@ -490,6 +490,20 @@ class RecordTests(WideningTestBase):
         self.assertEqual(result.record_defects, [])
         self.assertEqual(result.widened[0].serves, "t1:f3")
 
+    def test_a_serves_naming_a_resolved_identity_of_this_scope_is_accepted_and_one_from_another_scope_is_a_defect(self):
+        state = forge_dispose.ConvergenceState(
+            resolved_ids={"t1:widen:c.py", "t2:widen:c.py"})
+        ok = self.detect(
+            state=state,
+            record=self.record([self.entry(serves="t1:widen:c.py")]))
+        self.assertEqual(ok.record_defects, [])
+        self.assertEqual(ok.widened[0].serves, "t1:widen:c.py")
+        bad = self.detect(
+            state=state,
+            record=self.record([self.entry(serves="t2:widen:c.py")]))
+        self.assertEqual(len(bad.record_defects), 1)
+        self.assertIn("t2:widen:c.py", bad.record_defects[0])
+
 
 class AcceptedTests(WideningTestBase):
     def blob(self, rel):
@@ -526,6 +540,25 @@ class OutputTests(WideningTestBase):
             [sys.executable, SCRIPT, "widened", "--plan", self.plan,
              "--base", "HEAD", "--checkpoint", "HEAD", "--scope", "t1", *args],
             cwd=self.repo, capture_output=True, text=True)
+
+    def test_widened_run_from_a_subdirectory_matches_the_root_run(self):
+        self.write("src/b.py", "x = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "src")
+        self.write("src/b.py", "x = 2\n")
+
+        def run(cwd):
+            return subprocess.run(
+                [sys.executable, SCRIPT, "widened", "--plan", self.plan,
+                 "--base", "HEAD", "--checkpoint", "HEAD", "--scope", "t1"],
+                cwd=cwd, capture_output=True, text=True)
+
+        root = run(self.repo)
+        sub = run(os.path.join(self.repo, "src"))
+        self.assertEqual(root.returncode, 0, root.stderr)
+        self.assertEqual(sub.returncode, 0, sub.stderr)
+        self.assertEqual(sub.stdout, root.stdout)
+        self.assertIn("src/b.py", sub.stdout)
 
     def test_the_md_format_renders_each_due_path_as_a_json_string_with_its_justification_or_no_justification_given(self):
         rec = self.record([{"path": "c.py", "reason": "needed it", "serves": "t1.t1"}])

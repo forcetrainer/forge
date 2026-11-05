@@ -873,8 +873,9 @@ both harnesses. The record is the worker's whole current set, rewritten each tur
 ]
 ```
 
-- `serves` is a citable ref for this review (Contract checklist) or the identity of an
-  outstanding finding the turn repairs, or `null` when the edit serves neither — the
+- `serves` is a citable ref for this review (Contract checklist) or the identity of a
+  finding of this review that is outstanding or already resolved — an accepted widening's
+  entry keeps naming the finding it repaired — or `null` when the edit serves neither — the
   packet then shows `serves: none` and the reviewer judges the `reason` alone.
   `scope_widenings` takes the citable set from `--plan` (and `--spec`) through
   `forge_checklist.citable_refs` / `final_citable_refs` for the review's `--scope`, and

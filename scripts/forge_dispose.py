@@ -1034,7 +1034,8 @@ def _git(cwd, args):
 
 def blob_id(cwd, path):
     """The blob id of ``path``'s current working-tree content."""
-    return _git(cwd, ["hash-object", "--", path]).strip()
+    root = _git(cwd, ["rev-parse", "--show-toplevel"]).strip()
+    return _git(root, ["hash-object", "--", path]).strip()
 
 
 def _repo_relative(cwd, toplevel, path):
@@ -1128,7 +1129,9 @@ def _read_record(record_path):
 
 def _apply_record(entries, by_path, citable, outstanding):
     """Attach each valid entry's reason/serves to its widening; return the
-    defects, each naming its entry."""
+    defects, each naming its entry. ``outstanding`` is the identities a
+    ``serves`` may name besides a citable ref: findings of this review that
+    are outstanding or already resolved."""
     defects, seen = [], set()
     for n, entry in enumerate(entries, start=1):
         label = "widenings record entry {}".format(n)
@@ -1160,7 +1163,8 @@ def _apply_record(entries, by_path, citable, outstanding):
         ):
             defects.append(
                 "{}: serves {} is neither a citable ref for this review nor "
-                "an outstanding finding identity".format(label, json.dumps(serves))
+                "an outstanding or resolved finding identity of it".format(
+                    label, json.dumps(serves))
             )
             continue
         by_path[path].reason = reason
@@ -1253,7 +1257,8 @@ def _widenings_from(cwd, toplevel, plan_path, spec_path, plan_copy, repo_root,
         )
         defects += _apply_record(
             entries, {w.path: w for w in widened}, citable,
-            set(state.carried_ids),
+            set(state.carried_ids) | {
+                i for i in state.resolved_ids if i.startswith(scope + ":")},
         )
     accepted = state.accepted_widenings
     due = [
