@@ -828,7 +828,9 @@ ruling says. It freezes and resumes like every halt class (Halt resolution); it 
 and final, whether or not acceptance passed, and before an execution failure or a
 review is acted on, so a deletion halts even in a turn that also failed acceptance — through `forge_dispose.scope_widenings`, the one implementation, called
 in-process by the Codex runner and via the `forge_dispose.py widened` CLI on Claude
-(The shared decision helper).
+(The shared decision helper). A git failure inside detection (an unknown base, an unreadable tree) is
+a contract error naming the cause — exit 1 — never a skipped check and never an empty
+widening set.
 
 **The worker's record.** Every worker brief, cold and resumed, names a record path in the
 run's scratch area and carries `forge_common.WIDENING_INSTRUCTION`, shared verbatim by
