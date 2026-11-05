@@ -324,7 +324,7 @@
 - The Task structure template's `**Files:**` example and its prose state the bulleted-only grammar and that prose or glob entries are lint errors.
 - The inline finding-handling paragraph says a widening is listed at close-out unarbitrated and only a deletion halts.
 - The Claude close-out gate text lists every accepted widening and every unarbitrated one marked not reviewed, beside the staged deferrals, with no per-entry call.
-- The Claude dispatch loop records each stage's checkpoint once per invocation, before the stage's first worker dispatch, holds it across rework laps, and passes it as `--checkpoint` to `forge_dispose.py widened` and the decision, and commits a mid-task plan amendment alone before the affected task's next turn.
+- The Claude dispatch loop records each stage's checkpoint once per invocation, before the stage's first worker dispatch, holds it across rework laps, and passes it as `--checkpoint` to `forge_dispose.py widened` and the decision, and commits a mid-task plan amendment alone before the affected task's next turn, moving that task's checkpoint and review base to the amendment commit.
 
 **Tier:** standard
 
@@ -360,6 +360,7 @@
 - a worker that commits an out-of-scope edit on one lap still has it listed on the next lap
 - a resumed task's checkpoint is HEAD at the new invocation so a human's committed fix is not a widening
 - a final stage whose last task's commit was skipped still has a checkpoint
+- an orchestrator amendment to a running task's Files committed alone moves that task's checkpoint and review base to the amendment commit
 - a checkpoint that is not a commit raises naming the cause and the CLI exits 1
 - omitting --checkpoint is a usage error naming the flag
 
