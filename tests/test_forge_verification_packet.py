@@ -42,6 +42,10 @@ PLAN_STD_CHECKLIST = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+- Create: `u_edit.txt`, `u_del.txt`, `u_add.txt`
+
 **Acceptance:**
 - the output file must contain the marker
 - `echo NEEDFIX >> f1.txt` passes
@@ -64,6 +68,9 @@ PLAN_STD_CHECKLIST_MULTI = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:**
 - the output must contain marker one

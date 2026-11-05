@@ -1031,6 +1031,9 @@ PLAN_EMPTY_CHECKLIST = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** standard
@@ -1046,6 +1049,9 @@ PLAN_NONEMPTY_CHECKLIST = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Spec:** Some Section
 

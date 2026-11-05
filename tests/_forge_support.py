@@ -178,7 +178,7 @@ PLAN_PASS = """# Fixture Plan
 - [ ] Done
 
 **Files:**
-- Modify: `foo.txt`
+- Modify: `foo.txt`, `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -196,6 +196,9 @@ PLAN_DEPS = """# Fixture Plan
 ### Task 2: Second task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -204,6 +207,9 @@ PLAN_DEPS = """# Fixture Plan
 
 ### Task 1: First task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -219,6 +225,9 @@ PLAN_ACC_FAIL = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `false` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -232,6 +241,9 @@ PLAN_BAD_HEADING = """# Fixture Plan
 
 ## Task 1: Wrong level
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -247,6 +259,9 @@ PLAN_DUP = """# Fixture Plan
 ### Task 1: First
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -255,6 +270,9 @@ PLAN_DUP = """# Fixture Plan
 
 ### Task 1: Second
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -273,6 +291,9 @@ PLAN_STD = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** standard
@@ -289,6 +310,9 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** standard
@@ -297,6 +321,9 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 
 ### Task 2: Trivial follow-up
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -320,6 +347,9 @@ PLAN_TWO_STD = """# Fixture Plan
 ### Task 1: First standard
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo TASK1MARK >> f1.txt` passes
 
 **Tier:** standard
@@ -328,6 +358,9 @@ PLAN_TWO_STD = """# Fixture Plan
 
 ### Task 2: Second standard
 - [ ] Done
+
+**Files:**
+- Modify: `f2.txt`, `f1.txt`
 
 **Acceptance:** `echo TASK2MARK >> f2.txt` passes
 
@@ -347,6 +380,9 @@ PLAN_STD_TRACKED = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
@@ -363,6 +399,9 @@ PLAN_STD_TRACKED_THEN_TRIVIAL = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo NEEDFIX >> f1.txt` passes
 
 **Tier:** standard
@@ -371,6 +410,9 @@ PLAN_STD_TRACKED_THEN_TRIVIAL = """# Fixture Plan
 
 ### Task 2: Trivial follow-up
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -444,6 +486,9 @@ PLAN_COMMIT_ONE = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -459,6 +504,9 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -467,6 +515,9 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 
 ### Task 2: Second task
 - [ ] Done
+
+**Files:**
+- Modify: `f2.txt`, `f1.txt`
 
 **Acceptance:** `echo TWOMARK >> f2.txt` passes
 
@@ -483,6 +534,9 @@ PLAN_COMMIT_STD = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `echo STDMARK >> f1.txt` passes
 
@@ -501,6 +555,9 @@ PLAN_COMMIT_ONE_THEN_STD = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo ONEMARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -509,6 +566,9 @@ PLAN_COMMIT_ONE_THEN_STD = """# Fixture Plan
 
 ### Task 2: Second task
 - [ ] Done
+
+**Files:**
+- Modify: `f2.txt`, `f1.txt`
 
 **Acceptance:** `echo TWOMARK >> f2.txt` passes
 
@@ -525,6 +585,9 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 
 ### Task 1: No-op task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 

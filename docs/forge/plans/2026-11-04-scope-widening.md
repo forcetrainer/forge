@@ -16,7 +16,7 @@
 - docs/forge/specs/codex-runner.md
 
 ### Task 1: Plan fixtures declare their files
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `tests/_forge_support.py` (every plan builder and inline plan gains a strict `**Files:**` block)

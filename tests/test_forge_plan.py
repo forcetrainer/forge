@@ -73,6 +73,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:**\n"
             "- `python3 -m pytest -q tests/test_a.py` passes\n"
             "- the output reads well, see `docs/x.md`\n"
@@ -97,6 +98,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:**\n"
             "- `pytest -q` passes\n"
             "#### note\n"
@@ -113,6 +115,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:** `python3 -m pytest -q tests/test_a.py` passes\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
@@ -129,6 +132,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:**\n"
             "- `true` passes\n"
             "- `make test` succeeds\n\n"
@@ -139,7 +143,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             forge_run.parse_plan_tasks(self._write(plan))
         msg = str(ctx.exception)
         self.assertIn("task 1", msg)
-        self.assertIn("line 10", msg)
+        self.assertIn("line 13", msg)
         self.assertIn("`make test` succeeds", msg)
         for outcome in forge_run.forge_plan.ACCEPTANCE_OUTCOMES:
             self.assertIn(outcome, msg)
@@ -150,13 +154,14 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:** `true`\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
         )
         with self.assertRaises(RuntimeError) as ctx:
             forge_run.parse_plan_tasks(self._write(plan))
-        self.assertIn("line 8", str(ctx.exception))
+        self.assertIn("line 11", str(ctx.exception))
 
     def test_prose_only_acceptance_yields_no_checks(self):
         plan = (
@@ -164,6 +169,7 @@ class ParsePlanTasksTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:** The docs read well.\n\n"
             "**Tier:** standard\n\n"
             "**Depends on:** nothing\n"
@@ -247,6 +253,7 @@ class TierJustificationTests(unittest.TestCase):
             "**Goal:** Do the thing.\n\n"
             "### Task 1: First task\n"
             "- [ ] Done\n\n"
+            "**Files:**\n- Modify: `f1.txt`\n\n"
             "**Acceptance:** `true` passes\n\n"
             "**Tier:** {}\n\n"
             "**Depends on:** nothing\n"

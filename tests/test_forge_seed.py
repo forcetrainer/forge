@@ -46,6 +46,9 @@ PLAN_SEED_THEN_CONTINUE = """# Fixture Plan
 ### Task 1: First task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `echo TASK1MARK >> f1.txt` passes
 
 **Tier:** trivial — test fixture, mechanical
@@ -55,6 +58,9 @@ PLAN_SEED_THEN_CONTINUE = """# Fixture Plan
 ### Task 2: Second task
 - [ ] Done
 
+**Files:**
+- Modify: `f2.txt`, `f1.txt`
+
 **Acceptance:** `echo TASK2MARK >> f2.txt` passes
 
 **Tier:** standard
@@ -63,6 +69,9 @@ PLAN_SEED_THEN_CONTINUE = """# Fixture Plan
 
 ### Task 3: Third task
 - [ ] Done
+
+**Files:**
+- Modify: `f3.txt`, `f1.txt`
 
 **Acceptance:** `echo TASK3MARK >> f3.txt` passes
 

@@ -27,7 +27,7 @@ PLAN_PASS_JUSTIFIED = """# Fixture Plan
 - [ ] Done
 
 **Files:**
-- Modify: `foo.txt`
+- Modify: `foo.txt`, `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -43,6 +43,9 @@ PLAN_STD_THEN_TRIVIAL_JUSTIFIED = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `true` passes
 
 **Tier:** standard
@@ -51,6 +54,9 @@ PLAN_STD_THEN_TRIVIAL_JUSTIFIED = """# Fixture Plan
 
 ### Task 2: Trivial follow-up
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -71,6 +77,9 @@ PLAN_COMPLEX = """# Fixture Plan
 
 ### Task 1: Complex task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 

@@ -715,6 +715,9 @@ PLAN_APPROVED = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `grep -q FROZENWORK f1.txt` passes
 
 **Tier:** standard

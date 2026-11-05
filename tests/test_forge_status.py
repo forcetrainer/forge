@@ -41,6 +41,7 @@ def _plan(run_dir_for_capture=None):
     return (
         "# Fixture Plan\n\n**Goal:** Do the thing.\n\n"
         "### Task 1: First task\n- [ ] Done\n\n"
+        "**Files:**\n- Modify: `f1.txt`\n\n"
         "**Acceptance:** `{}` passes\n\n**Tier:** trivial — test fixture, mechanical\n\n**Depends on:** nothing\n".format(acc)
     )
 

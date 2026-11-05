@@ -42,6 +42,9 @@ PLAN_FINAL = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Spec:** Alpha section
 
 **Acceptance:** `true` passes

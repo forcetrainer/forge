@@ -179,6 +179,7 @@ class ForgeChecklistTests(unittest.TestCase):
                 "# Task 1\n\n"
                 "### Task 1: Mixed\n"
                 "- [ ] Done\n\n"
+                "**Files:**\n- Modify: `f1.txt`\n\n"
                 "**Acceptance:**\n"
                 "- reads well, see `docs/x.md`\n"
                 "- `make test` passes\n"
@@ -204,6 +205,7 @@ class ForgeChecklistTests(unittest.TestCase):
                 "# Task 1\n\n"
                 "### Task 1: Bad\n"
                 "- [ ] Done\n\n"
+                "**Files:**\n- Modify: `f1.txt`\n\n"
                 "**Acceptance:** `make test`\n\n"
                 "**Tier:** `standard`\n\n"
                 "**Depends on:** nothing.\n"
@@ -756,6 +758,9 @@ PROMISE_PLAN_MD = """# Plan header
 
 ### Task 1: First
 
+**Files:**
+- Modify: `f1.txt`
+
 **Spec:** Alpha section, Beta section
 
 **Tests:**
@@ -776,6 +781,9 @@ PROMISE_PLAN_MD = """# Plan header
 
 ### Task 2: Second
 
+**Files:**
+- Modify: `f1.txt`
+
 **Spec:** ALPHA SEC
 
 **Tests:** none \u2014 prose only
@@ -789,6 +797,9 @@ PROMISE_PLAN_MD = """# Plan header
 # Task 3
 
 ### Task 3: Third
+
+**Files:**
+- Modify: `f1.txt`
 
 **Spec:** Beta section
 
