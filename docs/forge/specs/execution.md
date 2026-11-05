@@ -841,40 +841,53 @@ both harnesses. The record is the worker's whole current set, rewritten each tur
 ```
 
 - `serves` is a citable ref for this review (Contract checklist) or the identity of an
-  outstanding finding the turn repairs.
+  outstanding finding the turn repairs, or `null` when the edit serves neither — the
+  packet then shows `serves: none` and the reviewer judges the `reason` alone.
+  `scope_widenings` takes the citable set from `--plan` (and `--spec`) through
+  `forge_checklist.citable_refs` / `final_citable_refs` for the review's `--scope`, and
+  the outstanding identities from `--state`'s `carried_ids`; neither set is ever
+  supplied by the caller.
 - An absent record means no justification for any path. A record that does not parse, a
   `path` that is not a current widening, a duplicate `path`, an empty `reason`, or a
-  `serves` outside both sets is an **execution failure** naming the entry: the turn
+  non-null `serves` outside both sets is an **execution failure** naming the entry: the turn
   reworks under the rework loop's execution-failure rules and is never reviewed on it.
 - Accepted widenings (`accepted_widenings` in the convergence state, and `run.json`'s
   `widenings`) survive a resume: a path accepted before a halt is not re-listed while
   its content holds.
 
-**The packet.** Every review packet — discovery, verification, and the validation retry —
-lists the widenings due a ruling under `## Widened files`: each path as a JSON string,
+**The packet.** Every review packet — discovery, verification, and a validation retry's
+cold fallback (a resumed validation retry already holds the section) — lists the widenings due a ruling under `## Widened files`: each path as a JSON string,
 then the record's `reason` and `serves`, or `no justification given`. The packet asks for
-exactly one ruling per listed path (Reviewer verdict contract).
+exactly one ruling per listed path (Reviewer verdict contract). A rejected widening's
+finding reaches the reviewer only through this section: it is never among the packet's
+prior findings or in `--prior-identities`, and a reviewer finding whose identity begins
+`<scope>:widen:` is a validation defect.
 
 - Discovery: every current widening.
 - Verification: every current widening not accepted at its current content — new this
   lap, changed since its acceptance, or rejected and still present.
 
-**Rulings.** An `accepted` path is recorded in the convergence state with its blob id at
-acceptance and is not listed again while that content holds. A `rejected` path becomes
+**Rulings.** An `accepted` path is recorded in the convergence state's
+`accepted_widenings` — its blob id at acceptance, the record's `reason` and `serves`,
+and the ruling's `reason` — and is not listed again while that content holds. A `rejected` path becomes
 a fix finding the runner raises, identity `<scope>:widen:<path>`, summary the reviewer's
-`reason`, location the path. It reworks like any fix finding: the worker reverts the
+`reason`, location the path, provenance `in-diff`, impact `improvement`, `contract_ref`
+null, disposition `fix`. It is a reviewer finding for every convergence rule — gate,
+carried, resolved, regression — and never an execution failure. It reworks like any fix finding: the worker reverts the
 edit and solves the need in scope, or keeps it and states a better justification in its
 record. The runner, not the reviewer, labels it:
 
 - resolved — the path is no longer a widening, or the next ruling accepts it;
-- carried — the next ruling rejects it again; two consecutive carried rounds with
-  nothing resolved halt `stuck` (Rework loop and convergence), which is where a worker
-  and reviewer who still disagree reach the human;
+- carried — the next ruling rejects it again; a widening rejected on two consecutive
+  rulings with nothing resolved that round halts `stuck` (Rework loop and convergence,
+  rule 4), which is where a worker and reviewer who still disagree reach the human;
 - a resolved widening rejected again later is a regression.
 
 `--autofix gate` halts on a rejected widening as on any finding. A trivial-tier task has
 no reviewer: its widenings, with the record's justification, go to the close-out list
-unarbitrated, as inline's do; its deletions still halt.
+unarbitrated, as inline's do; its deletions still halt. A trivial batch dispatched as
+one `forge-light` run is checked once after the batch against the union of its tasks'
+`**Files:**`, and its widenings are listed tagged with the batch's task numbers.
 
 **Close-out.** Every accepted widening — task, path, lines added and removed, the
 worker's `reason` and `serves`, the reviewer's `reason` — is listed at the close-out
@@ -1115,7 +1128,7 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
     "seeded": [ {"…": "…"} ]
   },
   "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null,
-            "accepted_widenings": {"path": "blob id at acceptance"}},
+            "accepted_widenings": {"path": {"blob": "…", "reason": "…", "serves": "…" | null, "ruling_reason": "…"}}},
   "widenings": {
     "accepted": [ {"path": "…", "reason": "…", "serves": "…" | null, "ruling_reason": "…", "added": 6, "removed": 4} ],
     "rejected": [ {"path": "…", "identity": "t5:widen:path"} ],
@@ -1136,8 +1149,9 @@ naming the conflict), never ignored. `--repair-snapshot` is gone: passing it is 
 usage error naming the flag, never ignored. A state file without
 `accepted_widenings` reads as `{}`. The verdict's `widenings` are checked against the
 widenings the helper recomputes (Reviewer verdict contract), never against a list the
-caller supplies. `accepted` lists every accepted widening so far in this review, with
-line counts from `HEAD` against the working tree.
+caller supplies. `accepted` lists every accepted widening so far in this review,
+rebuilt from `accepted_widenings`, with line counts from `HEAD` against the working
+tree.
 
 **Authority.** `forge_dispose` computes the diff it verifies against. The reviewer's own
 diff view is advisory and its provenance claims are overridden regardless, so a reviewer
