@@ -1066,14 +1066,12 @@ class FreezeEveryHaltClassTests(unittest.TestCase):
         self.assertEqual(first_record["halt_reason"], "scope-decision")
         first_freeze = first_record["freeze_commit"]
 
-        # Resume: --resolve h1=repair. The worker adds nothing further, and
-        # the reviewer re-flags "regfind" at the same (still in-diff)
-        # location it originally occupied — a runner-recorded resolved id
-        # reappearing, which is the regression rule.
+        # Resume: --resolve h1=repair. The worker rewrites f1.txt without the
+        # PARTIALFIX marker, so acceptance goes green -> red: the regression
+        # rule.
         res2 = self._run(
-            [{"exit": 0, "msg": ""},
-             {"exit": 0, "msg": _fix_findings_msg(
-                 "f1.txt", "2", "regression: reappeared", id="regfind")}],
+            [{"exit": 0, "msg": "", "file_ops": [
+                {"op": "write", "path": self.f1, "text": "REWRITTEN\n"}]}],
             extra_args=["--resolve", "h1=repair"],
         )
         self.assertEqual(res2.returncode, 2, res2.stderr)
@@ -1083,11 +1081,10 @@ class FreezeEveryHaltClassTests(unittest.TestCase):
         self.assertEqual(second_record["halt_reason"], "regression")
         self.assertEqual(second_record["attempt"], 3)  # count continues, not reset
         self.assertTrue(second_record["freeze_commit"])
-        # The record names the SECOND freeze: its findings are the
-        # regression's, not the scope-decision halt's original h1 finding.
-        self.assertEqual(
-            [f["id"] for f in second_record["findings"]], ["regfind"]
-        )
+        # The record names the SECOND freeze: not the scope-decision halt's
+        # freeze, and not its original h1 finding.
+        self.assertNotEqual(second_record["freeze_commit"], first_freeze)
+        self.assertNotIn("h1", [f["id"] for f in second_record["findings"]])
         self.assertEqual(self._porcelain(), "")
 
     def test_resumed_run_halted_twice_in_a_row_refreezes_each_time_no_orphan(self):

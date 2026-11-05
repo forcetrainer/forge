@@ -48,7 +48,7 @@ Before marking work complete:
 - Watched each test fail before implementing.
 - Each test failed for the expected reason.
 - Wrote minimal code to pass each test.
-- Whole suite passes, output pristine — run once, here. A plan task runs its acceptance commands instead; the whole suite runs at plan close-out.
+- Whole suite passes, output pristine — run once, here. A dispatched plan task's worker runs neither: the orchestrator runs the task's acceptance commands after hand-back, and the whole suite runs at plan close-out.
 - Tests use real code; mocks only if unavoidable.
 - Edge cases and errors covered.
 

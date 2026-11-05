@@ -118,6 +118,11 @@ left**, enforced by the orchestrator, not by a sandbox.
   happens in a copy of the tree it makes itself in a temporary directory — never in the
   repository. `git stash` in any form is forbidden. The reviewer chooses the copy
   mechanism; it knows what its harness needs.
+- **Preservation is the orchestrator's check, not the reviewer's.** The reviewer never
+  writes in the repository and never proves it unchanged: the fingerprint around every
+  reviewer spawn (tree, index, `HEAD`, branch) is the check. Gitignored paths — the
+  run's own `.forge/` logs among them — change during a review by design; they are
+  never a finding and never grounds for an `unverifiable` preservation claim.
 - **Break the code.** For each behavior the task's tests claim to cover, the reviewer
   mutates that behavior in the scratch copy and confirms a named test fails. Evidence
   rules: the scratch baseline passes before any mutant; one behavior-specific mutant at
@@ -134,6 +139,10 @@ left**, enforced by the orchestrator, not by a sandbox.
   however tempting; a reviewer that wants to is reporting on tests the plan should have
   named, which is a finding too. Observed 2026-10-05 — a Task 1 review made 23 mutations
   in its scratch copy and outspent the build (#134).
+- **Workers do not run acceptance.** A standard- or complex-tier worker runs the test
+  files its change touches; the orchestrator runs every acceptance command clause once
+  per attempt, after hand-back, and a failure is the attempt's execution failure. A
+  trivial-tier worker still runs its acceptance commands: its batch has no review.
 - **Never re-run acceptance against the worker's tree.** The orchestrator has already
   run every acceptance **command clause** and hands the results to the reviewer
   (Reviewer input, below); repeating them on the unchanged tree is waste. Running a
@@ -788,8 +797,8 @@ repaired, indefinitely, until the backstop.
 contract) is in the prior attempt's carried-fix set. A `resolved` label on an identity the
 runner never tracked as outstanding is meaningless and is ignored — the finding is
 dispositioned normally — otherwise a reviewer could dismiss any finding it invented by
-self-labeling it resolved. A false claim is still caught: the identity reappearing later
-trips the regression rule against the runner's authoritative resolved-id set. The convergence
+self-labeling it resolved. A false claim costs a lap, not a defect: a later review that
+raises the problem again makes it an ordinary fix finding. The convergence
 decision itself is not modified; a dropped finding never reaches it.
 
 ## Scope widening
@@ -953,12 +962,15 @@ acceptance-stuck and backstop rules. Then the decision is taken deterministicall
    below like any other.
 2. Any **halt-disposition** finding → **halt** (`scope-decision`). A finding whose
    identity is carried in as human-approved (Halt resolution) is exempt from this step
-   for the rest of the run; the regression rule (3) still applies to it.
-3. **Regression** → **halt**: a finding the runner previously recorded resolved
-   reappears, or acceptance went green→red since the prior attempt. This is the
-   "shuffling one bad state into another" case — a fix undid an earlier fix, or broke
-   the build. A newly-surfaced finding never seen before is *not* a regression;
-   incremental reviewer discovery is allowed.
+   for the rest of the run; every later rule still applies to it.
+3. **Regression** → **halt**: acceptance went green→red since the prior attempt, or a
+   rejected widening (runner-built identity `<scope>:widen:<path>`) recorded resolved
+   is rejected again. This is the "shuffling one bad state into another" case — a fix
+   broke the build, or a reverted out-of-scope edit came back. A reviewer finding whose
+   identity matches a resolved one is *not* a regression: reviewer ids are
+   reviewer-authored and reviewers are never shown resolved findings, so the match is
+   no evidence of the same defect. It is an ordinary fix finding; incremental reviewer
+   discovery is allowed.
 4. **Stuck** → **halt**: a fix finding is carried from the prior attempt with nothing
    resolved this round — the worker cannot crack it. Or **acceptance-stuck**: this
    attempt's execution failure is acceptance, and its **first failing command clause**
@@ -975,9 +987,9 @@ acceptance-stuck and backstop rules. Then the decision is taken deterministicall
 
 Net progress each round is **not** required — a round may resolve one finding and
 surface another — and converging work runs to completion. The backstop is a seatbelt
-against slow oscillation, not the primary stop. The runner owns the authoritative
-resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
-still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
+against slow oscillation, not the primary stop. A defect that genuinely comes back is
+raised again and reworked; `stuck` and the backstop bound a loop that cannot fix it.
+Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
 `backstop`, `gate`, `scope-delete` — `forge_common.HALT_REASONS`, what
 `convergence_decision` can return. Three further halt **classes** are raised outside it and
 never appear in `decision.json`: `reviewer-wrote` (Reviewer write discipline),
@@ -1075,10 +1087,9 @@ to share the reviewer's local id. On Codex it arrives as `--resolve` on the resu
 spec), naming the identity as `--status` prints it; a bare local id is accepted only when
 exactly one outstanding identity carries it, otherwise the runner raises listing the
 candidates. On Claude the human states it in the conversation and the orchestrator passes
-the identity to the decision helper. **Regression is narrower than the
-exemption:** rule 3 catches a finding already recorded as resolved; an approved
-finding is exempted, not recorded as resolved, so approval alone does not verify that
-the human's repair took. The approver owns that verification.
+the identity to the decision helper. **Approval does not verify the repair:** an
+approved finding is exempted, not recorded as resolved, and no convergence rule checks
+that the human's repair took. The approver owns that verification.
 
 **The human is the bound.** Because no repair is dispatched autonomously, the
 fix-resume-find-another loop cannot run away on its own: every round trip costs a human
@@ -1567,7 +1578,7 @@ Any cost claim requires measurement against a comparable run.
   rule proves weak in practice, this trades early false positives for late true
   positives, which is a worse bargain than the one it replaced.
 - **Honoring `resolved` increases trust in the reviewer.** Bounded by the carried-set
-  guard and by the regression rule, which remains authoritative.
+  guard; a false claim costs a rework lap when a later review raises the defect again.
 - **Orchestrator drift on the Claude path** — the loop is prose the session follows. The
   decision itself is a tested CLI, so the drift surface is only the glue.
 - **Wall-clock on large all-independent plans** — the accepted cost of serial execution.
@@ -1587,6 +1598,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-05: regression (rule 3) halts on acceptance going green→red or a resolved widening rejected again; a reviewer finding whose identity matches a resolved one is an ordinary fix finding. Reviewers never prove the repository unchanged — the orchestrator's fingerprint does, and gitignored paths such as `.forge/` run logs are out of scope. Standard- and complex-tier workers run the test files their change touches; the orchestrator alone runs acceptance (#144, #149, #147).
 2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI; `**Spec files:**` and the citable set are read at the checkpoint too, an in-repo plan absent at the checkpoint is a contract error before any worker runs, and an out-of-repo plan is read as given and recorded as unprotected. A post-commit security review found both escapes.
 2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`, and a worker commit halts, as `worker-committed`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.

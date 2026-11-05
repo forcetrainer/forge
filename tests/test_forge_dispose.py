@@ -286,7 +286,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         self.assertEqual(d2["action"], "pass")
         self.assertEqual(sorted(d2["state"]["resolved_ids"]), ["t1:f1"])
 
-    def test_regression_resolved_id_reappears_halts(self):
+    def test_a_reviewer_id_matching_a_resolved_identity_reworks(self):
         v1 = self._write_json("vb1.json", {"verdict": "findings", "findings": [
             {"id": "f1", "summary": "bug",
              "location": {"file": "src.txt", "lines": "2-2"},
@@ -313,8 +313,8 @@ class ForgeDisposeCLITests(unittest.TestCase):
             self._base_args(v3, attempt=3, state_path=state_path2)
         )
         d3 = json.loads(r3.stdout)
-        self.assertEqual(d3["action"], "halt")
-        self.assertEqual(d3["halt_reason"], "regression")
+        self.assertEqual(d3["action"], "rework")
+        self.assertIsNone(d3["halt_reason"])
 
     def test_green_to_red_regression_halts(self):
         v1 = self._write_json("vc1.json", {"verdict": "pass"})
