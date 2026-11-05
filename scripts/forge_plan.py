@@ -5,6 +5,7 @@ heading grammar), orders tasks by dependency, and parses ``--effort N=LEVEL``
 overrides. All parse failures raise loudly naming the cause (constraint:
 parsers-fail-loud).
 """
+import posixpath
 import re
 
 from forge_common import (
@@ -110,6 +111,97 @@ def parse_acceptance_field(block, task_number, first_line=None):
     return parsed
 
 
+class FilesFieldError(RuntimeError):
+    """A ``**Files:**`` defect (spec: pipeline, Plan documents)."""
+
+
+_FILES_KIND_RE = re.compile(r"^(Create|Modify|Test):\s*(.*)$")
+
+
+def _files_entry(entry):
+    """``(paths, defect_cause)`` for one joined ``**Files:**`` entry."""
+    m = _FILES_KIND_RE.match(entry)
+    if not m:
+        return [], "unknown kind — an entry starts with Create:, Modify: or Test:"
+    rest = m.group(2).strip()
+    if "`" not in rest:
+        return [], "no backticked path"
+    paths = []
+    pos = 0
+    while True:
+        if rest[pos:pos + 1] != "`":
+            return paths, "text that is neither ', ' between paths nor a trailing parenthetical note"
+        close = rest.find("`", pos + 1)
+        if close == -1:
+            return paths, "a path span is never closed"
+        path = rest[pos + 1:close]
+        paths.append(path)
+        pos = close + 1
+        tail = rest[pos:]
+        if tail == "":
+            break
+        if tail.startswith(", "):
+            pos += 2
+            continue
+        if tail.startswith(" (") and tail.endswith(")"):
+            break
+        return paths, "text that is neither ', ' between paths nor a trailing parenthetical note"
+    for path in paths:
+        if path != path.strip():
+            return paths, "path {!r} has leading or trailing whitespace".format(path)
+        if posixpath.normpath(path) in ("", "."):
+            return paths, "path {!r} names the repository root, not a file".format(path)
+        if any(c in path for c in "*?["):
+            return paths, "path {!r} contains a glob character (* ? [)".format(path)
+        if path.endswith("/"):
+            return paths, "path {!r} ends in '/' — name files, not directories".format(path)
+        norm = posixpath.normpath(path)
+        if path.startswith("/") or norm == ".." or norm.startswith("../"):
+            return paths, "path {!r} resolves outside the repository root".format(path)
+    return paths, None
+
+
+def parse_files_field(block, task_number, first_line):
+    """``(paths, defects)`` for a task block's ``**Files:**`` field (spec:
+    pipeline, Plan documents). Only the bulleted form is legal. ``first_line`` is
+    the 1-based plan line of the block's first line. Each defect names the
+    task, the line the entry starts on, and quotes the entry. A path is never
+    checked for existence. An absent field yields ``([], [])`` — presence is
+    lint's check."""
+    lines = block.splitlines()
+    mask = eb.fence_mask(lines)
+    idx = next(
+        (i for i, ln in enumerate(lines) if not mask[i] and ln.startswith("**Files:**")),
+        None,
+    )
+    if idx is None:
+        return [], []
+
+    def defect(i, quoted, cause):
+        return "task {}, line {}: **Files:** entry {!r} — {}".format(
+            task_number, first_line + i, quoted, cause)
+
+    if lines[idx][len("**Files:**"):].strip():
+        return [], [defect(
+            idx, lines[idx],
+            "the marker must stand alone on its line with one '-' bullet per entry")]
+    try:
+        clauses = eb.parse_field_clause_lines(block, "Files")
+    except RuntimeError as e:
+        return [], ["task {}, line {}: {}".format(task_number, first_line + idx, e)]
+    paths, defects = [], []
+    for i, entry in clauses:
+        got, cause = _files_entry(entry)
+        if cause:
+            defects.append(defect(i, entry, cause))
+            continue
+        for p in got:
+            p = posixpath.normpath(p)
+            if p not in paths:
+                paths.append(p)
+    return paths, defects
+
+
 def _parse_depends(text):
     return [int(n) for n in re.findall(r"Task\s+(\d+)", text)]
 
@@ -208,6 +300,10 @@ def parse_plan_tasks(plan_path):
             if check is not None
         ]
 
+        files, files_defects = parse_files_field(block, num, start + 1)
+        if files_defects:
+            raise FilesFieldError(files_defects[0])
+
         checkbox_line = -1
         for offset, bl in enumerate(block_lines):
             if block_mask[offset]:
@@ -225,6 +321,7 @@ def parse_plan_tasks(plan_path):
                 depends_on=depends_on,
                 acceptance_checks=acceptance,
                 checkbox_line=checkbox_line,
+                files=files,
             )
         )
     return tasks

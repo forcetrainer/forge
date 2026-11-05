@@ -483,6 +483,8 @@ def _parse_task_tier(block, where, num):
             forge_plan.parse_plan_tasks(tmp_path)
         except forge_plan.AcceptanceClauseError:
             return []  # reported once, with its plan line, by _field_clause_defects
+        except forge_plan.FilesFieldError:
+            return []  # reported once, with its plan line, by _lint_task_fields
         except RuntimeError as e:
             return [_error(where, str(e))]
         return []
@@ -490,7 +492,21 @@ def _parse_task_tier(block, where, num):
         os.remove(tmp_path)
 
 
-def _lint_task_fields(blocks, spec_set):
+def _block_starts(lines, mask, blocks):
+    """``where`` -> 1-based plan line of each block's heading."""
+    canonical = {}
+    for i, line in enumerate(lines):
+        m = None if mask[i] else eb.TASK_HEADING_RE.match(line)
+        if m:
+            canonical.setdefault(int(m.group(1)), i + 1)
+    starts = {}
+    for where, num, _block in blocks:
+        m = re.search(r"\(line (\d+)", where)
+        starts[where] = int(m.group(1)) if m else canonical.get(num)
+    return starts
+
+
+def _lint_task_fields(blocks, spec_set, starts=None):
     """Per-task Tier, Acceptance-present, Tests, and Spec checks against
     every locatable block (canonical, duplicate, or wrong-level — see
     ``_lint_heading_structure``); also returns each canonical task's parsed
@@ -514,6 +530,15 @@ def _lint_task_fields(blocks, spec_set):
 
         if forge_plan._field_value(block_lines, block_mask, "Acceptance") is None:
             defects.append(_error(where, "missing **Acceptance:** line"))
+
+        if forge_plan._field_value(block_lines, block_mask, "Files") is None:
+            defects.append(_error(where, "missing **Files:** line"))
+        else:
+            first = (starts or {}).get(where) or 1
+            defects.extend(
+                _error(where, d)
+                for d in forge_plan.parse_files_field(block, num, first)[1]
+            )
 
         try:
             eb.parse_test_cases(block)
@@ -1079,7 +1104,8 @@ def lint_plan(plan_path, spec_path=None, *, repo_root):
         eb.read_lines(spec_path)  # a legacy plan's spec must exist
         spec_set = [eb.SpecFile(spec_path, None, False)]
 
-    field_defects, depends_map = _lint_task_fields(blocks, spec_set)
+    field_defects, depends_map = _lint_task_fields(
+        blocks, spec_set, _block_starts(lines, mask, blocks))
     defects.extend(field_defects)
 
     canonical_depends = {

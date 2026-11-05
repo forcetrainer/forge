@@ -52,7 +52,7 @@
 **Depends on:** nothing
 
 ### Task 2: Parse and lint the Files field
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_plan.py` (`parse_files_field`; `parse_plan_tasks` fills `Task.files`)

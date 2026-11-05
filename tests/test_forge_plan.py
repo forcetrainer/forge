@@ -438,3 +438,132 @@ class OutcomeMetTests(unittest.TestCase):
         for clause in ("`t` passes", "`t` exits 1", "`t` prints nothing",
                        "`t` prints `ok`"):
             self.assertFalse(self._met(clause, None, "ok", timed_out=True))
+
+
+class ParseFilesFieldTests(unittest.TestCase):
+    """``parse_files_field`` — the machine-read ``**Files:**`` field."""
+
+    @staticmethod
+    def _parse(*entry_lines, marker="**Files:**", first_line=10):
+        import forge_plan
+        block = "\n".join(["### Task 3: T", marker] + list(entry_lines) + ["", "**Tier:** `standard`"])
+        return forge_plan.parse_files_field(block, 3, first_line)
+
+    def test_create_modify_and_test_entries_contribute_paths(self):
+        paths, defects = self._parse(
+            "- Create: `a.py`", "- Modify: `b/c.py`", "- Test: `tests/test_a.py`"
+        )
+        self.assertEqual(defects, [])
+        self.assertEqual(paths, ["a.py", "b/c.py", "tests/test_a.py"])
+
+    def test_comma_separated_backticked_paths_yield_every_path(self):
+        paths, defects = self._parse("- Modify: `a.py`, `b.py`, `c.py`", "- Test: `a.py`")
+        self.assertEqual(defects, [])
+        self.assertEqual(paths, ["a.py", "b.py", "c.py"])  # duplicates removed
+
+    def test_backticks_in_trailing_note_are_not_paths(self):
+        paths, defects = self._parse("- Modify: `a.py` (the `parse_x` function, and `b.py`)")
+        self.assertEqual(defects, [])
+        self.assertEqual(paths, ["a.py"])
+
+    def test_continuation_joins_bullet_and_error_names_starting_line(self):
+        paths, defects = self._parse("- Modify: `a.py` (note", "  continues here)")
+        self.assertEqual((paths, defects), (["a.py"], []))
+        paths, defects = self._parse("- Create: `ok.py`", "- Bogus: `a.py`", "  more")
+        self.assertEqual(len(defects), 1)
+        # block line 0 is the heading at plan line 10; bullet 2 is block index 3
+        self.assertIn("line 13", defects[0])
+        self.assertIn("task 3", defects[0])
+        self.assertIn("Bogus: `a.py` more", defects[0])
+
+    def test_unknown_kind_is_defect_naming_task_and_line(self):
+        _, defects = self._parse("- Delete: `a.py`")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("task 3", defects[0])
+        self.assertIn("line 12", defects[0])
+        self.assertIn("Delete: `a.py`", defects[0])
+
+    def test_entry_with_no_backticked_path_is_defect(self):
+        _, defects = self._parse("- Create: the parser module")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("the parser module", defects[0])
+
+    def test_prose_between_paths_is_defect(self):
+        _, defects = self._parse("- Modify: `a.py` and also `b.py`")
+        self.assertEqual(len(defects), 1)
+        _, defects = self._parse("- Modify: `a.py` trailing prose")
+        self.assertEqual(len(defects), 1)
+
+    def test_glob_character_in_path_is_defect(self):
+        for bad in ("src/*.py", "a?.py", "a[1].py"):
+            _, defects = self._parse("- Modify: `{}`".format(bad))
+            self.assertEqual(len(defects), 1, bad)
+
+    def test_path_ending_in_slash_is_defect(self):
+        _, defects = self._parse("- Create: `scripts/`")
+        self.assertEqual(len(defects), 1)
+
+    def test_path_outside_repository_root_is_defect(self):
+        for bad in ("../x.py", "a/../../x.py", "/etc/passwd"):
+            _, defects = self._parse("- Modify: `{}`".format(bad))
+            self.assertEqual(len(defects), 1, bad)
+        paths, defects = self._parse("- Modify: `a/../b.py`")
+        self.assertEqual((paths, defects), (["b.py"], []))
+
+    def test_marker_with_value_on_its_line_is_defect(self):
+        _, defects = self._parse(marker="**Files:** Create: `a.py`")
+        self.assertEqual(len(defects), 1)
+        self.assertIn("task 3", defects[0])
+        self.assertIn("line 11", defects[0])
+
+    def test_marker_followed_by_no_bullet_is_defect(self):
+        _, defects = self._parse()
+        self.assertEqual(len(defects), 1)
+        self.assertIn("task 3", defects[0])
+
+    def test_path_naming_the_root_is_defect(self):
+        for bad in (".", "a/..", "./"):
+            _, defects = self._parse("- Modify: `{}`".format(bad))
+            self.assertEqual(len(defects), 1, bad)
+            self.assertIn("task 3", defects[0])
+            self.assertIn("line 12", defects[0])
+
+    def test_whitespace_inside_backticks_is_defect(self):
+        for bad in (" a.py", "a.py ", " a.py "):
+            _, defects = self._parse("- Modify: `{}`".format(bad))
+            self.assertEqual(len(defects), 1, repr(bad))
+            self.assertIn("task 3", defects[0])
+            self.assertIn("line 12", defects[0])
+
+    def test_path_that_does_not_exist_on_disk_is_accepted(self):
+        paths, defects = self._parse("- Create: `no/such/dir/never-written.py`")
+        self.assertEqual((paths, defects), (["no/such/dir/never-written.py"], []))
+
+
+class ParsePlanTasksFilesTests(unittest.TestCase):
+    PLAN = (
+        "# Plan header\n\n**Goal:** g\n\n# Task 1\n\n### Task 1: One\n- [ ] Done\n\n"
+        "**Files:**\n- Create: `a.py`\n- Test: `t.py`\n\n"
+        "**Acceptance:** `true` passes\n\n**Tier:** `standard`\n"
+    )
+
+    def _write(self, content):
+        d = tempfile.mkdtemp(prefix="forge-run-files-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = os.path.join(d, "plan.md")
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def test_task_files_is_filled(self):
+        import forge_plan
+        tasks = forge_plan.parse_plan_tasks(self._write(self.PLAN))
+        self.assertEqual(tasks[0].files, ["a.py", "t.py"])
+
+    def test_first_defect_raises_naming_cause(self):
+        import forge_plan
+        bad = self.PLAN.replace("- Create: `a.py`", "- Create: some prose")
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_plan.parse_plan_tasks(self._write(bad))
+        self.assertIn("task 1", str(ctx.exception))
+        self.assertIn("some prose", str(ctx.exception))

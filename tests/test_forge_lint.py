@@ -516,6 +516,47 @@ class ForgeLintTests(unittest.TestCase):
         self.assertTrue(any("depends on unknown task 77" in d.message for d in errors))
 
 
+
+    # --- **Files:** ------------------------------------------------------
+
+    def test_task_without_files_field_is_error_naming_task(self):
+        plan = _base_plan().replace("**Files:**\n- Create: `bar.py`\n\n", "")
+        errs = self._errors(self._lint(plan))
+        self.assertTrue(
+            any("task 2" in d.where and "**Files:**" in d.message for d in errs), errs
+        )
+
+    def test_lint_reports_every_files_defect_across_tasks(self):
+        plan = _base_plan().replace(
+            "- Create: `foo.py`", "- Create: some prose"
+        ).replace("- Create: `bar.py`", "- Modify: `src/*.py`")
+        errs = [d.message for d in self._errors(self._lint(plan, self.spec_path))
+                if "**Files:**" in d.message]
+        t1 = [m for m in errs if m.startswith("task 1,")]
+        t2 = [m for m in errs if m.startswith("task 2,")]
+        self.assertEqual(len(t1), 1, errs)
+        self.assertEqual(len(t2), 1, errs)
+        self.assertIn("some prose", t1[0])
+        self.assertIn("src/*.py", t2[0])
+
+    def test_one_bad_files_entry_is_reported_once_at_its_plan_line(self):
+        plan = _base_plan().replace("- Create: `foo.py`", "- Create: some prose")
+        line = plan.splitlines().index("- Create: some prose") + 1
+        errs = [d for d in self._errors(self._lint(plan, self.spec_path))
+                if "**Files:**" in d.message]
+        self.assertEqual(len(errs), 1, errs)
+        self.assertIn("line {}".format(line), errs[0].message)
+
+    def test_files_marker_with_value_is_lint_error(self):
+        plan = _base_plan().replace(
+            "**Files:**\n- Create: `foo.py`", "**Files:** Create: `foo.py`"
+        )
+        errs = self._errors(self._lint(plan))
+        self.assertTrue(any("**Files:**" in d.message for d in errs), errs)
+
+    def test_legal_files_field_is_clean(self):
+        self.assertEqual(self._errors(self._lint(_base_plan(), self.spec_path)), [])
+
 def _constraint_text(entries):
     """entries: [(id, because), ...] -> canonical-shaped constraints.md text
     (one record per entry; ``because`` is the field under test since it

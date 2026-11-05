@@ -189,6 +189,8 @@ class Task:
     depends_on: list = field(default_factory=list)
     acceptance_checks: list = field(default_factory=list)
     checkbox_line: int = -1
+    # Declared repo-relative paths (Create/Modify/Test), plan order, deduped.
+    files: list = field(default_factory=list)
 
 
 @dataclass
