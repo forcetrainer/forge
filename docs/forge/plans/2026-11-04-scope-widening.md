@@ -140,6 +140,8 @@
 - a widening whose content changed since acceptance is due a ruling again
 - a git failure raises naming the cause and the CLI exits 1
 - the md format renders each due path as a JSON string with its justification or no justification given
+- the json format prints widened, deleted and record_defects with each widened entry's path, reason and serves
+- an absent or missing --state file reads as a fresh state
 - the brief names the record path and carries WIDENING_INSTRUCTION verbatim when --widenings-record is given
 
 **Acceptance:**
@@ -192,6 +194,9 @@
 - a state file without accepted_widenings reads as empty
 - a verdict with widenings is checked against the helper's own recomputation, not a caller list
 - HALT_REASONS no longer contains repair-out-of-scope and LEGACY_HALT_REASONS does
+- omitting --plan is a usage error naming the flag
+- omitting --widenings leaves every widening unjustified
+- REVIEW_VERDICT_INSTRUCTION states the widenings array, one ruling per listed path, and that rulings never change the verdict
 
 **Acceptance:**
 - `python3 -m unittest discover -s tests -p test_forge_widening.py` passes
@@ -229,9 +234,15 @@
 - a defective record entry is a rework iteration naming the entry and no reviewer is dispatched for that turn
 - a rejected widening drives a rework whose worker prompt carries the rejection
 - an accepted widening is not re-listed on the next verification packet
-- a trivial batch is checked once against the union of its tasks' Files
+- a trivial batch is checked once against the union of its tasks' Files and its widenings are tagged with the batch's task numbers
+- a validation retry that falls back to a cold reviewer carries the Widened files section
+- after a rejection the re-review packet's prior findings and the decision's prior identities exclude the widen identity
+- the final-review packet lists Widened files with the final record's justification
+- --resolve naming a scope-delete halt is a contract error
+- a scope-delete halt resumes after the human restores the deleted path
 - every worker brief names its record path
 - the runner never passes a repair snapshot to the decision
+- the Codex reviewer prompt carries REVIEW_VERDICT_INSTRUCTION verbatim including its widenings text
 
 **Acceptance:**
 - `python3 -m unittest discover -s tests -p test_forge_loop.py` passes
@@ -264,6 +275,7 @@
 
 **Tests:**
 - a passing task receipt carries the decision's widenings block
+- a passing final receipt carries the final decision's widenings block
 - run.json aggregates accepted widenings from passing receipts only and never from an escalated one
 - a trivial task's unarbitrated widenings reach run.json marked unarbitrated
 - run.json widenings survive a halt and resume
@@ -303,6 +315,7 @@
 - `grep -c "## Widened files" skills/planning/SKILL.md` passes
 - The Task structure template's `**Files:**` example and its prose state the bulleted-only grammar and that prose or glob entries are lint errors.
 - The inline finding-handling paragraph says a widening is listed at close-out unarbitrated and only a deletion halts.
+- The Claude close-out gate text lists every accepted widening and every unarbitrated one marked not reviewed, beside the staged deferrals, with no per-entry call.
 
 **Tier:** standard
 
