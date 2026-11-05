@@ -156,8 +156,11 @@ forge-run.py --status --run-dir DIR
    stated outcome, exit code and output tail.
 3a. Compute widenings with `forge_dispose.scope_widenings` (`execution` spec: Scope
    widening) against the record at `task-<N>/widenings.json` in the run dir, the path
-   every worker brief names. An out-of-scope deletion escalates `scope-delete` before
-   review; a record defect is a rework iteration naming the entry.
+   every worker brief names — after every worker turn: the cold attempt, each rework
+   resume, and each final-review fixer turn (against `final/widenings.json`). An
+   out-of-scope deletion escalates `scope-delete` before review; a record defect is a
+   rework iteration naming the entry. A trivial-tier task has no reviewer: its
+   widenings go to the close-out list unarbitrated, and its deletions still escalate.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists so the diff is assembled
@@ -587,6 +590,13 @@ staleness is never an exit condition.
   completed — lit-row glyph and spinner present, live-panel header names the current
   task, banner text and semantic color per state. `--latest` selects the newest dir; the
   reduced-motion path renders static.
+- Scope widening: a worker edit to an existing out-of-scope file is listed under
+  `## Widened files` with the record's `reason` and `serves`, or `no justification
+  given`; detection runs on the cold attempt, a rework resume and a final-review fixer
+  turn; an out-of-scope deletion escalates `scope-delete` before any reviewer dispatch
+  (exit 2, frozen); a defective record entry is a rework iteration naming the entry and
+  is never reviewed; a trivial-tier widening reaches the close-out list without review;
+  receipts carry the `widenings` block and `run.json` aggregates accepted widenings.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
