@@ -853,9 +853,9 @@ both harnesses. The record is the worker's whole current set, rewritten each tur
   `path` that is not a current widening, a duplicate `path`, an empty `reason`, or a
   non-null `serves` outside both sets is an **execution failure** naming the entry: the turn
   reworks under the rework loop's execution-failure rules and is never reviewed on it.
-- Accepted widenings (`accepted_widenings` in the convergence state, and `run.json`'s
-  `widenings`) survive a resume: a path accepted before a halt is not re-listed while
-  its content holds.
+- Accepted widenings survive a resume through the halt record's convergence state
+  (`accepted_widenings`) alone: a path accepted before a halt is not re-listed while its
+  content holds.
 
 **The packet.** Every review packet — discovery, verification, and a validation retry's
 cold fallback (a resumed validation retry already holds the section) — lists the widenings due a ruling under `## Widened files`: each path as a JSON string,
@@ -896,7 +896,11 @@ one `forge-light` run is checked once after the batch against the union of its t
 **Close-out.** Every accepted widening — task, path, lines added and removed, the
 worker's `reason` and `serves`, the reviewer's `reason` — is listed at the close-out
 gate beside the staged deferrals (Deferral handling). The list is informational: no
-per-entry call, nothing filed.
+per-entry call, nothing filed. An entry is listed only while its path is still a
+widening at the review's pass commit: `accepted` drops any `accepted_widenings` entry
+whose path no longer differs from `HEAD`, and `run.json` aggregates a review's accepted
+entries only from its passing receipt, never from an escalated one — so an edit later
+reverted, discarded at reconcile, or never replayed is never listed.
 
 ## Rework loop and convergence
 
