@@ -1299,6 +1299,30 @@ def apply_widening_rulings(verdict, due, scope, state, cwd):
     return rejected
 
 
+def widenings_block(state, widened, rejected, deleted):
+    """The review's ``widenings`` block (decision.json, and the runner's
+    receipts): every accepted widening so far, rebuilt from
+    ``state.accepted_widenings`` with line counts from the working tree
+    (``widened``, the ``Widening`` objects of the current detection), the
+    rejected ones' paths and identities, and the out-of-scope deletions. An
+    accepted path no longer among ``widened`` is not a widening any more and
+    is not listed."""
+    counts = {w.path: w for w in widened}
+    return {
+        "accepted": [
+            {"path": path, "reason": entry["reason"],
+             "serves": entry["serves"], "ruling_reason": entry["ruling_reason"],
+             "added": counts[path].added, "removed": counts[path].removed}
+            for path, entry in sorted(state.accepted_widenings.items())
+            if path in counts
+        ],
+        "rejected": [
+            {"path": f.file, "identity": f.identity} for f in rejected
+        ],
+        "deleted": list(deleted),
+    }
+
+
 def prune_accepted_widenings(state, result):
     """Drop every ``accepted_widenings`` entry whose path is no longer a
     widening (reverted, or now in scope)."""
@@ -1690,19 +1714,8 @@ def main(argv=None):
     advance_state(state, findings, acceptance_ok, args.failed_acceptance)
 
     decision = _build_decision(action, halt_reason, findings, state)
-    counts = {w.path: w for w in widened.widened}
-    decision["widenings"] = {
-        "accepted": [
-            {"path": path, "reason": entry["reason"],
-             "serves": entry["serves"], "ruling_reason": entry["ruling_reason"],
-             "added": counts[path].added, "removed": counts[path].removed}
-            for path, entry in sorted(state.accepted_widenings.items())
-        ],
-        "rejected": [
-            {"path": f.file, "identity": f.identity} for f in rejected
-        ],
-        "deleted": widened.deleted,
-    }
+    decision["widenings"] = widenings_block(
+        state, widened.widened, rejected, widened.deleted)
     if checklist is not None and verdict is not None:
         defects = validate_coverage(verdict, checklist, citable)
         decision["coverage_valid"] = not defects

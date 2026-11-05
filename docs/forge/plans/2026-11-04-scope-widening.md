@@ -265,7 +265,7 @@
 **Depends on:** Task 4
 
 ### Task 6: Widenings on receipts, run state and resume
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_receipts.py` (receipt `widenings` block; `run.json` `widenings` aggregate from passing receipts only, accepted and `unarbitrated` entries)

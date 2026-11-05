@@ -13,6 +13,8 @@ import unittest
 from _forge_support import *  # noqa: F401,F403
 import forge_common
 import forge_receipts
+import test_forge_final_review
+import test_forge_loop
 
 
 class WriteRunJsonProgressTests(unittest.TestCase):
@@ -340,3 +342,227 @@ class UnverifiedRunStateTests(unittest.TestCase):
             self.assertEqual(json.load(f)["unverified"], self.ENTRIES)
         with open(forge_run.write_final_review_receipt(d, verdict)) as f:
             self.assertNotIn("unverified", json.load(f))
+
+
+# --- Scope widening: receipts and run.json (Task 6) --------------------------
+
+_BLOCK = {
+    "accepted": [
+        {"path": "other.txt", "reason": "r", "serves": None,
+         "ruling_reason": "needed", "added": 2, "removed": 1}],
+    "rejected": [],
+    "deleted": [],
+}
+
+
+class WideningsRunJsonUnitTests(unittest.TestCase):
+    def _dir(self):
+        d = tempfile.mkdtemp(prefix="forge-widenings-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_run_json_carries_widenings_when_given_and_omits_them_otherwise(self):
+        d = self._dir()
+        entries = forge_receipts.aggregate_widenings([], "t1", _BLOCK)
+        forge_receipts.write_run_json(
+            d, "/p/plan.md", [], "running", [], "base", widenings=entries)
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertEqual(json.load(f)["widenings"], entries)
+        forge_receipts.write_run_json(d, "/p/plan.md", [], "running", [], "base")
+        with open(os.path.join(d, "run.json")) as f:
+            self.assertNotIn("widenings", json.load(f))
+
+    def test_aggregate_tags_scope_and_marks_unarbitrated(self):
+        block = dict(_BLOCK, unarbitrated=[
+            {"path": "cfg.json", "added": 1, "removed": 0,
+             "reason": "key", "serves": "t1.t1"}])
+        self.assertEqual(
+            forge_receipts.aggregate_widenings([], "t1", block),
+            [{"scope": "t1", "path": "other.txt", "added": 2, "removed": 1,
+              "reason": "r", "serves": None, "ruling_reason": "needed",
+              "unarbitrated": False},
+             {"scope": "t1", "path": "cfg.json", "added": 1, "removed": 0,
+              "reason": "key", "serves": "t1.t1", "ruling_reason": None,
+              "unarbitrated": True}])
+
+    def test_aggregating_a_scope_again_replaces_its_entries(self):
+        once = forge_receipts.aggregate_widenings([], "t1", _BLOCK)
+        other = forge_receipts.aggregate_widenings(once, "t2", _BLOCK)
+        again = forge_receipts.aggregate_widenings(other, "t1", _BLOCK)
+        self.assertEqual([e["scope"] for e in again], ["t2", "t1"])
+
+    def test_a_missing_block_aggregates_nothing(self):
+        self.assertEqual(forge_receipts.aggregate_widenings([], "t1", None), [])
+
+    def test_read_widenings_is_empty_when_absent_and_raises_when_malformed(self):
+        d = self._dir()
+        self.assertEqual(forge_receipts._read_widenings(d), [])
+        path = os.path.join(d, "run.json")
+        with open(path, "w") as f:
+            json.dump({"widenings": [{"scope": "t1"}]}, f)
+        with self.assertRaises(RuntimeError) as cm:
+            forge_receipts._read_widenings(d)
+        self.assertIn(path, str(cm.exception))
+        with open(path, "w") as f:
+            f.write("{not json")
+        with self.assertRaises(RuntimeError):
+            forge_receipts._read_widenings(d)
+
+
+class WideningReceiptTests(test_forge_loop.WideningCase):
+    def accepted_entry(self, **extra):
+        return dict({
+            "path": "other.txt", "reason": "shared helper moved",
+            "serves": None, "ruling_reason": "needed", "added": 1,
+            "removed": 0}, **extra)
+
+    def test_a_passing_task_receipt_carries_the_decisions_widenings_block(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.receipt()["widenings"], {
+            "accepted": [self.accepted_entry()], "rejected": [],
+            "deleted": []})
+
+    def test_a_rejected_widening_is_on_the_rework_receipt(self):
+        reject = {"verdict": "pass", "widenings": [
+            {"path": "other.txt", "ruling": "rejected", "reason": "churn"}]}
+        self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(reject),
+            self.worker({"op": "git", "args": ["checkout", "--", "other.txt"]},
+                        self.record_op([])),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail)
+        self.assertEqual(self.receipt(1)["widenings"], {
+            "accepted": [], "rejected": [
+                {"path": "other.txt", "identity": "t1:widen:other.txt"}],
+            "deleted": []})
+        self.assertEqual(self.receipt(2)["widenings"], {
+            "accepted": [], "rejected": [], "deleted": []})
+
+    def test_a_scope_delete_receipt_names_the_deleted_paths(self):
+        self.run_cli([self.worker(
+            {"op": "delete", "path": os.path.join(self.repo, "other.txt")})])
+        self.assertEqual(self.receipt()["widenings"]["deleted"], ["other.txt"])
+
+    def test_run_json_aggregates_accepted_widenings_from_a_passing_receipt(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.run_json()["widenings"], [{
+            "scope": "t1", "path": "other.txt", "added": 1, "removed": 0,
+            "reason": "shared helper moved", "serves": None,
+            "ruling_reason": "needed", "unarbitrated": False}])
+
+    def test_run_json_never_aggregates_from_an_escalated_receipt(self):
+        halting = json.loads(test_forge_loop._fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            repair_task=test_forge_loop.REPAIR_TASK))
+        halting["widenings"] = self.ACCEPT_PASS["widenings"]
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(halting),
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.receipt()["status"], "escalated")
+        self.assertEqual(self.receipt()["widenings"]["accepted"],
+                         [self.accepted_entry()])
+        self.assertNotIn("widenings", self.run_json())
+
+    def test_a_trivial_tasks_unarbitrated_widenings_reach_run_json(self):
+        self.write_plan(tier="trivial — test fixture, mechanical")
+        res = self.run_cli(
+            [self.worker(self.edit_op(), self.record_op([self.entry()]))]
+            + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.receipt()["widenings"]["unarbitrated"], [
+            {"path": "other.txt", "added": 1, "removed": 0,
+             "reason": "shared helper moved", "serves": None}])
+        self.assertEqual(self.run_json()["widenings"], [{
+            "scope": "t1", "path": "other.txt", "added": 1, "removed": 0,
+            "reason": "shared helper moved", "serves": None,
+            "ruling_reason": None, "unarbitrated": True}])
+
+    def test_an_accepted_widening_later_reverted_is_not_in_run_json(self):
+        first = json.loads(test_forge_loop._fix_findings_msg(
+            "f1.txt", "2", "needs a fix"))
+        first["widenings"] = self.ACCEPT_PASS["widenings"]
+        res = self.run_cli([
+            self.worker(self.edit_op("f1.txt"), self.edit_op(),
+                        self.record_op([self.entry()])),
+            self.reviewer(first),
+            self.worker({"op": "git", "args": ["checkout", "--", "other.txt"]},
+                        self.record_op([])),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.receipt(1)["status"], "rework")
+        self.assertEqual(self.receipt(1)["widenings"]["accepted"],
+                         [self.accepted_entry()])
+        self.assertEqual(self.receipt(2)["widenings"]["accepted"], [])
+        self.assertNotIn("widenings", self.run_json())
+
+    def test_a_final_review_widening_is_aggregated_under_the_final_scope(self):
+        final_fix = {"verdict": "findings", "findings": [{
+            "id": "f1", "summary": "needs a fix",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "improvement",
+            "contract_ref": None, "convergence": None, "carried_from": None,
+            "repair_task": None}]}
+        accept = {"verdict": "pass", "widenings": self.ACCEPT_PASS["widenings"]}
+        res = self.run_cli([
+            self.worker(self.edit_op("f1.txt")),
+            self.reviewer({"verdict": "pass"}),
+            self.reviewer(final_fix),
+            self.worker(self.edit_op(), self.record_op(
+                [self.entry()], scope="final")),
+            self.reviewer(accept),
+            {"exit": 0, "msg": json.dumps({"doc_sync": "clean"})},
+        ])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            receipt = json.load(f)
+        self.assertEqual(receipt["widenings"]["accepted"], [self.accepted_entry()])
+        self.assertEqual(self.run_json()["widenings"], [{
+            "scope": "final", "path": "other.txt", "added": 1, "removed": 0,
+            "reason": "shared helper moved", "serves": None,
+            "ruling_reason": "needed", "unarbitrated": False}])
+
+
+class FinalReceiptWideningTests(unittest.TestCase):
+    """The final review's passing receipt carries the final decision's
+    ``widenings`` block (the harness is ``FinalWideningTests``'s)."""
+
+    _src = test_forge_final_review.FinalWideningTests
+    setUp = _src.setUp
+    _set_env = _src._set_env
+    _git = _src._git
+    _responses = _src._responses
+    _loop = _src._loop
+    _fix_finding = _src._fix_finding
+    _fixer = _src._fixer
+    _edit_other = _src._edit_other
+    _record = _src._record
+    _accept = _src._accept
+
+    def test_a_passing_final_receipt_carries_the_final_widenings_block(self):
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            self._fixer(self._edit_other(), self._record([
+                {"path": "other.txt", "reason": "helper moved",
+                 "serves": "final:f1"}])),
+            self._accept(),
+        ])
+        self.assertEqual(self._loop().status, "passed")
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            block = json.load(f)["widenings"]
+        self.assertEqual(block, {
+            "accepted": [{"path": "other.txt", "reason": "helper moved",
+                          "serves": "final:f1", "ruling_reason": "needed",
+                          "added": 1, "removed": 0}],
+            "rejected": [], "deleted": []})

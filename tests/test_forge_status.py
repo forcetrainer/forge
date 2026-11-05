@@ -1221,3 +1221,78 @@ class UnverifiedHaltStatusTests(unittest.TestCase):
                        unverified=_UNVERIFIED)
             state = forge_status.read_run_state(d)
         self.assertIsNone(forge_status.unverified_halt_lines(state))
+
+
+# --- Scope widening: scope-delete halts and the close-out widenings list -----
+
+_WIDENINGS = [
+    {"scope": "t1", "path": "other.txt", "added": 6, "removed": 4,
+     "reason": "the helper moved", "serves": "t1.t2",
+     "ruling_reason": "needed for the move", "unarbitrated": False},
+    {"scope": "t2", "path": "cfg.json", "added": 1, "removed": 0,
+     "reason": "key added", "serves": None, "ruling_reason": None,
+     "unarbitrated": True},
+]
+
+
+class ScopeDeleteStatusTests(unittest.TestCase):
+    def _halt(self, reason, **extra):
+        return dict({
+            "task": 1, "attempt": 1, "freeze_commit": "a" * 40,
+            "freeze_base": "b" * 40, "convergence_state": {},
+            "halt_reason": reason, "findings": [], "approved": {},
+        }, **extra)
+
+    def test_status_renders_a_scope_delete_halt_with_its_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated", [_summary(1, "escalated")],
+                       halt=self._halt("scope-delete",
+                                       deleted=["other.txt", "dir/b.txt"]))
+            _write_receipt(d, 1, 1, "escalated",
+                           findings=["scope-delete: ..."],
+                           halt_reason="scope-delete")
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertIn("(scope-delete)", out)
+        self.assertIn("halted task 1 is resumable", out)
+        self.assertIn("deleted outside scope: other.txt, dir/b.txt", out)
+        self.assertIn("restore", out)
+        self.assertNotIn("--resolve", out)
+
+    def test_a_legacy_repair_out_of_scope_halt_is_still_rendered(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated", [_summary(1, "escalated")],
+                       halt=self._halt("repair-out-of-scope"))
+            _write_receipt(d, 1, 1, "escalated", findings=["out of scope"],
+                           halt_reason="repair-out-of-scope")
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertIn("(repair-out-of-scope)", out)
+        self.assertIn("halted task 1 is resumable", out)
+
+
+class WideningsCloseOutTests(unittest.TestCase):
+    def _out(self, status):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, status, [_summary(1, "passed")],
+                       widenings=_WIDENINGS)
+            return forge_status.render_status(forge_status.read_run_state(d))
+
+    def test_a_finished_run_lists_accepted_widenings_and_marks_unreviewed(self):
+        out = self._out("passed")
+        self.assertIn("widened files:", out)
+        self.assertIn('t1 "other.txt" +6 -4', out)
+        self.assertIn("reason: the helper moved", out)
+        self.assertIn("serves: t1.t2", out)
+        self.assertIn("ruling: needed for the move", out)
+        self.assertIn('t2 "cfg.json" +1 -0 — not reviewed', out)
+        self.assertIn("serves: none", out)
+
+    def test_a_running_run_shows_only_a_count(self):
+        out = self._out("running")
+        self.assertIn("widened files: 2", out)
+        self.assertNotIn("the helper moved", out)
+
+    def test_a_run_without_widenings_prints_nothing_about_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "passed", [_summary(1, "passed")])
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertNotIn("widened", out)

@@ -150,6 +150,8 @@ from forge_receipts import (  # noqa: F401
     write_run_json,
     _read_approved,
     _read_unverified,
+    _read_widenings,
+    aggregate_widenings,
     write_watch_launcher,
 )
 
@@ -1323,6 +1325,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         coverage_retry = False
         reviewer_resume_fallback = False
         reviewer_wrote = None  # RepositoryChangedError when the reviewer wrote
+        rejected = []       # fix findings raised for rejected widenings
         failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
         if deleted:
@@ -1555,6 +1558,21 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         elif deleted:
             outstanding = [cause]
 
+        # The review's `widenings` block (decision.json's shape); a trivial
+        # task's, which no reviewer ruled on, ride as `unarbitrated`.
+        widen_block = None
+        unarbitrated = []
+        if widen is not None:
+            widen_block = forge_dispose.widenings_block(
+                state, widen.widened, rejected, deleted)
+            if task.tier == "trivial":
+                unarbitrated = [
+                    {"path": w.path, "added": w.added, "removed": w.removed,
+                     "reason": w.reason, "serves": w.serves}
+                    for w in widen.widened
+                ]
+                widen_block["unarbitrated"] = unarbitrated
+
         receipt = {
             "task_number": task.number,
             "title": task.title,
@@ -1574,6 +1592,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             "coverage_skipped": coverage_skipped,
             "coverage_retry": coverage_retry,
             "resume_fallback": worker_resume_fallback or reviewer_resume_fallback,
+            "widenings": widen_block,
             # The reconciliation outcome, on the attempt that resumed a frozen
             # halt (Halt resolution: the reconciliation outcome is recorded on
             # the receipt). None on every other attempt.
@@ -1592,19 +1611,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         write_receipt(run_dir, task, attempt, receipt)
 
         if action == "pass":
-            unarbitrated = []
-            if task.tier == "trivial" and widen is not None:
-                # No reviewer: the widenings, with the record's justification,
-                # go to the close-out list unarbitrated. The task is checked
-                # once, against its own Files (a batch of one).
-                unarbitrated = [
-                    {"tasks": [task.number], "path": w.path,
-                     "added": w.added, "removed": w.removed,
-                     "reason": w.reason, "serves": w.serves}
-                    for w in widen.widened
-                ]
-            return TaskOutcome(status="passed", attempts=attempt, summary="",
-                               deferrals=deferrals, widenings=unarbitrated)
+            # No reviewer for a trivial task: its widenings, with the
+            # record's justification, go to the close-out list unarbitrated.
+            # The task is checked once, against its own Files (a batch of one).
+            return TaskOutcome(
+                status="passed", attempts=attempt, summary="",
+                deferrals=deferrals,
+                widenings=[dict(u, tasks=[task.number]) for u in unarbitrated])
         if action == "halt":
             if halt_out is not None:
                 # Everything the caller needs to freeze this attempt and write
@@ -2160,11 +2173,16 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             plan_path, _checklist_spec(plan_path, spec_paths),
         )
 
+    # The widenings of the latest detection: a lap with no fixer turn runs
+    # none, and the content an earlier lap accepted still holds then.
+    final_widened = []
+    final_deleted = []
     attempt = 0
     while True:
         attempt += 1
         exec_ok = True
         findings = []
+        rejected = []   # fix findings raised for rejected widenings this lap
         # Pre-repair snapshot (Delta-scoped verification packets spec): taken
         # just before this attempt's fix dispatch so a later verification
         # packet's delta is `forge_git.repair_delta` against the snapshot, scoped to this
@@ -2221,6 +2239,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     cwd, plan_path, legacy_spec, "final", run_base, state,
                     widen_record)
                 forge_dispose.prune_accepted_widenings(state, widen)
+                final_widened, final_deleted = widen.widened, widen.deleted
             if widen is not None and widen.deleted:
                 guidance = _scope_delete_guidance(widen.deleted, "the final-review fixer")
                 write_final_review_halt(run_dir, "scope-delete", [guidance])
@@ -2411,6 +2430,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
             resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
             unverified=unverified or None,
+            widenings=(
+                forge_dispose.widenings_block(
+                    state, final_widened, rejected, final_deleted)
+                if plan_path is not None else None),
         )
 
         if action == "pass":
@@ -3049,6 +3072,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # is never lost when this invocation's own accumulator starts fresh; every
     # task still executed this invocation appends its own seeds in place.
     seeded_findings = list(_read_seeded_findings(run_dir) or [])
+    # Widenings aggregate from passing receipts (Receipts and run state) and
+    # are read back like `deferrals`: a passed task is skipped on resume, so
+    # an accumulator that started empty would erase its entries.
+    widenings = _read_widenings(run_dir)
 
     # Incremental run.json: write `running` before the first task so --status/the
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
@@ -3058,7 +3085,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    started_at=run_started, pid=run_pid, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
                    deferrals=deferrals or None, approved=approved_ids or None,
-                   unverified=unverified or None)
+                   unverified=unverified or None,
+                   widenings=widenings or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -3093,7 +3121,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
                        deferrals=deferrals or None, approved=approved_ids or None,
-                       unverified=unverified or None)
+                       unverified=unverified or None,
+                       widenings=widenings or None)
         # Resume a frozen scope-decision halt on the task it names: replay the
         # paused attempt onto the fixed tree, then hand execute_task the
         # reconciliation context. `restore_freeze`'s own return value decides
@@ -3165,6 +3194,12 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             "ended_at": utc_iso(),
         })
         if outcome.status == "passed":
+            # The passing receipt, and only a passing one, carries the
+            # widenings this task adds to the run's close-out list.
+            widenings = aggregate_widenings(
+                widenings, "t{}".format(task.number),
+                (_read_latest_receipt(run_dir, task.number) or {}).get(
+                    "widenings"))
             annotate_ledger(
                 plan_path, task, "passed, {} attempt(s)".format(outcome.attempts)
             )
@@ -3182,6 +3217,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 seeded_findings=seeded_findings or None, halt=halt_state,
                 deferrals=deferrals or None, approved=approved_ids or None,
                 unverified=unverified or None,
+                widenings=widenings or None,
             )
         else:
             reviewer_wrote = halt_out.get("reviewer_wrote")
@@ -3252,6 +3288,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                         deferrals=deferrals or None,
                         approved=approved_ids or None,
                         unverified=unverified or None,
+                        widenings=widenings or None,
                     )
 
                 freeze_commit = _freeze_reviewer_wrote(
@@ -3300,7 +3337,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
                        deferrals=deferrals or None, approved=approved_ids or None,
-                       unverified=unverified or None)
+                       unverified=unverified or None,
+                       widenings=widenings or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -3323,6 +3361,15 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 unverified=unverified,
             )
             unverified = final_outcome.unverified
+            if final_outcome.status == "passed":
+                try:
+                    with open(os.path.join(run_dir, "final-review.json"),
+                              encoding="utf-8") as f:
+                        final_block = json.load(f).get("widenings")
+                except (OSError, ValueError) as e:
+                    raise RuntimeError(
+                        "cannot read the final review receipt: {}".format(e))
+                widenings = aggregate_widenings(widenings, "final", final_block)
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
             if final_outcome.status == "escalated":
@@ -3342,6 +3389,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                         deferrals=deferrals or None,
                         approved=approved_ids or None,
                         unverified=unverified or None,
+                        widenings=widenings or None,
                     ),
                 )
             elif _open_unverified(unverified):
@@ -3397,7 +3445,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    doc_sync=doc_sync_record, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
                    approved=approved_ids or None,
-                   unverified=unverified or None)
+                   unverified=unverified or None,
+                   widenings=widenings or None)
     return 0 if overall == "passed" else 2
 
 
@@ -3618,6 +3667,10 @@ def main(argv=None):
                     prior_unverified = _read_unverified(run_dir)
                 except RuntimeError:
                     prior_unverified = []
+                try:
+                    prior_widenings = _read_widenings(run_dir)
+                except RuntimeError:
+                    prior_widenings = []
                 specs = _read_specs(run_dir)
                 if specs is None:
                     try:
@@ -3635,6 +3688,7 @@ def main(argv=None):
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
                     halt=prior_halt, approved=prior_approved or None,
                     unverified=prior_unverified or None,
+                    widenings=prior_widenings or None,
                 )
             except OSError:
                 pass
