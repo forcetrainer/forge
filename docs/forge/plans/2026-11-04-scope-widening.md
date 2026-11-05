@@ -304,7 +304,7 @@
 **Depends on:** Task 5
 
 ### Task 7: Skill canon for both harnesses
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (Task structure: `**Files:**` grammar and requirement; field clause grammar names `**Files:**`; Claude dispatch loop: `forge_dispose.py widened` after every worker turn, record path in every brief, `## Widened files` pasted into the reviewer prompt, `--plan`/`--widenings` on the decision, `--repair-snapshot` and `repair-out-of-scope` removed; inline: widenings to the close-out list, deletion halts; close-out lists accepted and not-reviewed widenings)
