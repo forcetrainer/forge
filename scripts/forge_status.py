@@ -229,6 +229,8 @@ def read_run_state(run_dir, now=None):
                 "tier": s.get("tier"),
                 "started_at": s.get("started_at"),
                 "ended_at": s.get("ended_at"),
+                "first_started_at": s.get("first_started_at"),
+                "active_secs": s.get("active_secs"),
             }
         )
 

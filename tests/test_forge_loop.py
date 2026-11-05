@@ -926,6 +926,42 @@ class FreezeEveryHaltClassTests(unittest.TestCase):
         self.assertIn("OK", show)
         self.assertEqual(self._porcelain(), "")
 
+    def test_a_resumed_task_keeps_its_first_start_and_carries_active_time(self):
+        # A halt ends the task's timing segment; a resume opens a new one. The
+        # per-task timer must not restart: first_started_at keeps the first
+        # start, and active_secs carries every closed segment forward.
+        self._set_plan(PLAN_REGRESSION)
+        res = self._run([
+            {"exit": 0, "msg": "", "append_file": self.f1, "append_text": "OK\n"},
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "needs work")},
+            {"exit": 0, "msg": "", "append_file":
+                os.path.join(self.d, "fail_flag"), "append_text": "x\n"},
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        run_json = os.path.join(self.run_dir, "run.json")
+        with open(run_json) as f:
+            data = json.load(f)
+        # Pin the halted segment to known times: a 5-minute first segment.
+        data["tasks"][0]["started_at"] = "2026-01-01T00:00:00Z"
+        data["tasks"][0]["ended_at"] = "2026-01-01T00:05:00Z"
+        data["tasks"][0]["first_started_at"] = "2026-01-01T00:00:00Z"
+        data["tasks"][0]["active_secs"] = 0
+        with open(run_json, "w") as f:
+            json.dump(data, f)
+
+        res2 = self._run([
+            {"exit": 0, "msg": "", "file_ops": [
+                {"op": "delete", "path": os.path.join(self.d, "fail_flag")}]},
+            {"exit": 0, "msg": _pass_msg()},
+        ])
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        with open(run_json) as f:
+            task = json.load(f)["tasks"][0]
+        self.assertEqual(task["status"], "passed")
+        self.assertEqual(task["first_started_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(task["active_secs"], 300)
+        self.assertNotEqual(task["started_at"], "2026-01-01T00:00:00Z")
+
     def test_stuck_halt_freezes_and_leaves_tree_clean(self):
         self._set_plan(PLAN_STD)
         head = self._git("rev-parse", "HEAD").strip()

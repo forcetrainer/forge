@@ -338,3 +338,34 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskElapsedTests(unittest.TestCase):
+    """A task's elapsed is its active time — closed segments carried in
+    active_secs plus the current segment — and, once resumed, the wall-clock
+    span since its first start beside it."""
+
+    NOW = forge_status._parse_iso("2026-07-15T10:00:00Z")
+
+    def test_a_never_resumed_task_shows_only_its_segment(self):
+        t = {"status": "running", "started_at": "2026-07-15T09:58:00Z",
+             "ended_at": None, "first_started_at": "2026-07-15T09:58:00Z",
+             "active_secs": 0}
+        self.assertEqual(forge_monitor._task_elapsed(t, self.NOW), "2:00")
+
+    def test_a_resumed_running_task_shows_active_then_wall_clock(self):
+        t = {"status": "running", "started_at": "2026-07-15T09:58:00Z",
+             "ended_at": None, "first_started_at": "2026-07-15T09:00:00Z",
+             "active_secs": 300}
+        self.assertEqual(forge_monitor._task_elapsed(t, self.NOW), "7:00 (60:00)")
+
+    def test_a_resumed_passed_task_stops_at_its_end(self):
+        t = {"status": "passed", "started_at": "2026-07-15T09:50:00Z",
+             "ended_at": "2026-07-15T09:51:00Z",
+             "first_started_at": "2026-07-15T09:00:00Z", "active_secs": 600}
+        self.assertEqual(forge_monitor._task_elapsed(t, self.NOW), "11:00 (51:00)")
+
+    def test_a_run_json_without_the_new_fields_shows_the_segment(self):
+        t = {"status": "passed", "started_at": "2026-07-15T09:00:00Z",
+             "ended_at": "2026-07-15T09:00:41Z"}
+        self.assertEqual(forge_monitor._task_elapsed(t, self.NOW), "0:41")

@@ -90,6 +90,23 @@ def _elapsed_secs(started_at, ended_at, now):
     return end - start
 
 
+def _task_elapsed(task, now):
+    """A task's elapsed text: active time — the closed segments carried in
+    ``active_secs`` plus the current segment, which ends at ``ended_at`` or
+    runs to ``now`` — and, for a task resumed after a halt, the wall-clock
+    span since ``first_started_at`` in parentheses."""
+    segment = _elapsed_secs(task.get("started_at"), task.get("ended_at"), now)
+    if segment is None:
+        return _fmt_elapsed(None)
+    active = (task.get("active_secs") or 0) + segment
+    text = _fmt_elapsed(active)
+    first = task.get("first_started_at")
+    if first and first != task.get("started_at"):
+        wall = _elapsed_secs(first, task.get("ended_at"), now)
+        text += " ({})".format(_fmt_elapsed(wall))
+    return text
+
+
 def _status_label(state):
     st = state["state"]
     if st == "running":
@@ -136,8 +153,8 @@ def _ledger_panel(state, now, frame):
         else:
             phase = {"passed": "passed", "queued": "queued",
                      "escalated": "escalated"}.get(st, st or "")
-        elapsed = _fmt_elapsed(_elapsed_secs(t.get("started_at"), t.get("ended_at"), now)
-                               if st in ("passed", "running", "escalated") else None)
+        elapsed = (_task_elapsed(t, now) if st in ("passed", "running", "escalated")
+                   else _fmt_elapsed(None))
         rowstyle = Style(color=FG if st in ("running", "passed") else DIM,
                          bold=(st == "running"))
         table.add_row(
