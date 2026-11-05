@@ -335,8 +335,7 @@
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`scope_widenings` takes the checkpoint; scope read from the plan at the checkpoint; existence, deletion, final run-diff paths, pruning and line counts checkpoint-relative; `--checkpoint` on `widened` and the decision CLI)
-- Modify: `scripts/forge-run.py` (record each stage's checkpoint once per invocation before its first worker dispatch, task and final, hold it across rework laps, and pass it; never read `HEAD` for detection afterwards; after every worker turn a commit other than the runner's own escalates `worker-committed`, frozen, no `--resolve`)
-- Modify: `scripts/forge_git.py` (the `worker-committed` freeze parks commits and uncommitted work relative to the checkpoint and resets the branch ref to it)
+- Modify: `scripts/forge-run.py` (record each stage's checkpoint once per invocation before its first worker dispatch, task and final, hold it across rework laps, and pass it; never read `HEAD` for detection afterwards; after every worker turn `HEAD` must equal the checkpoint on the recorded branch, else `worker-committed`, ordinary freeze, no `--resolve`)
 - Modify: `scripts/forge_status.py` (`worker-committed` rendered with its commits)
 - Test: `tests/test_forge_resume.py`
 - Test: `tests/test_forge_status.py`
@@ -345,15 +344,15 @@
 - Test: `tests/test_forge_loop.py`
 - Test: `tests/test_forge_final_review.py`
 
-**Spec:** [execution] Scope widening, [execution] The shared decision helper, [execution] Commit discipline, [execution] Rework loop and convergence, [execution] Reviewer write discipline, [codex-runner] Task loop, [codex-runner] Worker isolation, [codex-runner] Testing
+**Spec:** [execution] Scope widening, [execution] The shared decision helper, [execution] Commit discipline, [execution] Rework loop and convergence, [execution] Halt resolution, [codex-runner] Task loop, [codex-runner] Testing
 
 **Interface:**
 - `forge_dispose.scope_widenings(cwd, plan_path, spec_path, scope, base, checkpoint, state, record_path) -> WideningResult` — `checkpoint` is a commit sha; the plan's `**Files:**` are parsed from `git show <checkpoint>:<plan_path>`; raises `RuntimeError` naming the cause when the plan does not exist at the checkpoint or `checkpoint` is not a commit.
 - CLI: `widened` and the decision take a required `--checkpoint <sha>`; omitted is a usage error naming the flag.
 
 **Tests:**
-- a worker that commits an out-of-scope edit during its turn still has that path detected as a widening
-- a worker that commits an out-of-scope deletion still halts scope-delete
+- scope_widenings given a checkpoint older than a commit holding an out-of-scope edit still lists that path as a widening
+- scope_widenings given a checkpoint older than a commit holding an out-of-scope deletion still lists that path as deleted
 - a worker that adds a path to its task's Files in the plan's working copy does not put that path in scope
 - scope is read from the plan as committed at the checkpoint
 - a plan amendment committed before the turn does change scope
@@ -361,16 +360,17 @@
 - an accepted widening is pruned when its path no longer differs from the checkpoint
 - decision.json line counts are measured from the checkpoint
 - the runner records each stage's checkpoint before its first worker dispatch and passes the same checkpoint on every rework and final-fixer turn of that stage
-- a worker that commits an out-of-scope edit on one lap still has it listed on the next lap
+- the checkpoint recorded at a stage's first dispatch is the one passed on its later rework laps
 - a resumed task's checkpoint is HEAD at the new invocation so a human's committed fix is not a widening
 - a final stage whose last task's commit was skipped still has a checkpoint
 - an orchestrator amendment to a running task's Files committed alone moves that task's checkpoint and review base to the amendment commit
 - a worker that commits during a task turn halts worker-committed naming the commit before detection runs
 - a final-review fixer that commits halts worker-committed
 - --resolve naming a worker-committed halt is a contract error
-- the worker-committed freeze leaves the branch at the checkpoint with the worker's commit unreachable and its committed and uncommitted work parked together
-- on resume the frozen worker-committed work replays as uncommitted changes and its out-of-scope edit is detected as a widening
-- a commit the human makes before resuming sits inside the fresh checkpoint and is not a widening
+- a worker that resets, amends, switches branch or detaches HEAD halts worker-committed
+- a trivial-tier worker's commit halts worker-committed
+- the worker-committed freeze moves no ref and the halt record names the recorded and current HEAD, the branch and every commit between them
+- a resumed run whose human kept the worker's commit records a fresh checkpoint containing it and is not halted again for it
 - status renders a worker-committed halt with its commits
 - a checkpoint that is not a commit raises naming the cause and the CLI exits 1
 - omitting --checkpoint is a usage error naming the flag

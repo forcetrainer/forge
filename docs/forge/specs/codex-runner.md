@@ -159,11 +159,12 @@ forge-run.py --status --run-dir DIR
    review is acted on (`execution` spec: Scope widening):
    - **Worker-commit check:** `HEAD` against the stage's checkpoint (recorded once per
      stage per invocation, before the stage's first worker dispatch, held across its
-     rework laps); any commit between them escalates `worker-committed`, naming each
-     commit. The runner makes no commit mid-stage, and a plan amendment on Codex lands
-     between invocations, inside the next checkpoint. Its freeze parks the worker's
-     commits and uncommitted changes relative to the checkpoint and resets the branch
-     to it; resume replays them as uncommitted work. `--resolve` is refused for it.
+     rework laps) on the branch it was recorded on; anything else — an added commit, a
+     reset, an amend, a branch switch, a detached `HEAD` — escalates `worker-committed`,
+     naming the recorded and current `HEAD` and branch and every commit between them.
+     The runner makes no commit mid-stage, and a plan amendment on Codex lands between
+     invocations, inside the next checkpoint. The freeze is the ordinary one and moves
+     no ref; `--resolve` is refused for it.
    - **Detection:** `forge_dispose.scope_widenings` from that checkpoint, against the
      record at `task-<N>/widenings.json` (`final/widenings.json` for the final review),
      the path every worker brief names. An out-of-scope deletion escalates
@@ -230,8 +231,7 @@ forge-run.py --status --run-dir DIR
   parented on the fingerprint's recorded HEAD), the reviewer's changes go into the halt
   record as the fingerprint diff, and the working tree, HEAD and branch return to the
   recorded checkpoint: the branch ref is reset to the recorded HEAD sha and HEAD
-  re-attached to it — one of the two places the runner moves a ref, the other being the
-  `worker-committed` freeze (`execution` spec: Scope widening); a reviewer-made commit is
+  re-attached to it, the one place the runner moves a ref; a reviewer-made commit is
   named by sha in the halt record and left unreachable, never deleted. The fingerprint is the working tree via the
   temporary-index capture `freeze_attempt` already uses, factored out (tracked and
   untracked non-ignored content, the real index untouched), plus the real index's
@@ -611,11 +611,10 @@ staleness is never an exit condition.
   an out-of-scope deletion in a turn whose acceptance failed still escalates
   `scope-delete`; after a resume, a path accepted before the halt is not re-listed
   while its content holds.
-- Checkpoint: a worker that commits during a turn halts `worker-committed` naming the
-  commit, before detection; its freeze leaves the branch at the checkpoint with the
-  commit unreachable and parks the committed and uncommitted work together; on resume
-  that work replays uncommitted and is detected and reviewed; `--resolve` naming a
-  `worker-committed` halt is a contract error; a worker that adds a path to its task's
+- Checkpoint: a worker that commits, resets, amends, switches branch or detaches `HEAD`
+  during a turn halts `worker-committed` before detection, naming the commits; its freeze
+  moves no ref; `--resolve` naming a `worker-committed` halt is a contract error; a
+  trivial-tier worker's commit halts the same way; a worker that adds a path to its task's
   `**Files:**` in the plan's working copy gains no scope; a resumed task's checkpoint is
   `HEAD` at the new invocation, so a human's committed fix is not a widening; a final
   stage whose last task's commit was skipped still has a checkpoint; a git failure in

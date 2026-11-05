@@ -162,8 +162,7 @@ left**, enforced by the orchestrator, not by a sandbox.
   class-aware brief names the reviewer write as the cause of the halt. Because the
   fingerprint also records HEAD and the branch, the halt path restores them too — the
   branch ref is pointed back at the recorded HEAD sha and HEAD re-attached to that
-  branch — one of the two places the orchestrator ever moves a ref (the other is the
-  `worker-committed` freeze, Scope widening), so a reviewer-made commit
+  branch — the one place the orchestrator ever moves a ref, so a reviewer-made commit
   or branch switch cannot survive into the resumed run; such a commit's sha is named in
   the halt record and otherwise left unreachable, never deleted. It is not a contract error (which writes no receipt and
   freezes nothing). The freeze, the ref restore and the tree's return to the checkpoint
@@ -822,17 +821,16 @@ committed alone, and that task's checkpoint and review base move to the amendmen
 commit.
 
 **A worker commit halts.** After every worker turn, before detection, the orchestrator
-compares `HEAD` with the stage's checkpoint plus any amendment commit it made itself; any
-other commit halts `worker-committed`, naming each commit. Workers never commit (Commit
-discipline), and a commit left on the branch would sit inside the resumed invocation's
-fresh checkpoint, out of detection's reach. So its freeze parks the worker's work
-**relative to the checkpoint** — the commits and any uncommitted changes together — then
-points the branch ref back at the checkpoint and re-attaches `HEAD`, as the
-`reviewer-wrote` halt restores its recorded `HEAD`; the commits are named by sha in the
-halt record and left unreachable, never deleted. Nothing a worker committed reaches the
-mainline: on resume the frozen work replays as uncommitted changes under a fresh
-checkpoint, where detection and review see it. A commit the human makes before
-re-invoking is the human's, and sits inside that checkpoint. It takes no `--resolve`.
+checks that `HEAD` equals the stage's checkpoint — or the orchestrator's own latest
+amendment commit — on the branch the checkpoint was recorded on. Anything else halts
+`worker-committed`: an added commit, a reset, an amend, a branch switch, a detached
+`HEAD`. The halt record names the recorded and current `HEAD` and branch and every commit
+between them. Workers never commit (Commit discipline), and a commit kept past a halt
+sits inside the resumed invocation's fresh checkpoint, out of detection's reach — so
+the human decides on resume whether it stays. The freeze is the ordinary one (Halt
+resolution): it parks the uncommitted attempt and moves no ref, so the commits stay
+where the worker left them for the human to keep, rewrite or drop. It takes no
+`--resolve`.
 
 **A widening** is a path, existing at the checkpoint, that the checkpoint against the
 working tree modifies, outside scope. Comparing from the recorded checkpoint, not
@@ -1000,7 +998,9 @@ the other classes do not pose.
 **Freeze.** The in-progress attempt is captured as a commit — **untracked files
 included**, since a task built from new files is otherwise captured as empty — retained
 under a forge-owned ref so it is never garbage-collected, and recorded in run state. The
-working tree then returns to the last committed checkpoint.
+working tree then returns to the last committed checkpoint — `HEAD`, the branch's last
+commit, throughout this section; not Scope widening's stage checkpoint, which a freeze
+never moves the branch to.
 
 The freeze is **parked off the mainline, never stacked on it**. Were it committed onto
 the branch, the human's fix would land on top of it and the resumed task's review base
