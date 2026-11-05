@@ -893,7 +893,8 @@ unarbitrated, as inline's do; its deletions still halt. A trivial batch dispatch
 one `forge-light` run is checked once after the batch against the union of its tasks'
 `**Files:**`, and its widenings are listed tagged with the batch's task numbers.
 
-**Close-out.** Every accepted widening — task, path, lines added and removed, the
+**Close-out.** Every accepted widening, and every trivial-tier or inline one marked
+not reviewed — task, path, lines added and removed, the
 worker's `reason` and `serves`, the reviewer's `reason` — is listed at the close-out
 gate beside the staged deferrals (Deferral handling). The list is informational: no
 per-entry call, nothing filed. An entry is listed only while its path is still a
@@ -1350,7 +1351,7 @@ gate and the labels). Staged deferrals persist across a resume rather than being
 by the current invocation's entries, so an earlier stage's entries are never erased. The
 end-of-plan summary lists them. The same gate presents the final review's `unverified`
 findings (The disposition matrix), each with its reviewer's reason, for the same
-three-way call — accept, defer, repair. It also lists every accepted widening (Scope
+three-way call — accept, defer, repair. It also lists every accepted widening, and every unarbitrated one marked not reviewed (Scope
 widening), informational, with no call asked for.
 
 Implementers may defer **non-spec scope only** — nice-to-haves, refactors, edge polish.
