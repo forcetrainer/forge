@@ -150,7 +150,7 @@ lean on; Codex CLI doesn't, so forge supplies it.
 | Isolation between tasks | Native worktrees | Process boundary (no worktree; sequential on the working tree) |
 | Halt visibility | Native session awareness | Foreground-only invocation — a halt relays into the conversation on non-zero exit |
 | Commits | Native review/commit flow | Explicit per-task commits (`forge: task N — <title>`) written by the runner |
-| Progress view | In-session | Optional live `rich` TUI (`sh .forge/watch`) reading run receipts |
+| Progress view | In-session status line every 10 minutes (task, stage, agent, elapsed, last progress step); an agent idle without its report is named and nudged | Optional live `rich` TUI (`sh .forge/watch`) reading run receipts |
 
 Full Codex operational detail — invocation, `--status`, the monitor, resume
 after a halt, and known Codex caveats — is in
