@@ -69,13 +69,21 @@ were labeled "improvement" and only got fixed because a human insisted. Provenan
 by contrast, is a mechanical fact the runner checks against the diff. So the line
 is drawn there: fix everything this task wrote; never fix in-loop what it didn't.
 
-The other half of that line guards the fix itself. An autonomous fixer's failure
-mode is *over*-fixing — wandering into code that wasn't part of the problem. After
-every rework lap the runner checks the repair: if it modified or deleted a file
-the task hadn't already touched, the run **halts** (`repair-out-of-scope`) naming
-the files. Creating a new file (a test, a helper) is fine; it changes no existing
-code. The check is file-level, so an edit elsewhere inside an already-touched file
-passes it.
+The other half of that line guards the work itself. An autonomous worker's failure
+mode is *over*-reaching — wandering into code that wasn't part of the problem. But a
+plan can't name every file a task will need, and stopping for a human on every edit
+outside it turned into a speed bump: nearly every such halt was approved. So forge
+**arbitrates** instead. After every worker turn — first attempt and every rework lap
+— the runner lists each existing file the worker modified outside its task's
+`**Files:**` (a *widening*), and the worker must say why in a record: the reason and
+the finding or requirement it serves. The reviewer rules on each one, accepted or
+rejected. A rejection is a fix finding — the worker reverts or argues back, and a
+second rejection halts as `stuck` for the human. Accepted widenings are listed at
+close-out. Creating a new file is never a widening. Two things still halt outright:
+deleting an existing file outside scope (`scope-delete`), and a worker commit
+(`worker-committed`) — detection diffs from a checkpoint recorded before the stage
+started, and scope is read from the plan as committed there, so a worker can't widen
+its own scope by editing the plan or hide an edit by committing it.
 
 This also answers "harmless vs. harmful deferral." A harmless deferral is an
 improvement to code this task didn't write — it is staged as a deferral and the run
@@ -107,7 +115,7 @@ into the review packet) and labels each current finding:
 The runner then decides deterministically, in this precedence:
 
 1. **Gate mode** + any finding → **halt** (the conservative escape hatch, below).
-   A repair that touched a file outside the task's diff → **halt** (`repair-out-of-scope`).
+   An existing file deleted outside the task's scope → **halt** (`scope-delete`); a rejected widening is a fix finding like any other.
 2. Any **halt-disposition** finding (pre-existing × contract-breaking) → **halt** (scope decision).
 3. **Regression** → **halt**: a previously *resolved* finding reappears, or acceptance went green→red. This is the "shuffling bad state to bad state" case — a fix undid an earlier fix, or broke the build.
 4. **Stuck** → **halt**: a fix finding is *carried* across two consecutive attempts with nothing resolved — the worker can't crack it.

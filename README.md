@@ -112,7 +112,9 @@ scales with risk: trivial
 tasks just pass their acceptance commands; bigger tasks get a real review
 that **classifies** each finding — **fix** it, **defer** it (logged), or
 **halt** for a human decision — and reworks until findings *converge* rather
-than for a fixed number of rounds. A final review runs the same loop over the
+than for a fixed number of rounds. A worker may edit a file its task didn't
+declare if it says why; the reviewer accepts or rejects each one, and accepted
+ones are listed at close-out. A final review runs the same loop over the
 whole diff. [**The execution loop**](docs/forge/execution-loop.md) is the
 full explanation of this cycle, including why it's the same decision logic on
 both harnesses.
