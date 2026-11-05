@@ -820,6 +820,14 @@ never changes a scope. An orchestrator amendment to a running task's `**Files:**
 committed alone, and that task's checkpoint and review base move to the amendment
 commit.
 
+**A worker commit halts.** After every worker turn, before detection, the orchestrator
+compares `HEAD` with the stage's checkpoint plus any amendment commit it made itself; any
+other commit halts `worker-committed`, naming each commit. Workers never commit (Commit
+discipline), and a commit that survived a halt would sit inside the resumed invocation's
+fresh checkpoint, out of detection's reach — so the human decides on resume whether it
+stays. It freezes like every halt class (Halt resolution) and takes no `--resolve`; the
+resumed invocation's fresh checkpoint includes whatever commits the human kept.
+
 **A widening** is a path, existing at the checkpoint, that the checkpoint against the
 working tree modifies, outside scope. Comparing from the recorded checkpoint, not
 `HEAD`, is what keeps a worker's own commit from hiding its edit: a committed change is
@@ -959,10 +967,10 @@ against slow oscillation, not the primary stop. The runner owns the authoritativ
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
 still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
 `backstop`, `gate`, `scope-delete` — `forge_common.HALT_REASONS`, what
-`convergence_decision` can return. Two further halt **classes** are raised outside it and
-never appear in `decision.json`: `reviewer-wrote` (Reviewer write discipline) and
-`unverified` (The disposition matrix). The receipt and halt-record `halt_reason` field
-accepts all eight, and also reads `repair-out-of-scope` from a record written before
+`convergence_decision` can return. Three further halt **classes** are raised outside it and
+never appear in `decision.json`: `reviewer-wrote` (Reviewer write discipline),
+`worker-committed` (Scope widening) and `unverified` (The disposition matrix). The
+receipt and halt-record `halt_reason` field accepts all nine, and also reads `repair-out-of-scope` from a record written before
 Scope widening: such a run resumes like any halt class, and the reconciled task runs
 under Scope widening.
 
@@ -1109,7 +1117,7 @@ other cell.
 ```
 python3 forge_dispose.py \
   --verdict <verdict.json> \      # the reviewer's proposed verdict
-  --base <sha> \                  # diff base: prior commit (per task) | run-start HEAD (final)
+  --base <sha> \                  # diff base: prior commit, or the task's plan-amendment commit (per task) | run-start HEAD (final)
   --checkpoint <sha> \            # the stage's checkpoint (Scope widening): HEAD recorded once per stage per invocation before its first worker dispatch; required
   --state <state.json> \          # prior ConvergenceState (empty/absent on attempt 1)
   --attempt <N> \
@@ -1205,7 +1213,7 @@ the orchestrator's role there. Per task, in order:
    the turn's execution failure; otherwise the widenings due a ruling go into the
    reviewer's input.
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
-   commit), covering spec compliance and code quality together. On a rework re-review
+   commit, or the task's plan-amendment commit when one was made — Commit discipline), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
    prompt so the reviewer can label `resolved`/`carried`/`new`. Fingerprint the repository
    before the dispatch and after it returns; a mismatch halts as a `reviewer-wrote`
@@ -1448,7 +1456,12 @@ is open work (issue #52).
   stashed.
 - **Commit per passed task**, before the next dispatches, so HEAD advances to a clean
   checkpoint after every task. Rework laps ride inside that task's commit. On Claude the
-  orchestrator commits; on Codex the runner does.
+  orchestrator commits; on Codex the runner does. Workers never commit; a worker commit
+  halts `worker-committed` (Scope widening).
+- **Plan amendment commits.** An orchestrator amendment to a running task's
+  `**Files:**` is committed alone, mid-task; that task's review base and checkpoint
+  move to the amendment commit, and its uncommitted work rides into the task's commit
+  as usual.
 - That per-task commit is what makes the **review base the prior commit** — `git diff
   <prior commit>` is exactly this task's work — and keeps the whole-plan final-review diff
   from sweeping in unrelated pre-existing changes.
@@ -1556,7 +1569,7 @@ Any cost claim requires measurement against a comparable run.
 ## Changelog
 
 2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI. A post-commit security review found both escapes.
-2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
+2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`, and a worker commit halts, as `worker-committed`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.
 2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)

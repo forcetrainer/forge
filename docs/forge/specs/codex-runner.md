@@ -154,16 +154,20 @@ forge-run.py --status --run-dir DIR
    Acceptance clause grammar); prose clauses are never executed. Any clause whose command
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
-3a. On every worker turn, whether or not acceptance passed — before step 3's rework
-   or step 4's review is acted on — compute widenings from the stage's checkpoint (`execution`
-   spec: Scope widening — `HEAD` recorded once per stage per invocation, before the stage's
-   first worker dispatch, and held across its rework laps) with `forge_dispose.scope_widenings` (`execution` spec: Scope
-   widening) against the record at `task-<N>/widenings.json` in the run dir, the path
-   every worker brief names — after every worker turn: the cold attempt, each rework
-   resume, and each final-review fixer turn (against `final/widenings.json`). An
-   out-of-scope deletion escalates `scope-delete` before review; a record defect is a
-   rework iteration naming the entry. A trivial-tier task has no reviewer: its
-   widenings go to the close-out list unarbitrated, and its deletions still escalate.
+3a. After every worker turn — the cold attempt, each rework resume, each final-review
+   fixer turn — whether or not acceptance passed, and before step 3's rework or step 4's
+   review is acted on (`execution` spec: Scope widening):
+   - **Worker-commit check:** `HEAD` against the stage's checkpoint (recorded once per
+     stage per invocation, before the stage's first worker dispatch, held across its
+     rework laps) plus the runner's own amendment commits; any other commit escalates
+     `worker-committed`, naming each commit.
+   - **Detection:** `forge_dispose.scope_widenings` from that checkpoint, against the
+     record at `task-<N>/widenings.json` (`final/widenings.json` for the final review),
+     the path every worker brief names. An out-of-scope deletion escalates
+     `scope-delete` before review; a record defect is a rework iteration naming the
+     entry.
+   - A trivial-tier task has no reviewer: its widenings go to the close-out list
+     unarbitrated, and its deletions and commits still escalate.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists so the diff is assembled
@@ -603,8 +607,9 @@ staleness is never an exit condition.
   an out-of-scope deletion in a turn whose acceptance failed still escalates
   `scope-delete`; after a resume, a path accepted before the halt is not re-listed
   while its content holds.
-- Checkpoint: a worker that commits its out-of-scope edit during a turn still has the
-  path listed, on that lap and the next; a worker that adds a path to its task's
+- Checkpoint: a worker that commits during a turn halts `worker-committed` naming the
+  commit, before detection, and a resumed run whose human kept that commit lists nothing
+  from it; a worker that adds a path to its task's
   `**Files:**` in the plan's working copy gains no scope; a resumed task's checkpoint is
   `HEAD` at the new invocation, so a human's committed fix is not a widening; a final
   stage whose last task's commit was skipped still has a checkpoint; a git failure in
