@@ -154,14 +154,20 @@
 **Depends on:** Task 2
 
 ### Task 4: Arbitrate widenings in the decision
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (verdict `widenings` parse and validation; rejected-widening finding; `accepted_widenings` state; `scope-delete`; decision.json `widenings`; `--plan` and `--widenings`; `repair_scope_violations` and `--repair-snapshot` removed)
 - Modify: `scripts/forge_common.py` (`HALT_REASONS`; `REVIEW_VERDICT_INSTRUCTION` widenings text)
+- Modify: `scripts/forge-run.py` (decoupling only: drop the `repair_scope_violations` import and the `scope_violations` arguments; the `repair-out-of-scope` worker-guidance key keyed for legacy reads; no new runner behavior, which is Task 5)
 - Test: `tests/test_forge_widening.py`
 - Test: `tests/test_forge_dispose.py`
 - Test: `tests/test_forge_convergence.py`
+- Test: `tests/test_forge_final_review.py` (the out-of-scope repair halt test removed)
+- Test: `tests/test_forge_verification_packet.py` (the out-of-scope repair halt test removed)
+- Test: `tests/test_forge_loop.py`
+- Test: `tests/test_forge_coverage.py`
+- Test: `tests/test_forge_review.py`
 
 **Spec:** [execution] Reviewer verdict contract, [execution] Scope widening, [execution] Rework loop and convergence, [execution] The shared decision helper, [execution] The disposition matrix
 
@@ -203,6 +209,8 @@
 - `python3 -m unittest discover -s tests -p test_forge_dispose.py` passes
 - `python3 -m unittest discover -s tests -p test_forge_convergence.py` passes
 - `grep -n "repair_scope_violations" scripts/forge_dispose.py` exits 1
+- `grep -n "repair_scope_violations" scripts/forge-run.py` exits 1
+- `python3 -m unittest discover -s tests` passes
 
 **Tier:** standard
 

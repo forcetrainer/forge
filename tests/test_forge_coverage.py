@@ -909,6 +909,16 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
             cwd=self.repo_dir, capture_output=True, text=True,
         )
 
+    def _plan(self):
+        path = os.path.join(self.workdir, "plan.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# Plan\n\n**Goal:** g\n**Global Constraints:**\n- c\n\n"
+                    "### Task 1: First\n- [ ] Done\n\n**Files:**\n"
+                    "- Modify: `src.txt`\n\n**Tests:**\n- t\n\n"
+                    "**Acceptance:**\n- `true` passes\n\n**Tier:** standard\n\n"
+                    "**Depends on:** nothing\n")
+        return path
+
     def _base_args(self, verdict_path, attempt=1, acceptance_ok="true",
                     autofix="auto", checklist_path=None, citable_path=None):
         args = [
@@ -917,6 +927,7 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
             "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,
+            "--plan", self._plan(),
         ]
         if checklist_path:
             args += ["--checklist", checklist_path]

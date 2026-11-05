@@ -105,7 +105,6 @@ from forge_dispose import (  # noqa: F401
     derive_disposition,
     diff_line_ranges,
     parse_verdict,
-    repair_scope_violations,
     validate_locations,
     verify_provenance,
 )
@@ -741,6 +740,8 @@ HALT_CAUSE_FOR_WORKER = {
     "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
             "where any reviewer finding stops it for a human rather than "
             "being auto-fixed.",
+    # Legacy key: read from halt records written before Scope widening; no
+    # code emits it any more.
     "repair-out-of-scope": "The run stopped on a `repair-out-of-scope` halt: "
                            "a repair modified or deleted a file outside this "
                            "task's own diff. Fix only files the task already "
@@ -1379,12 +1380,6 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         _seed_record(f) for f in findings if f.disposition == "seed"
                     )
 
-        # Repair-scope check (Disposition matrix): a rework lap's repair that
-        # modified or deleted a file outside the pre-repair task diff halts.
-        scope_violations = (
-            repair_scope_violations(cwd, review_base, repair_snapshot)
-            if repair_snapshot and review_base else []
-        )
         if reviewer_wrote is not None:
             # Not a convergence class: the attempt's verdict was discarded, so
             # the state is not advanced and no finding exists to disposition.
@@ -1393,7 +1388,6 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             action, halt_reason = convergence_decision(
                 findings, state, acc_ok, attempt, autofix_mode,
                 approved_ids=approved_ids, failed_acceptance=failed_acceptance,
-                scope_violations=scope_violations,
             )
             advance_state(state, findings, acc_ok, failed_acceptance)
 
@@ -1415,9 +1409,6 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         outstanding = [f.summary for f in findings] if action == "halt" else []
         if reviewer_wrote is not None:
             outstanding = list(reviewer_wrote.changes)
-        elif halt_reason == "repair-out-of-scope":
-            outstanding = ["repair touched a file outside the task's diff: " + p
-                           for p in scope_violations] + outstanding
 
         receipt = {
             "task_number": task.number,
@@ -2178,12 +2169,6 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             findings = verdict.findings
             unverified = _merge_unverified(unverified, _collect_unverified(verdict))
 
-        # Repair-scope check (Disposition matrix), against the run diff: a fix
-        # that modified or deleted a file outside it halts.
-        scope_violations = (
-            repair_scope_violations(cwd, run_base, repair_snapshot)
-            if repair_snapshot else []
-        )
         # The final review has no acceptance command that can regress, so the
         # acceptance signal is always green: a fix-dispatch crash is an implicit
         # fix-retry finding (rework to backstop), exactly like execute_task's
@@ -2191,7 +2176,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # is only a resolved reviewer finding reappearing).
         action, halt_reason = convergence_decision(
             findings, state, True, attempt, autofix_mode,
-            approved_ids=approved_ids, scope_violations=scope_violations,
+            approved_ids=approved_ids,
         )
         advance_state(state, findings, True)
 
@@ -2211,9 +2196,6 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         ]
         repair_task = halted[0].repair_task if halted else None
         outstanding = [f.summary for f in findings] if action == "halt" else []
-        if halt_reason == "repair-out-of-scope":
-            outstanding = ["repair touched a file outside the run's diff: " + p
-                           for p in scope_violations] + outstanding
 
         # Persist this attempt's state onto the final-review receipt
         # unconditionally — including an `exec_ok=False` attempt whose fix

@@ -168,8 +168,16 @@ def _verdict_from_obj(obj):
     job). ``coverage`` is parsed on either verdict kind (present or absent) via
     _coverage_from_obj."""
     coverage = _coverage_from_obj(obj)
+    widenings = obj.get("widenings")
+    if widenings is None:
+        widenings = []
+    if not isinstance(widenings, list):
+        raise RuntimeError(
+            "reviewer widenings must be a list of rulings; got: "
+            + repr(widenings)[:300]
+        )
     if obj["verdict"] == "pass":
-        return Verdict(kind="pass", coverage=coverage)
+        return Verdict(kind="pass", coverage=coverage, widenings=widenings)
     raw = obj.get("findings")
     if not isinstance(raw, list):
         raise RuntimeError(
@@ -180,6 +188,7 @@ def _verdict_from_obj(obj):
         kind="findings",
         findings=[_finding_from_obj(f) for f in raw],
         coverage=coverage,
+        widenings=widenings,
     )
 
 
@@ -442,6 +451,28 @@ def malformed_id_defects(verdict):
     ]
 
 
+_WIDEN_ID = re.compile(r"(?:(?:t[0-9]+|final):)?widen:")
+
+
+def widen_id_defects(verdict):
+    """Defects for a reviewer finding whose ``id`` or ``carried_from`` begins
+    ``widen:`` or ``<scope>:widen:`` — the runner owns that identity, and a
+    rejected widening reaches the reviewer only through ``## Widened files``."""
+    if verdict.kind != "findings":
+        return []
+    defects = []
+    for position, finding in enumerate(verdict.findings or [], 1):
+        for label, value in (("id", finding.id),
+                             ("carried_from", finding.carried_from)):
+            if isinstance(value, str) and _WIDEN_ID.match(value):
+                defects.append(
+                    "finding #{}: {} {!r} begins `widen:`, which the runner "
+                    "reserves for a rejected widening's identity".format(
+                        position, label, value)
+                )
+    return defects
+
+
 def validate_finding_ids(verdict):
     """Validate that a reviewer verdict names each finding id at most once.
     Returns a list of human-readable defect strings — empty means valid — in
@@ -466,7 +497,7 @@ def validate_finding_ids(verdict):
     seen = []
     dup_ids = set()
     colon_ids = []
-    defects = malformed_id_defects(verdict)
+    defects = malformed_id_defects(verdict) + widen_id_defects(verdict)
     for finding in verdict.findings or []:
         if not isinstance(finding.id, str) or not finding.id:
             continue
@@ -594,22 +625,6 @@ def derive_disposition(finding):
     if finding.provenance == "in-run":
         return "seed"
     return "halt"
-
-
-def repair_scope_violations(cwd, base, snapshot_tree):
-    """Paths a repair touched outside its scope: each file the repair delta
-    (``snapshot_tree`` against a fresh capture of the working tree) modifies or
-    deletes that the pre-repair diff (``base`` against ``snapshot_tree``) never
-    touched. A file the repair creates is exempt — a new file changes no
-    existing code. Sorted. Raises RuntimeError naming ``--repair-snapshot`` on
-    a git failure (an unknown snapshot sha, a bad base)."""
-    try:
-        original = {p for _, p in forge_git.changed_paths(cwd, base, snapshot_tree)}
-        delta = forge_git.changed_paths(
-            cwd, snapshot_tree, forge_git.capture_tree(cwd))
-    except (RuntimeError, forge_git.FingerprintError) as e:
-        raise RuntimeError("--repair-snapshot {}: {}".format(snapshot_tree, e))
-    return sorted({p for s, p in delta if s != "A" and p not in original})
 
 
 def classify_findings(verdict, diff_text, scope, run_diff=None,
@@ -813,6 +828,9 @@ class ConvergenceState:
     carried_ids: set = field(default_factory=set)
     prev_acceptance_ok: bool | None = None
     prev_failed_acceptance: str | None = None
+    # {path: {"blob", "reason", "serves", "ruling_reason"}} — widenings the
+    # reviewer accepted, kept while the path's content holds (Scope widening).
+    accepted_widenings: dict = field(default_factory=dict)
 
     def to_dict(self):
         """Serialize for the CLI's ``--state`` round-trip (sets -> sorted lists,
@@ -822,6 +840,7 @@ class ConvergenceState:
             "carried_ids": sorted(self.carried_ids),
             "prev_acceptance_ok": self.prev_acceptance_ok,
             "prev_failed_acceptance": self.prev_failed_acceptance,
+            "accepted_widenings": copy.deepcopy(self.accepted_widenings),
         }
 
     @classmethod
@@ -835,6 +854,7 @@ class ConvergenceState:
             carried_ids=set(d.get("carried_ids") or []),
             prev_acceptance_ok=d.get("prev_acceptance_ok"),
             prev_failed_acceptance=d.get("prev_failed_acceptance"),
+            accepted_widenings=copy.deepcopy(d.get("accepted_widenings") or {}),
         )
 
 
@@ -862,7 +882,7 @@ def _is_execution_failure(findings):
 
 def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
                          backstop=MAX_ATTEMPTS_BACKSTOP, approved_ids=frozenset(),
-                         failed_acceptance=None, scope_violations=()):
+                         failed_acceptance=None, deleted=()):
     """Decide one attempt deterministically from the classified findings, the
     running state, acceptance, the attempt count, and the autofix mode. Returns
     ``(action, halt_reason)`` with ``action`` in {"pass", "rework", "halt"} and a
@@ -871,9 +891,9 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
 
     1. ``gate`` mode + any reviewer finding -> halt/``gate`` (a transient
        execution failure is exempt: it carries no impact).
-    1a. any ``scope_violations`` (repair_scope_violations: paths the repair
-       modified or deleted outside the pre-repair diff) ->
-       halt/``repair-out-of-scope``, never auto-passed.
+    1a. any out-of-scope ``deleted`` path (scope_widenings) ->
+       halt/``scope-delete``, whatever the findings. A rejected widening is a
+       fix finding and takes the steps below like any other.
     2. any halt-disposition finding (pre-existing x contract-breaking) ->
        halt/``scope-decision``. A finding whose ``identity`` is in
        ``approved_ids`` (identities, never bare ids) — a human resolution carried in from a prior halt (Halt
@@ -898,8 +918,8 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
         _identity(f)
     if autofix_mode == "gate" and any(f.impact is not None for f in findings):
         return ("halt", "gate")
-    if scope_violations:
-        return ("halt", "repair-out-of-scope")
+    if deleted:
+        return ("halt", "scope-delete")
     if any(f.disposition == "halt" and f.identity not in approved_ids
            for f in findings):
         return ("halt", "scope-decision")
@@ -1177,7 +1197,7 @@ def scope_widenings(cwd, plan_path, spec_path, scope, base, state, record_path):
             entries, {w.path: w for w in widened}, citable,
             set(state.carried_ids),
         )
-    accepted = getattr(state, "accepted_widenings", None) or {}
+    accepted = state.accepted_widenings
     due = [
         w for w in widened
         if accepted.get(w.path, {}).get("blob") != blob_id(cwd, w.path)
@@ -1205,10 +1225,91 @@ def render_widened_section(result):
     return "\n".join(lines) + "\n"
 
 
+WIDENING_RULINGS = ("accepted", "rejected")
+
+
+def validate_widenings(verdict, due_paths):
+    """Defect strings for the verdict's ``widenings`` against ``due_paths``, the
+    paths the helper itself recomputed as due a ruling: a missing, extra or
+    duplicated path, an unknown ruling, or an empty reason. Empty means valid.
+    Applies to a pass verdict as much as a findings one."""
+    due = list(due_paths)
+    defects, seen = [], set()
+    for n, entry in enumerate(verdict.widenings or [], start=1):
+        label = "widenings entry {}".format(n)
+        if not isinstance(entry, dict):
+            defects.append("{} is not an object".format(label))
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            defects.append("{}: path must be a non-empty string".format(label))
+            continue
+        label = "{} (path {})".format(label, json.dumps(path))
+        if path in seen:
+            defects.append("{}: duplicate ruling for the path".format(label))
+        elif path not in due:
+            defects.append("{}: ruling on a path not listed under "
+                           "## Widened files".format(label))
+        seen.add(path)
+        if entry.get("ruling") not in WIDENING_RULINGS:
+            defects.append("{}: ruling must be \"accepted\" or \"rejected\", "
+                           "got {}".format(label, json.dumps(entry.get("ruling"))))
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            defects.append("{}: reason must be a non-empty string".format(label))
+    for path in due:
+        if path not in seen:
+            defects.append("no ruling for widened path {}".format(json.dumps(path)))
+    return defects
+
+
+def rejected_widening_finding(path, reason, scope):
+    """The fix finding the runner raises for a rejected widening (Scope
+    widening, Rulings): identity ``<scope>:widen:<path>``, summary the
+    reviewer's reason, location the path, provenance ``in-diff``, impact
+    ``improvement``, no contract_ref, disposition ``fix``."""
+    identity = "{}:widen:{}".format(scope, path)
+    return Finding(
+        id="widen:" + path, summary=reason, file=path, lines=None,
+        provenance="in-diff", impact="improvement", contract_ref=None,
+        disposition="fix", identity=identity,
+    )
+
+
+def apply_widening_rulings(verdict, due, scope, state, cwd):
+    """Fold the verdict's rulings on ``due`` (Widening objects) into ``state``
+    and return the fix findings for the rejected ones. An accepted path is
+    recorded in ``state.accepted_widenings`` with its current blob and the
+    justification; a rejected one drops any stale acceptance. The verdict's own
+    value is never touched. Callers validate with ``validate_widenings`` first."""
+    by_path = {w.path: w for w in due}
+    rejected = []
+    for entry in verdict.widenings or []:
+        path, ruling = entry["path"], entry["ruling"]
+        if ruling == "accepted":
+            w = by_path[path]
+            state.accepted_widenings[path] = {
+                "blob": blob_id(cwd, path), "reason": w.reason,
+                "serves": w.serves, "ruling_reason": entry["reason"],
+            }
+        else:
+            state.accepted_widenings.pop(path, None)
+            rejected.append(
+                rejected_widening_finding(path, entry["reason"], scope))
+    return rejected
+
+
+def prune_accepted_widenings(state, result):
+    """Drop every ``accepted_widenings`` entry whose path is no longer a
+    widening (reverted, or now in scope)."""
+    current = {w.path for w in result.widened}
+    for path in list(state.accepted_widenings):
+        if path not in current:
+            del state.accepted_widenings[path]
+
+
 def _load_state_file(path):
-    """A ConvergenceState from ``path``; absent/unset is a fresh state. Also
-    carries ``accepted_widenings``, which ``ConvergenceState`` does not yet
-    round-trip itself."""
+    """A ConvergenceState from ``path``; absent/unset is a fresh state."""
     if not (path and os.path.exists(path)):
         return ConvergenceState()
     try:
@@ -1216,9 +1317,7 @@ def _load_state_file(path):
             raw = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         raise RuntimeError("cannot read state file {}: {}".format(path, e))
-    state = ConvergenceState.from_dict(raw)
-    state.accepted_widenings = dict((raw or {}).get("accepted_widenings") or {})
-    return state
+    return ConvergenceState.from_dict(raw)
 
 
 def widened_main(argv):
@@ -1376,13 +1475,19 @@ def main(argv=None):
              "failure). A repeat of the prior attempt's value halts `stuck`.",
     )
     parser.add_argument(
-        "--repair-snapshot", default=None,
-        help="tree sha of the working tree captured just before this "
-             "attempt's repair dispatch (forge_fingerprint.py snapshot's "
-             "`tree`); given on every rework lap. A repair that modifies or "
-             "deletes a file outside the pre-repair diff halts "
-             "`repair-out-of-scope`, and decision.json gains "
-             "repair_out_of_scope (the paths). Omitted: no scope check.",
+        "--plan", required=True,
+        help="the plan being run: its `**Files:**` fields are the review's "
+             "scope and its declared documents are exempt (Scope widening); "
+             "required",
+    )
+    parser.add_argument(
+        "--spec", default=None,
+        help="legacy plan only: the spec file, exempt from widening",
+    )
+    parser.add_argument(
+        "--widenings", default=None,
+        help="the worker's widening record (JSON array of {path, reason, "
+             "serves}); omitted: no widening is justified",
     )
     args = parser.parse_args(argv)
 
@@ -1412,18 +1517,11 @@ def main(argv=None):
         )
         return 1
 
-    if args.state and os.path.exists(args.state):
-        try:
-            with open(args.state, "r", encoding="utf-8") as f:
-                state = ConvergenceState.from_dict(json.load(f))
-        except (OSError, json.JSONDecodeError) as e:
-            print(
-                "error: cannot read state file {}: {}".format(args.state, e),
-                file=sys.stderr,
-            )
-            return 1
-    else:
-        state = ConvergenceState()
+    try:
+        state = _load_state_file(args.state)
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
 
     acceptance_ok = args.acceptance_ok == "true"
 
@@ -1481,6 +1579,12 @@ def main(argv=None):
 
     verdict = None
     try:
+        widened = scope_widenings(
+            os.getcwd(), args.plan, args.spec, args.scope, args.base, state,
+            args.widenings,
+        )
+        prune_accepted_widenings(state, widened)
+        rejected = []
         if args.execution_failure:
             findings = [execution_failure_finding(args.execution_detail)]
         else:
@@ -1527,7 +1631,8 @@ def main(argv=None):
                         "reviewer verdict has invalid carried_from: "
                         + "; ".join(carried_defects)
                     )
-                id_defects = malformed_id_defects(verdict)
+                id_defects = malformed_id_defects(verdict) + widen_id_defects(
+                    verdict)
                 if id_defects:
                     raise RuntimeError(
                         "reviewer verdict has invalid finding id(s): "
@@ -1562,11 +1667,16 @@ def main(argv=None):
                     carried_ids=state.carried_ids,
                     prior_identities=prior_identities,
                 )
-            findings = verdict.findings
-        scope_violations = (
-            repair_scope_violations(os.getcwd(), args.base, args.repair_snapshot)
-            if args.repair_snapshot else []
-        )
+            widening_defects = validate_widenings(
+                verdict, [w.path for w in widened.due])
+            if widening_defects:
+                raise RuntimeError(
+                    "reviewer verdict has invalid widenings: "
+                    + "; ".join(widening_defects)
+                )
+            rejected = apply_widening_rulings(
+                verdict, widened.due, args.scope, state, os.getcwd())
+            findings = verdict.findings + rejected
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
@@ -1575,13 +1685,24 @@ def main(argv=None):
         findings, state, acceptance_ok, args.attempt, args.autofix,
         approved_ids=frozenset(args.approved),
         failed_acceptance=args.failed_acceptance,
-        scope_violations=scope_violations,
+        deleted=widened.deleted,
     )
     advance_state(state, findings, acceptance_ok, args.failed_acceptance)
 
     decision = _build_decision(action, halt_reason, findings, state)
-    if args.repair_snapshot:
-        decision["repair_out_of_scope"] = scope_violations
+    counts = {w.path: w for w in widened.widened}
+    decision["widenings"] = {
+        "accepted": [
+            {"path": path, "reason": entry["reason"],
+             "serves": entry["serves"], "ruling_reason": entry["ruling_reason"],
+             "added": counts[path].added, "removed": counts[path].removed}
+            for path, entry in sorted(state.accepted_widenings.items())
+        ],
+        "rejected": [
+            {"path": f.file, "identity": f.identity} for f in rejected
+        ],
+        "deleted": widened.deleted,
+    }
     if checklist is not None and verdict is not None:
         defects = validate_coverage(verdict, checklist, citable)
         decision["coverage_valid"] = not defects

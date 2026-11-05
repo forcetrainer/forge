@@ -351,26 +351,6 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             "repair_task": None, "disposition": "seed",
         }]
 
-    def test_final_fix_touching_a_file_outside_the_run_diff_halts_out_of_scope(self):
-        g = os.path.join(self.d, "g.txt")
-        with open(g, "w") as f:
-            f.write("untouched by the run\n")
-        run_base = self._init_repo_with_task_work()
-        plan = self._plan()
-        self._responses([
-            {"exit": 0, "msg": _fix_findings_msg(
-                "f1.txt", "2", "needs a fix", contract_ref="spec:Alpha section")},
-            {"exit": 0, "msg": "", "append_file": g, "append_text": "DRIFT\n"},
-            {"exit": 0, "msg": _pass_msg()},
-        ])
-        outcome = forge_run.run_final_review_loop(
-            [self.spec], run_base, self.run_dir, self.fake, self.d,
-            "standard", "auto", {}, plan_path=plan,
-        )
-        self.assertEqual(outcome.status, "escalated")
-        self.assertEqual(outcome.halt_reason, "repair-out-of-scope")
-        self.assertIn("g.txt", " ".join(outcome.findings))
-
     def test_unapproved_preexisting_finding_halts_scope_decision(self):
         run_base = self._init_repo_with_task_work()
         plan = self._plan()

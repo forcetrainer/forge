@@ -449,22 +449,6 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},
         ])
 
-    def test_repair_touching_a_file_outside_the_task_halts_out_of_scope(self):
-        plan = self._plan(PLAN_STD_CHECKLIST)
-        self._init_repo()
-        g = os.path.join(self.d, "g.txt")
-        with open(g, "w") as f:
-            f.write("base\n")
-        self._git("add", "g.txt")
-        self._git("commit", "-m", "g")
-        self._rework_lap_touching(g, "DRIFT\n")
-        outcome = forge_run.execute_task(
-            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
-        )
-        self.assertEqual(outcome.status, "escalated")
-        self.assertEqual(outcome.halt_reason, "repair-out-of-scope")
-        self.assertIn("g.txt", " ".join(outcome.findings))
-
     def test_repair_within_the_task_files_passes(self):
         plan = self._plan(PLAN_STD_CHECKLIST)
         self._init_repo()

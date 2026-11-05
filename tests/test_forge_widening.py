@@ -407,5 +407,328 @@ class BriefTests(unittest.TestCase):
             self.assertNotIn(forge_common.WIDENING_INSTRUCTION, f.read())
 
 
+def _ruling(path, ruling="accepted", reason="needed and minimal"):
+    return {"path": path, "ruling": ruling, "reason": reason}
+
+
+def _verdict(widenings=None, findings=None):
+    obj = {"verdict": "findings" if findings else "pass"}
+    if findings:
+        obj["findings"] = findings
+    if widenings is not None:
+        obj["widenings"] = widenings
+    return forge_dispose._verdict_from_obj(obj)
+
+
+class VerdictValidationTests(unittest.TestCase):
+    def test_a_verdict_missing_a_ruling_for_a_due_path_is_a_validation_defect(self):
+        defects = forge_dispose.validate_widenings(_verdict([]), ["c.py"])
+        self.assertEqual(len(defects), 1)
+        self.assertIn("c.py", defects[0])
+        self.assertEqual(forge_dispose.validate_widenings(
+            _verdict([_ruling("c.py")]), ["c.py"]), [])
+
+    def test_a_verdict_ruling_on_a_path_not_due_is_a_validation_defect(self):
+        defects = forge_dispose.validate_widenings(
+            _verdict([_ruling("c.py"), _ruling("z.py")]), ["c.py"])
+        self.assertEqual(len(defects), 1)
+        self.assertIn("z.py", defects[0])
+        self.assertEqual(len(forge_dispose.validate_widenings(
+            _verdict([_ruling("z.py")]), [])), 1)
+
+    def test_a_duplicate_ruling_an_unknown_ruling_value_or_an_empty_reason_is_a_validation_defect(self):
+        due = ["c.py"]
+        dup = forge_dispose.validate_widenings(
+            _verdict([_ruling("c.py"), _ruling("c.py")]), due)
+        self.assertTrue(any("duplicate" in d and "c.py" in d for d in dup))
+        unknown = forge_dispose.validate_widenings(
+            _verdict([_ruling("c.py", ruling="maybe")]), due)
+        self.assertTrue(any("maybe" in d for d in unknown))
+        for bad in ("", "   ", None):
+            empty = forge_dispose.validate_widenings(
+                _verdict([_ruling("c.py", reason=bad)]), due)
+            self.assertTrue(any("reason" in d for d in empty), bad)
+
+    def test_a_malformed_widenings_entry_is_a_defect_and_a_non_list_fails_loud(self):
+        defects = forge_dispose.validate_widenings(_verdict(["c.py"]), ["c.py"])
+        self.assertTrue(defects)
+        with self.assertRaises(RuntimeError):
+            forge_dispose._verdict_from_obj(
+                {"verdict": "pass", "widenings": "c.py"})
+
+    def test_a_reviewer_finding_id_beginning_widen_is_a_validation_defect(self):
+        for fid in ("widen:c.py", "t1:widen:c.py", "final:widen:c.py"):
+            verdict = _verdict(findings=[
+                {"id": fid, "summary": "s", "impact": "improvement"}])
+            defects = forge_dispose.validate_finding_ids(verdict)
+            self.assertTrue(any("widen:" in d for d in defects), fid)
+        verdict = _verdict(findings=[
+            {"id": "f1", "summary": "s", "carried_from": "t1:widen:c.py",
+             "impact": "improvement"}])
+        self.assertTrue(any(
+            "widen:" in d for d in forge_dispose.validate_finding_ids(verdict)))
+        ok = _verdict(findings=[
+            {"id": "f1", "summary": "s", "impact": "improvement"}])
+        self.assertEqual(forge_dispose.validate_finding_ids(ok), [])
+
+
+class RulingTests(WideningTestBase):
+    def due(self, record=None):
+        self.edit("c.py")
+        return self.detect(record=record).due
+
+    def test_an_accepted_ruling_records_the_paths_blob_and_justification_in_accepted_widenings(self):
+        rec = self.record([{"path": "c.py", "reason": "needed it", "serves": "t1.t1"}])
+        due = self.due(rec)
+        state = forge_dispose.ConvergenceState()
+        verdict = _verdict([_ruling("c.py", reason="minimal")])
+        rejected = forge_dispose.apply_widening_rulings(
+            verdict, due, "t1", state, self.repo)
+        self.assertEqual(rejected, [])
+        self.assertEqual(state.accepted_widenings, {"c.py": {
+            "blob": self.git("hash-object", "c.py").strip(),
+            "reason": "needed it", "serves": "t1.t1",
+            "ruling_reason": "minimal"}})
+
+    def test_a_rejected_ruling_raises_a_fix_finding_with_identity_scope_widen_path_and_the_stated_provenance_impact_and_contract_ref(self):
+        due = self.due()
+        state = forge_dispose.ConvergenceState()
+        verdict = _verdict([_ruling("c.py", "rejected", "not needed")])
+        (finding,) = forge_dispose.apply_widening_rulings(
+            verdict, due, "t1", state, self.repo)
+        self.assertEqual(finding.identity, "t1:widen:c.py")
+        self.assertEqual(finding.provenance, "in-diff")
+        self.assertEqual(finding.impact, "improvement")
+        self.assertIsNone(finding.contract_ref)
+        self.assertEqual(finding.disposition, "fix")
+        self.assertEqual(finding.summary, "not needed")
+        self.assertEqual(finding.file, "c.py")
+        self.assertEqual(state.accepted_widenings, {})
+        direct = forge_dispose.rejected_widening_finding("c.py", "r", "final")
+        self.assertEqual(direct.identity, "final:widen:c.py")
+
+    def test_rulings_never_change_the_verdict_value(self):
+        due = self.due()
+        verdict = _verdict([_ruling("c.py", "rejected", "no")])
+        forge_dispose.apply_widening_rulings(
+            verdict, due, "t1", forge_dispose.ConvergenceState(), self.repo)
+        self.assertEqual(verdict.kind, "pass")
+        self.assertEqual(verdict.findings, [])
+
+
+class DecisionCLITests(WideningTestBase):
+    def dispose(self, verdict, attempt=1, state=None, autofix="auto",
+                widenings=None, scope="t1", extra=()):
+        vpath = os.path.join(self.work, "verdict-%d.json" % attempt)
+        with open(vpath, "w") as f:
+            json.dump(verdict, f)
+        args = [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
+                "--scope", scope, "--attempt", str(attempt),
+                "--acceptance-ok", "true", "--autofix", autofix,
+                "--plan", self.plan]
+        if state is not None:
+            args += ["--state", state]
+        if widenings is not None:
+            args += ["--widenings", widenings]
+        proc = subprocess.run(args + list(extra), cwd=self.repo,
+                              capture_output=True, text=True)
+        return proc
+
+    def decide(self, verdict, **kw):
+        proc = self.dispose(verdict, **kw)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        decision = json.loads(proc.stdout)
+        path = os.path.join(self.work, "state-out.json")
+        with open(path, "w") as f:
+            json.dump(decision["state"], f)
+        return decision, path
+
+    def test_omitting_plan_is_a_usage_error_naming_the_flag(self):
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", "v.json", "--base", "HEAD",
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+             "--autofix", "auto"],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--plan", proc.stderr)
+
+    def test_passing_repair_snapshot_is_a_usage_error_naming_the_flag(self):
+        self.edit("a.py")
+        proc = self.dispose({"verdict": "pass"},
+                            extra=["--repair-snapshot", "0" * 40])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--repair-snapshot", proc.stderr)
+
+    def test_a_verdict_with_widenings_is_checked_against_the_helpers_own_recomputation_not_a_caller_list(self):
+        self.edit("c.py")
+        # ruling on a path that is not a widening, and none for c.py
+        proc = self.dispose({"verdict": "pass", "widenings": [_ruling("d.py")]})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("d.py", proc.stderr)
+        self.assertIn("c.py", proc.stderr)
+
+    def test_omitting_widenings_leaves_every_widening_unjustified(self):
+        self.edit("c.py")
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py")]})
+        (entry,) = decision["widenings"]["accepted"]
+        self.assertIsNone(entry["reason"])
+        self.assertIsNone(entry["serves"])
+        self.assertEqual(entry["ruling_reason"], "needed and minimal")
+
+    def test_the_widenings_record_reaches_decision_json_as_the_accepted_entrys_reason_and_serves(self):
+        self.edit("c.py")
+        rec = self.record([{"path": "c.py", "reason": "needed it", "serves": "t1.t1"}])
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py")]}, widenings=rec)
+        entry = decision["widenings"]["accepted"][0]
+        self.assertEqual(entry["reason"], "needed it")
+        self.assertEqual(entry["serves"], "t1.t1")
+        self.assertEqual(
+            decision["state"]["accepted_widenings"]["c.py"]["reason"], "needed it")
+
+    def test_a_pass_verdict_with_a_rejected_ruling_reworks_and_lists_the_rejected_identity(self):
+        self.edit("c.py")
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]})
+        self.assertEqual(decision["action"], "rework")
+        self.assertEqual(decision["widenings"]["rejected"],
+                         [{"path": "c.py", "identity": "t1:widen:c.py"}])
+        self.assertEqual([f["identity"] for f in decision["findings"]["fix"]],
+                         ["t1:widen:c.py"])
+        self.assertEqual(decision["state"]["carried_ids"], ["t1:widen:c.py"])
+
+    def test_a_reverted_rejected_widening_resolves_without_a_ruling(self):
+        self.edit("c.py")
+        _, state = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]})
+        self.git("checkout", "c.py")
+        decision, _ = self.decide({"verdict": "pass"}, attempt=2, state=state)
+        self.assertEqual(decision["action"], "pass")
+        self.assertIn("t1:widen:c.py", decision["state"]["resolved_ids"])
+
+    def test_a_rejected_widening_rejected_again_with_nothing_resolved_halts_stuck(self):
+        self.edit("c.py")
+        rej = {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]}
+        _, state = self.decide(rej)
+        decision, _ = self.decide(rej, attempt=2, state=state)
+        self.assertEqual((decision["action"], decision["halt_reason"]),
+                         ("halt", "stuck"))
+
+    def test_a_rejected_widening_accepted_on_the_next_ruling_resolves(self):
+        self.edit("c.py")
+        _, state = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]})
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py")]},
+            attempt=2, state=state)
+        self.assertEqual(decision["action"], "pass")
+        self.assertIn("t1:widen:c.py", decision["state"]["resolved_ids"])
+        self.assertIn("c.py", decision["state"]["accepted_widenings"])
+
+    def test_a_widening_resolved_then_rejected_again_later_halts_regression(self):
+        self.edit("c.py")
+        _, state = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]})
+        self.git("checkout", "c.py")
+        _, state = self.decide({"verdict": "pass"}, attempt=2, state=state)
+        self.edit("c.py")
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]},
+            attempt=3, state=state)
+        self.assertEqual((decision["action"], decision["halt_reason"]),
+                         ("halt", "regression"))
+
+    def test_gate_mode_halts_on_a_rejected_widening(self):
+        self.edit("c.py")
+        decision, _ = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]},
+            autofix="gate")
+        self.assertEqual((decision["action"], decision["halt_reason"]),
+                         ("halt", "gate"))
+
+    def test_an_out_of_scope_deletion_halts_scope_delete_whatever_the_findings_and_rulings(self):
+        self.edit("c.py")
+        os.remove(os.path.join(self.repo, "d.py"))
+        finding = {"id": "f1", "summary": "bad", "impact": "improvement",
+                   "location": {"file": "a.py", "lines": "1"}}
+        for verdict in (
+            {"verdict": "pass", "widenings": [_ruling("c.py")]},
+            {"verdict": "pass", "widenings": [_ruling("c.py", "rejected", "no")]},
+            {"verdict": "findings", "findings": [finding],
+             "widenings": [_ruling("c.py")]},
+        ):
+            decision, _ = self.decide(verdict)
+            self.assertEqual((decision["action"], decision["halt_reason"]),
+                             ("halt", "scope-delete"))
+            self.assertEqual(decision["widenings"]["deleted"], ["d.py"])
+
+    def test_a_scope_delete_halt_applies_to_an_execution_failure_attempt_too(self):
+        os.remove(os.path.join(self.repo, "d.py"))
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "--execution-failure", "--base", self.base,
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false",
+             "--autofix", "auto", "--plan", self.plan],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["halt_reason"], "scope-delete")
+
+    def test_decision_json_widenings_lists_every_accepted_widening_so_far_with_line_counts_and_drops_one_no_longer_widened(self):
+        self.edit("c.py")
+        decision, state = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("c.py")]})
+        self.assertEqual(decision["widenings"], {
+            "accepted": [{"path": "c.py", "reason": None, "serves": None,
+                          "ruling_reason": "needed and minimal",
+                          "added": 2, "removed": 1}],
+            "rejected": [], "deleted": []})
+        self.edit("d.py")
+        decision, state = self.decide(
+            {"verdict": "pass", "widenings": [_ruling("d.py")]},
+            attempt=2, state=state)
+        self.assertEqual([e["path"] for e in decision["widenings"]["accepted"]],
+                         ["c.py", "d.py"])
+        self.git("checkout", "c.py")
+        decision, _ = self.decide({"verdict": "pass"}, attempt=3, state=state)
+        self.assertEqual([e["path"] for e in decision["widenings"]["accepted"]],
+                         ["d.py"])
+        self.assertEqual(list(decision["state"]["accepted_widenings"]), ["d.py"])
+
+
+class StateAndConstantsTests(unittest.TestCase):
+    def test_a_state_file_without_accepted_widenings_reads_as_empty(self):
+        self.assertEqual(
+            forge_dispose.ConvergenceState.from_dict({}).accepted_widenings, {})
+        state = forge_dispose.ConvergenceState.from_dict(
+            {"resolved_ids": ["a"], "carried_ids": []})
+        self.assertEqual(state.accepted_widenings, {})
+        entry = {"blob": "b", "reason": "r", "serves": None, "ruling_reason": "x"}
+        round_trip = forge_dispose.ConvergenceState.from_dict(
+            forge_dispose.ConvergenceState(
+                accepted_widenings={"c.py": entry}).to_dict())
+        self.assertEqual(round_trip.accepted_widenings, {"c.py": entry})
+
+    def test_halt_reasons_no_longer_contains_repair_out_of_scope_and_legacy_halt_reasons_does(self):
+        self.assertEqual(forge_common.HALT_REASONS, (
+            "scope-decision", "regression", "stuck", "backstop", "gate",
+            "scope-delete"))
+        self.assertNotIn("repair-out-of-scope", forge_common.HALT_REASONS)
+        self.assertEqual(forge_common.LEGACY_HALT_REASONS,
+                         ("repair-out-of-scope",))
+
+    def test_review_verdict_instruction_states_the_widenings_array_one_ruling_per_listed_path_and_that_rulings_never_change_the_verdict(self):
+        text = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn('"widenings"', text)
+        self.assertIn("one ruling per path", text)
+        self.assertIn("## Widened files", text)
+        self.assertIn('"accepted" | "rejected"', text)
+        self.assertIn("never change the verdict", text)
+
+    def test_the_verdict_dataclass_carries_widenings_as_emitted(self):
+        self.assertEqual(forge_common.Verdict(kind="pass").widenings, [])
+        verdict = _verdict([_ruling("c.py")])
+        self.assertEqual(verdict.widenings, [_ruling("c.py")])
+
+
 if __name__ == "__main__":
     unittest.main()
