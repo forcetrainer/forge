@@ -659,9 +659,8 @@ def classify_findings(verdict, diff_text, scope, run_diff=None,
     could dismiss any finding by self-labeling it resolved.
     ``carried_ids=None`` (the default) never honors the label, reproducing
     today's behavior exactly; ``convergence_decision`` is never touched here —
-    a dropped finding never reaches it, and a falsely-resolved finding that
-    reappears on a later attempt is still caught by the existing regression
-    rule against the runner's authoritative resolved-id set."""
+    a dropped finding never reaches it. A falsely-resolved defect that a later
+    review raises again is an ordinary fix finding and reworks."""
     if not isinstance(scope, str) or not SCOPE_PATTERN.fullmatch(scope):
         raise ValueError(
             "invalid finding scope {!r}: expected t<N> or final".format(scope)
@@ -901,10 +900,12 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
        ``approved_ids`` (identities, never bare ids) — a human resolution carried in from a prior halt (Halt
        resolution) — is exempt from this step only; every other rule still sees
        it.
-    3. regression -> halt/``regression``: a runner-recorded resolved id reappears,
-       or acceptance went green->red since the prior attempt. This still fires on
-       an approved finding — the exemption is scoped to step 2 alone, so a claimed
-       fix that silently didn't take is still caught.
+    3. regression -> halt/``regression``: acceptance went green->red since the
+       prior attempt, or a rejected widening (a runner-built identity
+       ``<scope>:widen:<path>``) recorded resolved is rejected again. A
+       reviewer-authored id matching a resolved identity is not a regression:
+       the reviewer never sees resolved findings, so the match is no evidence
+       of the same defect, and the finding is an ordinary fix finding.
     4. stuck -> halt/``stuck``: a fix finding persists across two consecutive
        attempts with nothing resolved this round (net progress is otherwise not
        required — a round may resolve one finding and surface another). Or
@@ -925,7 +926,8 @@ def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
     if any(f.disposition == "halt" and f.identity not in approved_ids
            for f in findings):
         return ("halt", "scope-decision")
-    reappeared = any(f.identity in state.resolved_ids for f in findings)
+    reappeared = any(f.identity in state.resolved_ids
+                     and _WIDEN_ID.match(f.identity) for f in findings)
     green_to_red = state.prev_acceptance_ok is True and not acceptance_ok
     if reappeared or green_to_red:
         return ("halt", "regression")

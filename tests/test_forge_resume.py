@@ -37,7 +37,7 @@ def _approved_halt_plus_regression_msg():
     """A single review verdict carrying two findings: `h1` (pre-existing x
     contract-breaking -> disposition `halt`, with a drafted `repair_task`)
     and `f1` (in-diff x contract-breaking -> disposition `fix`, reappearing
-    against a caller-seeded `resolved_ids={"f1"}` -> the regression rule).
+    carried from the prior attempt -> the stuck rule).
     `h1`'s disposition stays `halt` regardless of whether its canonical id is
     later passed as `approved_ids` — that exemption is `convergence_
     decision`'s step-2 check alone, never the disposition matrix — so this
@@ -665,13 +665,16 @@ class ReconcileResumeTests(unittest.TestCase):
         prompts = _log_prompts(self.plog)
         self.assertTrue(any("HUMANFIXMARKER" in p for p in prompts), prompts)
 
-    def test_restored_state_keeps_attempt_count_and_resolved_ids(self):
+    def test_restored_state_keeps_attempt_count(self):
         # The halt happened on attempt 2 with `f1` already recorded resolved.
-        # The resumed attempt is 3 (the backstop is not reset), and `f1`
-        # reappearing is still a regression — the resolved-id set survived.
+        # The resumed attempt is 3 (the backstop is not reset); a finding
+        # reusing the id `f1` is an ordinary fix finding, so it reworks on
+        # attempt 3 and passes on attempt 4.
         self._set_responses([
             {"exit": 0, "msg": ""},                                        # worker
             {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "back again")},
+            {"exit": 0, "msg": ""},                                        # worker
+            {"exit": 0, "msg": _pass_msg()},                               # review
         ])
         resume = forge_run.HaltResume(
             restored=False, resolution_delta="", frozen_diff="",
@@ -683,9 +686,8 @@ class ReconcileResumeTests(unittest.TestCase):
             self._task1(), self.plan, self.spec, self.run_dir, self.fake,
             self.d, {}, approved_ids=frozenset({"t1:h1"}), resume=resume,
         )
-        self.assertEqual(outcome.status, "escalated")
-        self.assertEqual(outcome.halt_reason, "regression")
-        self.assertEqual(outcome.attempts, 3)
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(outcome.attempts, 4)
         with open(os.path.join(self.run_dir, "task-1-attempt-3.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["attempt"], 3)
@@ -693,7 +695,8 @@ class ReconcileResumeTests(unittest.TestCase):
     def test_approved_scope_finding_does_not_leak_repair_task_into_a_different_halt_class(self):
         # h1 is an approved scope-decision finding (still named by the
         # reviewer, disposition stays `halt`) but exempted from step 2; f1
-        # separately reappears this same attempt, halting as `regression`.
+        # is carried from the prior attempt with nothing resolved, halting as
+        # `stuck`.
         # The record must not surface h1's already-human-actioned
         # repair_task under this non-scope halt reason (Task 6 Interface:
         # "repair_task is null for the classes that carry no drafted
@@ -706,14 +709,14 @@ class ReconcileResumeTests(unittest.TestCase):
             restored=False, resolution_delta="", frozen_diff="",
             findings=[{"id": "h1", "summary": "scope call"}],
             attempt=2,
-            state=forge_run.ConvergenceState(resolved_ids={"t1:f1"}),
+            state=forge_run.ConvergenceState(carried_ids={"t1:f1"}),
         )
         outcome = forge_run.execute_task(
             self._task1(), self.plan, self.spec, self.run_dir, self.fake,
             self.d, {}, approved_ids=frozenset({"t1:h1"}), resume=resume,
         )
         self.assertEqual(outcome.status, "escalated")
-        self.assertEqual(outcome.halt_reason, "regression")
+        self.assertEqual(outcome.halt_reason, "stuck")
         self.assertIsNone(outcome.repair_task)
         with open(os.path.join(self.run_dir, "task-1-attempt-3.json")) as f:
             receipt = json.load(f)

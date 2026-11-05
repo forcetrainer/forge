@@ -504,8 +504,9 @@ use" list the trigger line already covers.
 Test scope, stated in the skill and binding on every repo:
 
 - **Run scope** — verify-GREEN runs the test files the cycle touched, never the whole
-  suite. The whole suite runs once at completion; for a plan task, completion is its
-  acceptance commands and the whole suite runs at plan close-out.
+  suite. The whole suite runs once at completion; for a dispatched plan task the worker
+  runs neither — the orchestrator runs the task's acceptance commands after hand-back —
+  and the whole suite runs at plan close-out.
 - **Unit of coverage** — a test per new behavior reachable through a public interface,
   not per function or method; helpers are covered through their callers.
 - Repo-specific testing policy — which levels exist, which command covers which
@@ -608,6 +609,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
 2026-10-06: Agent files — break-the-code is bounded to one mutant per `**Tests:**` bullet, per execution spec Reviewer write discipline (#134)

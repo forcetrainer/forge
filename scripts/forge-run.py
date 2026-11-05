@@ -740,9 +740,9 @@ def _resolution_delta(cwd, freeze_base):
 # telling their worker that clearing the halt "is not your job" would forbid
 # exactly the work the resume exists to let it do.
 HALT_CAUSE_FOR_WORKER = {
-    "regression": "The run stopped on a `regression` halt: a finding the "
-                  "runner had already recorded as resolved reappeared, or the "
-                  "acceptance command went from green to red.",
+    "regression": "The run stopped on a `regression` halt: the acceptance "
+                  "command went from green to red, or a widening already "
+                  "resolved was rejected again.",
     "stuck": "The run stopped on a `stuck` halt: either a rework lap resolved "
              "nothing — the outstanding findings came back unchanged — or "
              "the same acceptance command failed first on two consecutive "
@@ -2539,7 +2539,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # acceptance signal is always green: a fix-dispatch crash is an implicit
         # fix-retry finding (rework to backstop), exactly like execute_task's
         # worker crash — never a spurious green->red regression (regression here
-        # is only a resolved reviewer finding reappearing).
+        # is only a resolved widening rejected again).
         action, halt_reason = convergence_decision(
             findings, state, True, attempt, autofix_mode,
             approved_ids=approved_ids,

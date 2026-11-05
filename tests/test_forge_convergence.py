@@ -106,15 +106,17 @@ class ConvergenceDecisionTests(unittest.TestCase):
             ("rework", None),
         )
 
-    def test_regression_when_resolved_id_reappears(self):
+    def test_a_reviewer_id_matching_a_resolved_identity_reworks(self):
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("f1")], True)   # attempt 1: f1 seen
         forge_run.advance_state(state, [_fix("f2")], True)   # attempt 2: f1 resolved
         self.assertIn("t1:f1", state.resolved_ids)
-        # Attempt 3: a fix undid an earlier fix — f1 comes back.
+        # Attempt 3: a finding under the reviewer-authored id f1 again. The
+        # reviewer never saw the resolved f1, so the id match is no evidence
+        # of the same defect: it is an ordinary fix finding.
         self.assertEqual(
             forge_run.convergence_decision([_fix("f1")], state, True, 3, "auto"),
-            ("halt", "regression"),
+            ("rework", None),
         )
 
     def test_regression_when_acceptance_goes_green_to_red(self):
@@ -282,10 +284,10 @@ class ConvergenceDecisionTests(unittest.TestCase):
             ("halt", "scope-decision"),
         )
 
-    def test_approved_finding_still_trips_regression_on_reappearance(self):
+    def test_approved_finding_matching_a_resolved_identity_is_not_a_regression(self):
         # h1 was approved and its canonical id landed in the runner's resolved
-        # set from a prior attempt; it reappears now -> regression still fires,
-        # even though it is exempt from the scope-decision rule.
+        # set from a prior attempt; a reviewer-authored id matching it is not a
+        # regression, and the approval exempts it from scope-decision.
         state = forge_run.ConvergenceState()
         forge_run.advance_state(state, [_fix("h1")], True)
         forge_run.advance_state(state, [_fix("f2")], True)
@@ -293,7 +295,7 @@ class ConvergenceDecisionTests(unittest.TestCase):
         self.assertEqual(
             forge_run.convergence_decision(
                 [_halt("h1")], state, True, 3, "auto", approved_ids={"t1:h1"}),
-            ("halt", "regression"),
+            ("pass", None),
         )
 
     def test_approval_matches_canonical_id_via_carried_from(self):

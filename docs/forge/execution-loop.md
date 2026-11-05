@@ -117,7 +117,7 @@ The runner then decides deterministically, in this precedence:
 1. **Gate mode** + any finding → **halt** (the conservative escape hatch, below).
    An existing file deleted outside the task's scope → **halt** (`scope-delete`); a rejected widening is a fix finding like any other.
 2. Any **halt-disposition** finding (pre-existing × contract-breaking) → **halt** (scope decision).
-3. **Regression** → **halt**: a previously *resolved* finding reappears, or acceptance went green→red. This is the "shuffling bad state to bad state" case — a fix undid an earlier fix, or broke the build.
+3. **Regression** → **halt**: acceptance went green→red, or a resolved widening is rejected again. This is the "shuffling bad state to bad state" case — a fix broke the build. A reviewer-authored finding id matching a resolved one is not a regression: reviewers never see resolved findings, so the match is coincidence; the finding reworks.
 4. **Stuck** → **halt**: a fix finding is *carried* across two consecutive attempts with nothing resolved — the worker can't crack it.
 5. No fix findings remain and acceptance is green → **pass**.
 6. Otherwise → **rework**, up to a **backstop of 5** attempts (a seatbelt, not a target).

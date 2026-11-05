@@ -620,7 +620,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         self.assertEqual(out.findings, [f])
         self.assertEqual(f.disposition, "fix")
 
-    def test_falsely_resolved_finding_reappearing_trips_regression(self):
+    def test_falsely_resolved_finding_reappearing_reworks(self):
         # Attempt 1: a real fix finding f1 is outstanding after review.
         state = forge_run.ConvergenceState()
         f1_attempt1 = _finding(id="f1", file="foo.py", lines="13",
@@ -648,8 +648,7 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         self.assertIn("t1:f1", state.resolved_ids)
 
         # Attempt 3: f1 reappears for real (the resolved claim was false) —
-        # the existing regression rule catches it via the runner's own
-        # resolved-id set, no second mechanism required.
+        # it is an ordinary fix finding again and reworks.
         f1_attempt3 = _finding(id="f1", file="foo.py", lines="13",
                                 provenance="in-diff", impact="contract-breaking",
                                 contract_ref="AC1")
@@ -658,8 +657,8 @@ class ClassifyFindingsResolvedLabelTests(unittest.TestCase):
         action, halt_reason = forge_run.convergence_decision(
             v3.findings, state, True, 3, "auto"
         )
-        self.assertEqual(action, "halt")
-        self.assertEqual(halt_reason, "regression")
+        self.assertEqual(action, "rework")
+        self.assertIsNone(halt_reason)
 
 
 class SeededDispositionGroupTests(unittest.TestCase):
