@@ -865,7 +865,9 @@ finding reaches the reviewer only through this section: it is never among the pa
 prior findings or in `--prior-identities`, and a reviewer finding whose identity begins
 `<scope>:widen:` is a validation defect.
 
-- Discovery: every current widening.
+- Discovery: every current widening not already accepted at its current content in
+  `accepted_widenings` (non-empty only on a resumed task, which carries its convergence
+  state from the halt record).
 - Verification: every current widening not accepted at its current content — new this
   lap, changed since its acceptance, or rejected and still present.
 
@@ -1105,10 +1107,12 @@ python3 forge_dispose.py \
 ```
 
 `python3 forge_dispose.py widened --plan <plan> [--spec <spec>] --base <sha> --scope
-<t<N>|final> --state <state.json> [--widenings <record.json>] [--format json|md]` prints
+<t<N>|final> [--state <state.json>] [--widenings <record.json>] [--format json|md]` prints
 the widenings due a ruling — JSON (`{"widened": [{"path", "reason", "serves"}],
 "deleted": ["path"], "record_defects": ["…"]}`) or the packet's `## Widened files`
-section — computed by the same `scope_widenings` the decision uses. The orchestrator
+section — computed by the same `scope_widenings` the decision uses. An absent or
+missing `--state` reads as a fresh state (no carried identities, no accepted widenings),
+as for the decision CLI. The orchestrator
 runs it after every worker turn: a non-empty `deleted` halts `scope-delete` before review,
 a non-empty `record_defects` is the turn's execution failure, and the `md` form goes into
 the reviewer's prompt.
@@ -1528,7 +1532,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
-2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and two carried rounds halt `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
+2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.
 2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)
