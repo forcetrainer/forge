@@ -27,6 +27,7 @@ import unittest
 from unittest import mock
 
 from _forge_support import *  # noqa: F401,F403
+import test_forge_loop
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import forge_common  # noqa: E402
@@ -289,7 +290,14 @@ class ExecuteTaskResumeTests(unittest.TestCase):
         self.assertIn("GUARDXYZ", prompt)
         self.assertNotIn(self.spec_marker, prompt)
         self.assertNotIn("Do the thing", prompt)  # the plan's Goal text (brief re-paste)
-        self.assertNotIn("Files:", prompt)
+        # The task block is never re-pasted; the record path and instruction
+        # are the one addition every resumed worker prompt carries (Scope
+        # widening, The worker's record), so the widenings text itself, which
+        # mentions `**Files:**`, is cut off before checking for the block.
+        self.assertNotIn("### Task 1", prompt)
+        body, _, record = prompt.partition("# Widenings record")
+        self.assertNotIn("Files:", body)
+        self.assertIn("task-1/widenings.json", record)
 
     def test_discovery_review_dispatches_cold_even_with_a_preexisting_thread_id(self):
         plan = self._plan(PLAN_STD)
@@ -499,6 +507,13 @@ class ReconcileResumeTests(unittest.TestCase):
         p = os.path.join(self.d, name)
         with open(p, "w") as f:
             f.write(content)
+        # Committed (not ignored): scope reads the plan as committed at the
+        # checkpoint, and an in-repo plan absent there is a contract error.
+        subprocess.run(["git", "add", "-f", name], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m",
+                        "plan " + name], cwd=self.d, check=True,
+                       capture_output=True, text=True)
         return p
 
     def _set_responses(self, responses):
@@ -714,6 +729,9 @@ PLAN_APPROVED = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `grep -q FROZENWORK f1.txt` passes
 
@@ -1039,7 +1057,11 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         # f1 approved while resolving task 2 (identity t2:h1) must not exempt
         # task 5's own h1 (identity t5:h1): it halts scope-decision.
         os.makedirs(self.run_dir, exist_ok=True)
-        plan5 = os.path.join(self.run_dir, "plan5.md")  # run/ is gitignored
+        # Outside the repository: an in-repo plan must be committed (scope
+        # reads it at the checkpoint), and this one is deliberately not.
+        outside = tempfile.mkdtemp(prefix="forge-plan5-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        plan5 = os.path.join(outside, "plan5.md")
         with open(plan5, "w") as f:
             f.write(PLAN_APPROVED.replace("Task 1", "Task 5"))
         task = forge_run.order_tasks(forge_run.parse_plan_tasks(plan5))[0]
@@ -1317,3 +1339,130 @@ class UnverifiedIdCollisionTests(UnverifiedCase):
         self.assertEqual(
             [(o["kind"], o["id"]) for o in self.run_json()["halt"]["outstanding"]],
             [("coverage", "t1")])
+
+
+# --- Scope widening: run state across a halt and resume (Task 6) -------------
+
+PLAN_WIDEN_TWO = test_forge_loop.PLAN_WIDEN + """
+### Task 2: Second task
+- [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
+
+**Acceptance:** `true` passes
+
+**Tier:** standard
+
+**Depends on:** Task 1
+"""
+
+
+class WideningResumeTests(test_forge_loop.WideningCase):
+    def halting_accept(self):
+        """A verdict that accepts the widening and halts on a pre-existing
+        finding, so the accepted ruling is frozen into the halt record."""
+        verdict = json.loads(test_forge_loop._fix_findings_msg(
+            "f1.txt", "99", "the legacy guard is wrong", id="h1",
+            repair_task=test_forge_loop.REPAIR_TASK))
+        verdict["widenings"] = self.ACCEPT_PASS["widenings"]
+        return verdict
+
+    def commit_all(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-m", message)
+
+    def test_run_json_widenings_survive_a_halt_and_resume(self):
+        with open(self.plan, "w") as f:
+            f.write(PLAN_WIDEN_TWO.format(acceptance="true", tier="standard"))
+        delete = {"op": "delete", "path": os.path.join(self.repo, "other.txt")}
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+            self.worker(delete),
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        entry = {
+            "scope": "t1", "path": "other.txt", "added": 1, "removed": 0,
+            "reason": "shared helper moved", "serves": None,
+            "ruling_reason": "needed", "unarbitrated": False}
+        self.assertEqual(self.run_json()["widenings"], [entry])
+        self.assertEqual(self.halt_record()["halt_reason"], "scope-delete")
+        # The human restores the path; the resumed task 2 passes.
+        with open(os.path.join(self.repo, "other.txt"), "a") as f:
+            f.write("restored\n")
+        self.commit_all("restore other.txt")
+        res = self.run_cli(
+            [self.worker(), self.reviewer({"verdict": "pass"})] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.run_json()["widenings"], [entry])
+
+    def test_a_resumed_tasks_checkpoint_is_head_at_the_new_invocation_so_a_humans_committed_fix_is_not_a_widening(self):
+        delete = {"op": "delete", "path": os.path.join(self.repo, "other.txt")}
+        res = self.run_cli([self.worker(delete)])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # The human's fix edits an existing file outside the task's Files and
+        # is committed before re-invoking.
+        with open(os.path.join(self.repo, "other.txt"), "a") as f:
+            f.write("human fix\n")
+        self.commit_all("human fix")
+        fixed = self.git("rev-parse", "HEAD").strip()
+        rc, out, err = self.run_main(
+            [self.worker(self.edit_op("f1.txt", "ok\n")),
+             self.reviewer({"verdict": "pass"})] + self.tail,
+            spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 0, err)
+        task_calls = [c for c in self.mocks[0].call_args_list
+                      if c.args[3] == "t1"]
+        self.assertEqual([c.args[5] for c in task_calls], [fixed])
+        self.assertNotIn("\n## Widened files\n\n", self.prompts()[1])
+
+
+    def test_a_path_accepted_before_a_halt_is_not_relisted_after_resume(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.halting_accept()),
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        halt = self.halt_record()
+        self.assertEqual(
+            list(halt["convergence_state"]["accepted_widenings"]),
+            ["other.txt"])
+        self.assertNotIn("widenings", self.run_json())
+        res = self.run_cli(
+            [self.worker(), self.reviewer({"verdict": "pass"})] + self.tail,
+            extra_args=("--resolve", "t1:h1=repair"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # The resumed review's packet lists no widened file: the replayed
+        # edit still holds the content the reviewer accepted.
+        self.assertNotIn("\n## Widened files\n\n", self.prompts()[1])
+        self.assertEqual(
+            [(e["scope"], e["path"], e["ruling_reason"])
+             for e in self.run_json()["widenings"]],
+            [("t1", "other.txt", "needed")])
+
+    def test_a_legacy_repair_out_of_scope_halt_resumes_under_widening_rules(self):
+        delete = {"op": "delete", "path": os.path.join(self.repo, "other.txt")}
+        res = self.run_cli([self.worker(delete)])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # Rewrite the record as an older runner wrote it.
+        path = os.path.join(self.run_dir, "run.json")
+        data = self.run_json()
+        data["halt"]["halt_reason"] = "repair-out-of-scope"
+        data["halt"].pop("deleted", None)
+        with open(path, "w") as f:
+            json.dump(data, f)
+        with open(os.path.join(self.repo, "other.txt"), "a") as f:
+            f.write("restored\n")
+        self.commit_all("restore other.txt")
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(self.halt_record())
+        with open(os.path.join(self.run_dir, "task-1-attempt-2-brief.md")) as f:
+            self.assertIn("repair-out-of-scope", f.read())
+        self.assertIn("\n## Widened files\n\n", self.prompts()[1])
+        self.assertEqual(
+            [e["path"] for e in self.run_json()["widenings"]], ["other.txt"])

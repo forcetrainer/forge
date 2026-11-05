@@ -84,7 +84,7 @@ work inline. If a `codex exec` call inside the runner fails or halts, the
 fix is a human decision and a re-invocation — not the orchestrator editing
 source files or reasoning through the fix itself.
 
-**Disposition matrix (`--autofix auto`):** every reviewer finding is classified on two runner-verified axes — provenance (checked against the actual diff, never trusted from the reviewer) × contract impact (`contract-breaking` only when the reviewer's `contract_ref` names a citable ref for the review — a coverage item or a declared `spec:<heading>` section; a null or non-citable ref downgrades to `improvement` regardless of the reviewer's label; `unverifiable` is its own third value). every verifiable `in-diff` finding → **fix** (reworked in-loop, whatever its impact label — provenance, not the reviewer's severity call, makes it this task's to repair); off the diff, `improvement` → **defer** (logged, never fixed); `in-run` × `contract-breaking` → **seed**; `pre-existing` × `contract-breaking` → **halt** (a real scope decision, carries a drafted repair task); `unverifiable` findings (any provenance) → **seed**, logged and carried into the final review rather than fixed, deferred, or halted — reporting is unconditional on provenance, so an unverifiable finding is never withheld for want of a diff-side answer. **Repair-scope check:** after every rework lap, task or final, a repair that modified or deleted a file outside the pre-repair diff halts `repair-out-of-scope`, naming the paths (a file the repair created is exempt; the check is file-level). `--autofix gate` skips the matrix: any finding at all halts.
+**Disposition matrix (`--autofix auto`):** every reviewer finding is classified on two runner-verified axes — provenance (checked against the actual diff, never trusted from the reviewer) × contract impact (`contract-breaking` only when the reviewer's `contract_ref` names a citable ref for the review — a coverage item or a declared `spec:<heading>` section; a null or non-citable ref downgrades to `improvement` regardless of the reviewer's label; `unverifiable` is its own third value). every verifiable `in-diff` finding → **fix** (reworked in-loop, whatever its impact label — provenance, not the reviewer's severity call, makes it this task's to repair); off the diff, `improvement` → **defer** (logged, never fixed); `in-run` × `contract-breaking` → **seed**; `pre-existing` × `contract-breaking` → **halt** (a real scope decision, carries a drafted repair task); `unverifiable` findings (any provenance) → **seed**, logged and carried into the final review rather than fixed, deferred, or halted — reporting is unconditional on provenance, so an unverifiable finding is never withheld for want of a diff-side answer. **Widenings:** after every worker turn the runner detects, in-process through `forge_dispose.scope_widenings`, each existing file outside the task's `**Files:**` that the turn modified; the worker justifies each in its record, the reviewer rules on each, and a rejected widening is a fix finding (`<scope>:widen:<path>`) that reworks like any other. `--autofix gate` skips the matrix: any finding at all halts.
 
 **Provenance is three-way; `in-run` seeds instead of halting.** `verify_provenance` (`forge_dispose.py`) takes both the task's own review diff and the run's cumulative diff from run-start HEAD (`run_base`): `in-diff` when the finding's parsed location intersects the review diff; else `in-run` when it intersects the run diff instead (code this run wrote, in an earlier already-committed task, not this task's own changes); else `pre-existing`. `derive_disposition` gains one cell: `in-run` × `contract-breaking` → **seed** — the task is *not* reworked and does *not* halt; the finding is classified, logged into the run's `seeded_findings` accumulator, and the task's own loop proceeds as if it weren't there. Rationale: reworking a task over another task's already-committed diff would edit history outside that task's own vertical slice, breaking the linear per-task review-base invariant (`git diff <prior commit>`). `run_plan` threads `seeded_findings` through every task call and into the final review's `prior_findings` seed, so seeded findings surface in the final review's discovery packet as pre-classified prior findings, not raw diff. `run.json`'s `seeded_findings` (read via `_read_seeded_findings`) is populated across tasks and, deliberately unlike `threads`, **is read back on resume** — a seeded finding names a defect in shipped code, and dropping it on resume would silently ship what it names, where a stale thread id would only cost a cold respawn. In a final review, `run_base` *is* the review's own diff base, so `in-diff`/`in-run` coincide and `seed` never fires there — `classify_findings` needs no special case.
 
@@ -100,7 +100,7 @@ source files or reasoning through the fix itself.
 
 **Coverage is discovery-only.** Every review packet is built with a `packet_review_kind` — `"discovery"` on a task's first review and any stateful edge case that falls back to the full packet shape, `"verification"` only when the reviewer is resumed *and* a delta-scoped repair packet was actually built — and `build_review_kind_section` embeds a `## Review kind` marker in the packet text so the reviewer sees which contract applies. `_verdict_defects(verdict, checklist, review_kind)` gates coverage validation on that marker: coverage defects are checked only when `checklist` is truthy **and** `review_kind == "discovery"`; a verification packet's verdict is never faulted for omitting `coverage`, and one that includes it anyway is not penalized. `validate_locations` is unconditional — it runs on every verdict, both kinds, checklist or not. Both defect lists share the one retry-then-contract-error path in `_review_with_coverage`.
 
-**Halt / escalation:** the runner halts mechanically at two points, with
+**Halt / escalation:** the runner halts mechanically at the points below, with
 distinct semantics:
 
 - **Task or final-review escalation (exit 2)** — the convergence loop above
@@ -115,7 +115,17 @@ distinct semantics:
   fails loudly to stderr naming the cause (fail-loud contracts, no guess). No
   receipt is written at this stage; the orchestrator relays the stderr cause.
 
-In both cases, the runner stops before starting the next task. The
+- **`scope-delete` and `worker-committed` halts (exit 2)** — a worker turn deleted an
+  existing file outside its task's `**Files:**` (`scope-delete`, naming every such
+  path), or left `HEAD` anywhere but the stage's recorded checkpoint on its recorded
+  branch (`worker-committed`: an added commit, a reset, an amend, a branch switch; the
+  halt names the recorded and current `HEAD` and branch and the commits between).
+  Both are ordinary freezes and **refuse `--resolve`**; the human restores the deleted
+  file or keeps, rewrites or drops the commits, then re-invokes, and the resumed run
+  records a fresh checkpoint that contains whatever was kept. The orchestrator relays
+  the halt text verbatim.
+
+In every halt and contract-error case, the runner stops before starting the next task. The
 orchestrator's only job at that point is relaying information to the user —
 not summarizing, not softening, not attempting the fix itself.
 
@@ -203,6 +213,8 @@ drafted `repair_task`. `run.json` aggregates every task's and the final
 review's defer-disposition findings under `deferrals`, plus `autofix_mode`
 and the terminal `doc_sync` record; `--status` surfaces the deferrals
 count/list and the halt-reason class alongside the existing per-task summary.
+
+**Widenings at close-out.** `run.json` also aggregates under `widenings` every accepted widening (from a passing receipt only, never an escalated one) and every trivial-tier one marked not reviewed; a trivial batch's are tagged with the batch's task numbers. `--status` lists them beside the deferrals — task, path, lines added and removed, the worker's `reason` and `serves`, the reviewer's `reason` — informational: no per-entry call, nothing filed. An edit later reverted, discarded at reconcile or never replayed is not listed.
 
 **Stage-and-emit contract:** the runner never files a deferral itself — it
 has no `gh` invocation anywhere and writes no durable record beyond

@@ -105,7 +105,6 @@ from forge_dispose import (  # noqa: F401
     derive_disposition,
     diff_line_ranges,
     parse_verdict,
-    repair_scope_violations,
     validate_locations,
     verify_provenance,
 )
@@ -151,6 +150,8 @@ from forge_receipts import (  # noqa: F401
     write_run_json,
     _read_approved,
     _read_unverified,
+    _read_widenings,
+    aggregate_widenings,
     write_watch_launcher,
 )
 
@@ -569,7 +570,7 @@ def _retry_defects_path(defects, run_dir, label):
 
 
 def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
-                     classify_ctx=None):
+                     classify_ctx=None, due_paths=()):
     """Every verdict validation defect for one dispatched verdict: coverage
     defects against ``checklist`` (skipped when ``checklist`` is falsy — the
     empty-checklist skip case, Contract checklist spec — OR when
@@ -611,7 +612,12 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
     ``repair_task``. ``classify_ctx`` is a callable returning the keyword
     arguments ``classify_findings`` will be given (``diff_text``, ``run_diff``,
     ``carried_ids``), so the rule reads the runner-derived provenance rather
-    than the reviewer's claim; without it the emitted provenance is used."""
+    than the reviewer's claim; without it the emitted provenance is used.
+
+    ``due_paths`` are the widened paths the packet listed for a ruling (Scope
+    widening); the verdict's ``widenings`` must rule on exactly those — a
+    missing, extra or duplicated path, an unknown ruling or an empty reason is
+    a defect on both review kinds, a pass verdict included."""
     defects = (
         list(forge_dispose.validate_coverage(verdict, checklist, citable))
         if checklist and review_kind == "discovery" else []
@@ -630,12 +636,14 @@ def _verdict_defects(verdict, checklist, review_kind="discovery", citable=None,
     defects += forge_dispose.validate_contract_refs(
         verdict, citable if citable is not None else checklist
     )
+    defects += forge_dispose.validate_widenings(verdict, due_paths)
     return defects
 
 
 def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
                            review_kind="discovery", citable=None,
-                           arm_retry_resume=None, classify_ctx=None):
+                           arm_retry_resume=None, classify_ctx=None,
+                           due_paths=()):
     """Dispatch a review and validate its verdict against ``checklist``
     (coverage, discovery only), its findings' locations (both kinds), and its
     findings' ``contract_ref`` membership against ``citable`` (both kinds;
@@ -653,10 +661,13 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
     (``<label>-coverage-retry.md``) is passed as ``fallback_path`` and is sent
     only if that resume fails and the closure falls back to a cold spawn.
     Without it, the retry is a cold dispatch of the coverage-retry packet.
+    ``due_paths`` are the widened paths the packet asked a ruling on (see
+    ``_verdict_defects``); the retry packet inherits the packet's
+    ``## Widened files`` section with the rest of it.
     Returns ``(verdict, retried)``."""
     verdict = dispatch_call(packet_path)
     defects = _verdict_defects(
-        verdict, checklist, review_kind, citable, classify_ctx
+        verdict, checklist, review_kind, citable, classify_ctx, due_paths
     )
     if not defects:
         return verdict, False
@@ -669,7 +680,7 @@ def _review_with_coverage(dispatch_call, packet_path, checklist, run_dir, label,
             _retry_defects_path(defects, run_dir, label), fallback_path=retry_path
         )
     defects = _verdict_defects(
-        verdict, checklist, review_kind, citable, classify_ctx
+        verdict, checklist, review_kind, citable, classify_ctx, due_paths
     )
     if defects:
         raise RuntimeError(
@@ -741,10 +752,24 @@ HALT_CAUSE_FOR_WORKER = {
     "gate": "The run stopped on a `gate` halt: this run is in gate mode, "
             "where any reviewer finding stops it for a human rather than "
             "being auto-fixed.",
+    # Legacy key: read from halt records written before Scope widening; no
+    # code emits it any more.
     "repair-out-of-scope": "The run stopped on a `repair-out-of-scope` halt: "
                            "a repair modified or deleted a file outside this "
                            "task's own diff. Fix only files the task already "
                            "touched, or create new ones.",
+    "scope-delete": "The run stopped on a `scope-delete` halt: a worker turn "
+                    "deleted an existing file outside this task's declared "
+                    "`**Files:**`. The human has restored the path or "
+                    "approved the deletion. Never delete a file outside the "
+                    "task's own files.",
+    "worker-committed": "The run stopped on a `worker-committed` halt: a "
+                        "worker turn committed, reset, amended, switched "
+                        "branch or detached HEAD. Workers never commit; the "
+                        "human has kept, rewritten or dropped what the "
+                        "worker left, and the commits that remain are part "
+                        "of the checkpoint you are resuming from. Never "
+                        "commit.",
     "reviewer-wrote": "The run stopped on a `reviewer-wrote` halt: the "
                       "reviewer changed the repository during its review, so "
                       "its verdict was discarded. The tree you are resuming "
@@ -932,6 +957,163 @@ class HaltResume:
     halt_reason: str | None = None
 
 
+def _in_git_work_tree(cwd):
+    """True inside a git work tree, False when ``cwd`` is not a repository
+    (or git is absent) — the one case where widening detection does not
+    apply. Any other git failure raises RuntimeError naming the cause."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd,
+            capture_output=True, text=True)
+    except OSError:
+        return False
+    if proc.returncode == 0:
+        return proc.stdout.strip() == "true"
+    if "not a git repository" in proc.stderr:
+        return False
+    raise RuntimeError(
+        "widening detection: git rev-parse --is-inside-work-tree failed in "
+        "{}: {}".format(cwd, proc.stderr.strip()))
+
+
+def _git_out(cwd, args, what, ok_codes=(0,)):
+    """``(returncode, stdout)`` of ``git <args>`` in ``cwd``; RuntimeError
+    naming ``what`` and the cause when git cannot run or exits with a code
+    outside ``ok_codes`` — a git failure inside the checkpoint machinery is a
+    contract error, never a skipped check."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True)
+    except OSError as e:
+        raise RuntimeError("{}: failed to invoke git: {}".format(what, e))
+    if proc.returncode not in ok_codes:
+        raise RuntimeError("{}: git {} failed in {}: {}".format(
+            what, " ".join(args), cwd, proc.stderr.strip()))
+    return proc.returncode, proc.stdout
+
+
+def _current_branch(cwd, what):
+    """The full ref ``HEAD`` is attached to (``refs/heads/<name>``), or None
+    for a detached ``HEAD``."""
+    code, out = _git_out(
+        cwd, ["symbolic-ref", "--quiet", "HEAD"], what, ok_codes=(0, 1))
+    return out.strip() if code == 0 else None
+
+
+def _record_checkpoint(cwd, plan_path=None):
+    """The stage checkpoint (Scope widening, The checkpoint): ``HEAD`` — its
+    commit sha and the branch it is attached to — recorded once per stage per
+    invocation, just before the stage's first worker dispatch. ``None`` outside
+    a git work tree, where there is nothing to compare against. Detection and
+    the worker-commit check use this value for every later turn of the stage;
+    ``HEAD`` is never re-read for detection. With ``plan_path``, an in-repo
+    plan absent at the checkpoint (ignored, untracked, deleted) is a contract
+    error raised here, before any worker is dispatched."""
+    if not _in_git_work_tree(cwd):
+        return None
+    sha = _git_head(cwd)
+    if sha is None:
+        raise RuntimeError(
+            "widening detection: cannot read HEAD in {} — a git failure "
+            "inside a repository is never a skipped check".format(cwd))
+    if plan_path is not None:
+        forge_dispose.require_plan_at_checkpoint(cwd, plan_path, sha)
+    return {"sha": sha,
+            "branch": _current_branch(cwd, "recording the checkpoint")}
+
+
+def _worker_commit_check(cwd, checkpoint):
+    """After a worker turn: ``None`` when ``HEAD`` is the stage's checkpoint on
+    the branch it was recorded on, else the ``worker_committed`` halt-record
+    block — the recorded and current ``HEAD`` and branch and every commit
+    between them (A worker commit halts). Covers an added commit, a reset, an
+    amend, a branch switch and a detached ``HEAD``. Moves no ref."""
+    what = "worker-commit check"
+    _, out = _git_out(cwd, ["rev-parse", "HEAD"], what)
+    head = out.strip()
+    branch = _current_branch(cwd, what)
+    if head == checkpoint["sha"] and branch == checkpoint["branch"]:
+        return None
+    _, out = _git_out(
+        cwd, ["rev-list", "--reverse", "{}..{}".format(checkpoint["sha"], head)],
+        what)
+    return {
+        "recorded_head": checkpoint["sha"],
+        "recorded_branch": checkpoint["branch"],
+        "current_head": head,
+        "current_branch": branch,
+        "commits": out.split(),
+    }
+
+
+def _worker_committed_guidance(record, who):
+    """The halt's one-line cause and the human's next step."""
+    def where(branch):
+        return branch if branch else "a detached HEAD"
+    commits = ", ".join(record["commits"]) or "(none: HEAD was moved back)"
+    return (
+        "worker-committed: {} changed the repository's history — HEAD was "
+        "{} on {} and is now {} on {}; commits between them: {}. Workers "
+        "never commit. Nothing was moved or discarded: keep, rewrite or drop "
+        "the commit(s), then re-invoke — the resumed run records a fresh "
+        "checkpoint that contains whatever you keep.".format(
+            who, record["recorded_head"], where(record["recorded_branch"]),
+            record["current_head"], where(record["current_branch"]), commits))
+
+
+def _widenings_record(run_dir, task_number=None):
+    """The worker's widening record path (Scope widening, The worker's record):
+    ``task-<N>/widenings.json`` in the run dir, or ``final/widenings.json`` for
+    the final-review fixer. Absolute, because a worker runs in the repository,
+    not the run dir's parent; its directory is created here so a worker can
+    simply write the file."""
+    scope_dir = "final" if task_number is None else "task-{}".format(task_number)
+    path = os.path.join(os.path.abspath(run_dir), scope_dir, "widenings.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def _is_widen_finding(finding):
+    """True for the fix finding the runner raises for a rejected widening
+    (identity ``<scope>:widen:<path>``)."""
+    return _local_id(finding.identity or "").startswith("widen:")
+
+
+def _rework_line(finding, record_path):
+    """One outstanding finding as the worker is told it. A rejected
+    widening's own summary is only the reviewer's reason, so it is framed with
+    the path and the two ways out (Scope widening, Rulings); every other
+    finding is its summary."""
+    if _is_widen_finding(finding):
+        return (
+            "Widening of `{}` was rejected: {} — revert the edit and solve "
+            "the need inside the task's files, or keep it and state a better "
+            "justification in your widenings record ({}).".format(
+                finding.file, finding.summary, record_path)
+        )
+    return finding.summary
+
+
+def _scope_delete_guidance(paths, scope_label):
+    """The halt text for a ``scope-delete`` halt: the deleted paths, and what
+    the human does before re-invoking. ``--resolve`` is not accepted."""
+    return (
+        "scope-delete: {} deleted existing file(s) outside its declared "
+        "files: {}. The human restores the path(s) or approves the deletion "
+        "before re-invoking; `--resolve` does not apply to this halt.".format(
+            scope_label, ", ".join(paths))
+    )
+
+
+def _widening_defect_finding(defects, record_path):
+    """A widening-record defect as the turn's execution failure, naming every
+    defective entry (Scope widening, The worker's record)."""
+    return _execution_failure_finding(
+        "The widenings record at {} is defective, so this turn was not "
+        "reviewed — fix it and resubmit: {}".format(
+            record_path, "; ".join(defects)))
+
+
 def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings,
                reconcile=None):
     """Write the worker brief for one attempt and return its path + SHA-256. On a
@@ -944,7 +1126,9 @@ def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings,
     resumed run never carries a thread across invocations, so this worker is
     a cold spawn that holds none of the task's contract yet (Halt
     resolution / Session continuity)."""
-    brief = eb.build_brief(plan_path, task.number, spec_path)
+    brief = eb.build_brief(
+        plan_path, task.number, spec_path,
+        widenings_record=_widenings_record(run_dir, task.number))
     if findings:
         lines = ["", "", "## Rework — address these findings before resubmitting", ""]
         lines.extend("- {}".format(f) for f in findings)
@@ -970,6 +1154,8 @@ def _resume_findings_prompt(findings, run_dir, task, attempt):
     lines = ["## Rework — address these findings before resubmitting", ""]
     lines.extend("- {}".format(f) for f in findings)
     prompt = "\n".join(lines) + "\n"
+    # Every worker brief names its record path, resumed ones included.
+    prompt += eb.widenings_section(_widenings_record(run_dir, task.number))
     path = os.path.join(
         run_dir, "task-{}-attempt-{}-resume-prompt.md".format(task.number, attempt)
     )
@@ -1066,7 +1252,7 @@ def _check_halt_identities(halt_record, run_dir):
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                   effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto",
                   run_base=None, seeded_findings=None, approved_ids=frozenset(),
-                  resume=None, halt_out=None):
+                  resume=None, halt_out=None, checkpoint=None):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
     per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
@@ -1118,15 +1304,29 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     outstanding findings as dicts, the drafted ``repair_task``, and the
     serialized ConvergenceState as of this attempt. An out-parameter for the
     same reason ``threads``/``seeded_findings`` are: the caller owns run.json,
-    and TaskOutcome is the loop's summary shape, not a run-state record."""
+    and TaskOutcome is the loop's summary shape, not a run-state record.
+
+    ``checkpoint`` (``_record_checkpoint``'s value, or None to record it now,
+    before the first worker dispatch) is the stage checkpoint: the task's
+    review base, the origin of every widening comparison, and the ``HEAD`` every
+    worker turn must leave untouched (``worker-committed``). It is held across
+    every rework lap and never re-read."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
-    # Per-task review base = HEAD at task start (the prior task's commit; the
-    # run-start commit for task 1). Each passed task commits, so the tree is clean
-    # here and `git diff <review_base>` isolates this task's own changes. Taken
-    # once (trivial tiers need no reviewer).
-    review_base = _git_head(cwd) if task.tier != "trivial" else None
+    # The stage checkpoint: HEAD (sha and branch) recorded once, before the
+    # first worker dispatch, and held across every rework lap. A task's
+    # checkpoint is its review base — the prior task's commit, the run-start
+    # commit for task 1 — so `git diff <review_base>` isolates this task's own
+    # changes — and the origin of every widening comparison (Scope widening).
+    # None outside a git repo, where neither applies.
+    if checkpoint is None:
+        checkpoint = _record_checkpoint(cwd, plan_path)
+    review_base = (
+        checkpoint["sha"] if checkpoint and task.tier != "trivial" else None)
+    detect_base = checkpoint["sha"] if checkpoint else None
+    widen_record = _widenings_record(run_dir, task.number)
+    scope = "t{}".format(task.number)
     state = resume.state if resume is not None else ConvergenceState()
     # Attempts already spent before a halt: the resumed task continues the
     # count so the backstop is not reset by the pause (Halt resolution).
@@ -1194,8 +1394,29 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 task, brief_path, codex_bin, run_dir, threads,
                 effort_override=effort_override, timeout=timeout,
             )
-        update_run_progress(run_dir, task.number, "acceptance")
-        acceptance = run_acceptance(task, cwd, live_path)
+        # After every worker turn, before detection: HEAD must still be the
+        # stage's checkpoint on the branch it was recorded on, else the task
+        # halts `worker-committed` (Scope widening, A worker commit halts).
+        worker_committed = (
+            _worker_commit_check(cwd, checkpoint) if checkpoint else None)
+        # Widening detection (Scope widening) runs after every worker turn,
+        # whether or not it crashed or its acceptance passes, and before
+        # either is acted on — through the one implementation, from the
+        # checkpoint. A git failure raises RuntimeError (a contract error),
+        # never a skipped check.
+        widen = None
+        if detect_base is not None and worker_committed is None:
+            widen = forge_dispose.scope_widenings(
+                cwd, plan_path, spec_path, scope, detect_base, detect_base,
+                state, widen_record)
+            forge_dispose.prune_accepted_widenings(state, widen)
+        deleted = list(widen.deleted) if widen else []
+
+        if worker_committed is not None:
+            acceptance = []   # the tree is not the attempt a commit hides
+        else:
+            update_run_progress(run_dir, task.number, "acceptance")
+            acceptance = run_acceptance(task, cwd, live_path)
 
         worker_ok = worker.exit_code == 0 and not worker.timed_out
         acc_ok = all(r.passed for r in acceptance)
@@ -1207,9 +1428,20 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         coverage_retry = False
         reviewer_resume_fallback = False
         reviewer_wrote = None  # RepositoryChangedError when the reviewer wrote
+        rejected = []       # fix findings raised for rejected widenings
         failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
-        if worker.timed_out:
+        if worker_committed is not None:
+            # A worker commit halts before detection, acceptance or review.
+            # No finding: the halt is the whole outcome.
+            cause = _worker_committed_guidance(
+                worker_committed, "task {}'s worker".format(task.number))
+        elif deleted:
+            # An out-of-scope deletion halts here, before any rework or
+            # review, whatever else the turn did (Scope widening, Deletion
+            # halts). No finding: the halt is the whole outcome.
+            cause = _scope_delete_guidance(deleted, "task {}".format(task.number))
+        elif worker.timed_out:
             cause = "worker timed out after {}s".format(timeout)
             findings = [_execution_failure_finding(
                 "Prior worker attempt timed out after {}s with no usable result — "
@@ -1228,6 +1460,10 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 "(exit {}). Output tail:\n{}".format(
                     failed.command, failed.outcome, failed.exit_code,
                     failed.output_tail))]
+        elif widen is not None and widen.record_defects:
+            cause = "widenings record defective: {}".format(
+                "; ".join(widen.record_defects))
+            findings = [_widening_defect_finding(widen.record_defects, widen_record)]
         elif task.tier != "trivial":
             # Trivial tier: acceptance is the whole verification. Standard/complex:
             # a reviewer judges the diff against the spec, and the runner verifies
@@ -1253,6 +1489,10 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             citable = forge_checklist.citable_refs(
                 plan_path, spec_path, task.number,
             )
+            # The widenings due a ruling this lap ride in the packet; the
+            # verdict must rule on exactly those paths.
+            widened_text = forge_dispose.render_widened_section(widen) if widen else ""
+            due_paths = [w.path for w in widen.due] if widen else []
             # Discovery (this task's first review) is always cold — an
             # independent first read is the entire justification for a
             # separate reviewer (constraint: discovery-review-is-cold);
@@ -1295,7 +1535,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     if checklist else checklist
                 )
                 packet_text = rp.build_verification_packet(
-                    prior_findings, delta_diff, checklist, citable=citable
+                    prior_findings, delta_diff, checklist, citable=citable,
+                    widened=widened_text,
                 )
                 packet_path = os.path.join(
                     run_dir, "task-{}-review.md".format(task.number)
@@ -1309,6 +1550,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     spec_path=spec_path,
                     citable=citable,
                     acceptance_results=[asdict(r) for r in acceptance],
+                    widened=widened_text,
                 )
             # A scoped carried_from is kept only when it names a prior finding
             # this packet carried, whichever packet shape was built: the
@@ -1360,6 +1602,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         "scope": "t{}".format(task.number),
                         "prior_identities": packet_prior_identities,
                     },
+                    due_paths=due_paths,
                 )
             except forge_git.RepositoryChangedError as e:
                 reviewer_wrote = e
@@ -1373,19 +1616,24 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     prior_identities=packet_prior_identities,
                 )
                 review_verdict = verdict_to_dict(verdict)
-                findings = verdict.findings
+                # The rulings fold into the state; a rejected widening is a
+                # fix finding the runner raises (Scope widening, Rulings).
+                rejected = (
+                    forge_dispose.apply_widening_rulings(
+                        verdict, widen.due, scope, state, cwd)
+                    if widen is not None else []
+                )
+                findings = list(verdict.findings) + rejected
                 if seeded_findings is not None:
                     seeded_findings.extend(
                         _seed_record(f) for f in findings if f.disposition == "seed"
                     )
 
-        # Repair-scope check (Disposition matrix): a rework lap's repair that
-        # modified or deleted a file outside the pre-repair task diff halts.
-        scope_violations = (
-            repair_scope_violations(cwd, review_base, repair_snapshot)
-            if repair_snapshot and review_base else []
-        )
-        if reviewer_wrote is not None:
+        if worker_committed is not None:
+            # Not a convergence class either: no review or execution signal
+            # was produced, the state is not advanced.
+            action, halt_reason = "halt", "worker-committed"
+        elif reviewer_wrote is not None:
             # Not a convergence class: the attempt's verdict was discarded, so
             # the state is not advanced and no finding exists to disposition.
             action, halt_reason = "halt", "reviewer-wrote"
@@ -1393,9 +1641,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             action, halt_reason = convergence_decision(
                 findings, state, acc_ok, attempt, autofix_mode,
                 approved_ids=approved_ids, failed_acceptance=failed_acceptance,
-                scope_violations=scope_violations,
+                deleted=deleted,
             )
-            advance_state(state, findings, acc_ok, failed_acceptance)
+            if not deleted:
+                # A scope-delete halt produced no review or execution signal;
+                # the state the halt record carries stays as the prior lap
+                # left it.
+                advance_state(state, findings, acc_ok, failed_acceptance)
 
         fix_findings = [f for f in findings if f.disposition == "fix"]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
@@ -1415,9 +1667,23 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         outstanding = [f.summary for f in findings] if action == "halt" else []
         if reviewer_wrote is not None:
             outstanding = list(reviewer_wrote.changes)
-        elif halt_reason == "repair-out-of-scope":
-            outstanding = ["repair touched a file outside the task's diff: " + p
-                           for p in scope_violations] + outstanding
+        elif worker_committed is not None or deleted:
+            outstanding = [cause]
+
+        # The review's `widenings` block (decision.json's shape); a trivial
+        # task's, which no reviewer ruled on, ride as `unarbitrated`.
+        widen_block = None
+        unarbitrated = []
+        if widen is not None:
+            widen_block = forge_dispose.widenings_block(
+                state, widen.widened, rejected, deleted)
+            if task.tier == "trivial":
+                unarbitrated = [
+                    {"path": w.path, "added": w.added, "removed": w.removed,
+                     "reason": w.reason, "serves": w.serves}
+                    for w in widen.widened
+                ]
+                widen_block["unarbitrated"] = unarbitrated
 
         receipt = {
             "task_number": task.number,
@@ -1438,6 +1704,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             "coverage_skipped": coverage_skipped,
             "coverage_retry": coverage_retry,
             "resume_fallback": worker_resume_fallback or reviewer_resume_fallback,
+            "widenings": widen_block,
             # The reconciliation outcome, on the attempt that resumed a frozen
             # halt (Halt resolution: the reconciliation outcome is recorded on
             # the receipt). None on every other attempt.
@@ -1456,8 +1723,13 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         write_receipt(run_dir, task, attempt, receipt)
 
         if action == "pass":
-            return TaskOutcome(status="passed", attempts=attempt, summary="",
-                               deferrals=deferrals)
+            # No reviewer for a trivial task: its widenings, with the
+            # record's justification, go to the close-out list unarbitrated.
+            # The task is checked once, against its own Files (a batch of one).
+            return TaskOutcome(
+                status="passed", attempts=attempt, summary="",
+                deferrals=deferrals,
+                widenings=[dict(u, tasks=[task.number]) for u in unarbitrated])
         if action == "halt":
             if halt_out is not None:
                 # Everything the caller needs to freeze this attempt and write
@@ -1471,6 +1743,10 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                     "repair_task": repair_task,
                     "convergence_state": state.to_dict(),
                 })
+                if deleted:
+                    halt_out["deleted"] = deleted
+                if worker_committed is not None:
+                    halt_out["worker_committed"] = worker_committed
                 if reviewer_wrote is not None:
                     halt_out["reviewer_wrote"] = _reviewer_wrote_record(reviewer_wrote)
             return TaskOutcome(
@@ -1487,9 +1763,12 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         # execution-failure retry finding included — its summary is reattempt
         # guidance) and the real reviewer fix findings into the next re-review
         # packet (the implicit crash marker carries no review identity).
-        findings_carry = [f.summary for f in fix_findings]
+        findings_carry = [_rework_line(f, widen_record) for f in fix_findings]
+        # A rejected widening reaches the next reviewer only through
+        # `## Widened files`, never as a prior finding (Scope widening).
         prior_findings = [
-            _seed_record(f) for f in fix_findings if f.impact is not None
+            _seed_record(f) for f in fix_findings
+            if f.impact is not None and not _is_widen_finding(f)
         ]
 
 
@@ -1511,10 +1790,11 @@ def _final_review_fix_brief(findings, run_dir, attempt, checklist=None):
     _spec_items`` — never fenced code, so no fence-safety is needed here,
     unlike the whole-plan diff this replaces). Overwritten fresh each
     attempt, like the per-task rework brief."""
+    record_path = _widenings_record(run_dir)
     lines = ["## Final-review fix — resolve these findings", ""]
     for finding in findings:
         loc = " ({}:{})".format(finding.file, finding.lines) if finding.file else ""
-        lines.append("- {}{}".format(finding.summary, loc))
+        lines.append("- {}{}".format(_rework_line(finding, record_path), loc))
 
     files = sorted({finding.file for finding in findings if finding.file})
     if files:
@@ -1538,6 +1818,7 @@ def _final_review_fix_brief(findings, run_dir, attempt, checklist=None):
                 lines.append(it.text)
 
     brief = "\n".join(lines).rstrip("\n") + "\n"
+    brief += eb.widenings_section(record_path)
     brief_path = os.path.join(
         run_dir, "final-review-fix-attempt-{}-brief.md".format(attempt)
     )
@@ -1553,11 +1834,14 @@ def _final_review_fix_resume_prompt(findings, run_dir, attempt):
     ``_resume_findings_prompt``'s per-task rework-resume prompt. The resumed
     fixer already holds the brief, spec sections, and affected paths from its
     cold-spawn attempt. Overwritten fresh each resumed attempt."""
+    record_path = _widenings_record(run_dir)
     lines = ["## Final-review fix — resolve these findings", ""]
     for finding in findings:
         loc = " ({}:{})".format(finding.file, finding.lines) if finding.file else ""
-        lines.append("- {}{}".format(finding.summary, loc))
+        lines.append("- {}{}".format(_rework_line(finding, record_path), loc))
     prompt = "\n".join(lines) + "\n"
+    # Every worker brief names its record path, resumed ones included.
+    prompt += eb.widenings_section(record_path)
     path = os.path.join(
         run_dir, "final-review-fix-attempt-{}-resume-prompt.md".format(attempt)
     )
@@ -1778,7 +2062,7 @@ def _freeze_reviewer_wrote(cwd, ref_name, record, record_halt=None):
 
 
 def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
-                       write_halt=None):
+                       write_halt=None, worker_committed=None):
     """Freeze a halted whole-run stage (``final-review`` | ``doc-sync``) and
     return its halt record.
 
@@ -1828,12 +2112,17 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
         return stage_record(freeze_commit)
     freeze_base = _git_head(cwd)
     freeze_commit = freeze_attempt(cwd, freeze_stage_ref_name(run_id, stage))
-    return {
+    record = {
         "stage": stage,
         "freeze_commit": freeze_commit,
         "freeze_base": freeze_base,
         "halt_reason": halt_reason,
     }
+    if worker_committed is not None:
+        # The ordinary freeze: it moved no ref, so the commits stay where the
+        # fixer left them for the human to keep, rewrite or drop.
+        record["worker_committed"] = worker_committed
+    return record
 
 
 def _collect_unverified(verdict):
@@ -1897,7 +2186,8 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
                           plan_path=None, seeded_findings=None,
                           named_sections=None, halt_out=None,
-                          approved_ids=frozenset(), unverified=None):
+                          approved_ids=frozenset(), unverified=None,
+                          checkpoint=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -1959,9 +2249,18 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     carries — is never replaced, and a verification lap that omits one never
     clears it. The merged list rides the final-review receipt and every
     returned outcome's ``unverified``; deciding whether any entry still needs
-    a call is the caller's, after the loop."""
+    a call is the caller's, after the loop.
+
+    ``checkpoint`` (``_record_checkpoint``'s value, or None to record it now,
+    before the first fixer dispatch) is the stage checkpoint: the final scope's
+    upper bound, the origin of every widening comparison, and the ``HEAD`` every
+    fixer turn must leave untouched — a fixer that commits halts
+    ``worker-committed`` (``halt_out['worker_committed']`` carries the record).
+    It is held across every lap and never re-read."""
     if threads is None:
         threads = {}
+    if checkpoint is None:
+        checkpoint = _record_checkpoint(cwd, plan_path)
     unverified = [dict(e) for e in unverified or []]
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
@@ -1977,6 +2276,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                              # discovery (0) vs verification (>0), like execute_task
     reviewer_role = "final-reviewer"
     fixer_role = "final-fixer"
+    widen_record = _widenings_record(run_dir)
+    # Whole-plan scope detection needs the plan; a caller with none (a unit
+    # test exercising the loop alone) has no scope to widen against.
+    legacy_spec = _checklist_spec(plan_path, spec_paths) if plan_path else None
 
     checklist = None
     coverage_skipped = None
@@ -1999,11 +2302,16 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             plan_path, _checklist_spec(plan_path, spec_paths),
         )
 
+    # The widenings of the latest detection: a lap with no fixer turn runs
+    # none, and the content an earlier lap accepted still holds then.
+    final_widened = []
+    final_deleted = []
     attempt = 0
     while True:
         attempt += 1
         exec_ok = True
         findings = []
+        rejected = []   # fix findings raised for rejected widenings this lap
         # Pre-repair snapshot (Delta-scoped verification packets spec): taken
         # just before this attempt's fix dispatch so a later verification
         # packet's delta is `forge_git.repair_delta` against the snapshot, scoped to this
@@ -2012,6 +2320,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         repair_snapshot = None
         fixer_resume_fallback = False
         reviewer_resume_fallback = False
+        widen = None
 
         if fix_findings:
             update_run_progress(run_dir, None, "final-review-fix")
@@ -2051,6 +2360,41 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     timeout=timeout,
                 )
             applied_fix = True
+            # After the fixer turn, before detection: HEAD must still be the
+            # stage's checkpoint on the branch it was recorded on (Scope
+            # widening, A worker commit halts).
+            committed = (
+                _worker_commit_check(cwd, checkpoint) if checkpoint else None)
+            if committed is not None:
+                guidance = _worker_committed_guidance(
+                    committed, "the final-review fixer")
+                write_final_review_halt(run_dir, "worker-committed", [guidance])
+                if halt_out is not None:
+                    halt_out["worker_committed"] = committed
+                return TaskOutcome(
+                    status="escalated", attempts=attempt, summary=guidance,
+                    findings=[guidance], halt_reason="worker-committed",
+                    unverified=unverified,
+                )
+            # Widening detection after the fixer turn, crashed or not, before
+            # either is acted on (Scope widening, Detection): the final scope
+            # is every task's Files plus every path the run changed up to the
+            # checkpoint.
+            if plan_path is not None:
+                widen = forge_dispose.scope_widenings(
+                    cwd, plan_path, legacy_spec, "final", run_base,
+                    checkpoint["sha"] if checkpoint else run_base, state,
+                    widen_record)
+                forge_dispose.prune_accepted_widenings(state, widen)
+                final_widened, final_deleted = widen.widened, widen.deleted
+            if widen is not None and widen.deleted:
+                guidance = _scope_delete_guidance(widen.deleted, "the final-review fixer")
+                write_final_review_halt(run_dir, "scope-delete", [guidance])
+                return TaskOutcome(
+                    status="escalated", attempts=attempt, summary=guidance,
+                    findings=[guidance], halt_reason="scope-delete",
+                    unverified=unverified,
+                )
             if worker.timed_out:
                 exec_ok = False
                 findings = [_execution_failure_finding(
@@ -2061,6 +2405,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 findings = [_execution_failure_finding(
                     "Prior final-review fix dispatch exited {} with no usable "
                     "result — reattempt.".format(worker.exit_code))]
+            elif widen is not None and widen.record_defects:
+                exec_ok = False
+                findings = [_widening_defect_finding(
+                    widen.record_defects, widen_record)]
 
         if exec_ok:
             update_run_progress(run_dir, None, "final-review")
@@ -2074,6 +2422,8 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             # resumed reviewer already holds the full spec and whole-plan
             # diff in session, so re-sending them is exactly the waste this
             # phase removes.
+            widened_text = forge_dispose.render_widened_section(widen) if widen else ""
+            due_paths = [w.path for w in widen.due] if widen else []
             is_verification = review_attempts > 0
             # Track the packet actually built, not just the flag (same edge
             # case as the per-task reviewer above).
@@ -2089,7 +2439,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 )
                 packet_text = rp.build_verification_packet(
                     prior_findings, delta_diff, packet_checklist,
-                    citable=final_citable,
+                    citable=final_citable, widened=widened_text,
                 )
                 packet_path = os.path.join(run_dir, "final-review.md")
                 with open(packet_path, "w", encoding="utf-8") as f:
@@ -2100,6 +2450,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     spec_paths, run_base, diff, run_dir,
                     prior_findings=prior_findings or None, checklist=checklist,
                     citable=final_citable, named_sections=named_sections,
+                    widened=widened_text,
                 )
 
             review_resume_state = {
@@ -2146,6 +2497,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                         "carried_ids": state.carried_ids, "scope": "final",
                         "prior_identities": packet_prior_identities,
                     },
+                    due_paths=due_paths,
                 )
             except forge_git.RepositoryChangedError as e:
                 # Verdict discarded; the stage freezes the pre-review capture.
@@ -2175,15 +2527,14 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                 carried_ids=state.carried_ids,
                 prior_identities=packet_prior_identities,
             )
-            findings = verdict.findings
+            rejected = (
+                forge_dispose.apply_widening_rulings(
+                    verdict, widen.due, "final", state, cwd)
+                if widen is not None else []
+            )
+            findings = list(verdict.findings) + rejected
             unverified = _merge_unverified(unverified, _collect_unverified(verdict))
 
-        # Repair-scope check (Disposition matrix), against the run diff: a fix
-        # that modified or deleted a file outside it halts.
-        scope_violations = (
-            repair_scope_violations(cwd, run_base, repair_snapshot)
-            if repair_snapshot else []
-        )
         # The final review has no acceptance command that can regress, so the
         # acceptance signal is always green: a fix-dispatch crash is an implicit
         # fix-retry finding (rework to backstop), exactly like execute_task's
@@ -2191,7 +2542,7 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # is only a resolved reviewer finding reappearing).
         action, halt_reason = convergence_decision(
             findings, state, True, attempt, autofix_mode,
-            approved_ids=approved_ids, scope_violations=scope_violations,
+            approved_ids=approved_ids,
         )
         advance_state(state, findings, True)
 
@@ -2199,7 +2550,8 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         # Carry only real reviewer fix findings (not the execution-failure
         # marker, which has no review identity) into the next re-review packet.
         prior_findings = [
-            _seed_record(f) for f in fix_findings if f.impact is not None
+            _seed_record(f) for f in fix_findings
+            if f.impact is not None and not _is_widen_finding(f)
         ]
         deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
         # An approved identity stays disposition "halt" but was already
@@ -2211,9 +2563,6 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
         ]
         repair_task = halted[0].repair_task if halted else None
         outstanding = [f.summary for f in findings] if action == "halt" else []
-        if halt_reason == "repair-out-of-scope":
-            outstanding = ["repair touched a file outside the run's diff: " + p
-                           for p in scope_violations] + outstanding
 
         # Persist this attempt's state onto the final-review receipt
         # unconditionally — including an `exec_ok=False` attempt whose fix
@@ -2228,6 +2577,10 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
             coverage_skipped=coverage_skipped, coverage_retry=coverage_retry,
             resume_fallback=fixer_resume_fallback or reviewer_resume_fallback,
             unverified=unverified or None,
+            widenings=(
+                forge_dispose.widenings_block(
+                    state, final_widened, rejected, final_deleted)
+                if plan_path is not None else None),
         )
 
         if action == "pass":
@@ -2667,6 +3020,17 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # at run level has no resolution to restate; it stays an exemption.
     for approved_id in _read_approved(run_dir):
         approved.setdefault(approved_id, "approved")
+    if resolve and (halt_record or {}).get("halt_reason") in (
+            "scope-delete", "worker-committed"):
+        # A `scope-delete` or `worker-committed` halt poses no question for
+        # `--resolve` to answer: the human restores the path or approves the
+        # deletion (Scope widening, Deletion halts), or keeps, rewrites or
+        # drops the worker's commits (A worker commit halts), in the tree.
+        raise RuntimeError(
+            "--resolve {}: {} takes no --resolve — act on the tree (restore "
+            "the deleted path(s) or approve the deletion; keep, rewrite or "
+            "drop the worker's commits), then re-invoke without "
+            "it".format(", ".join(sorted(resolve)), _describe_halt(halt_record)))
     unverified_halt = (
         halt_record is not None
         and halt_record.get("stage") == "final-review"
@@ -2858,6 +3222,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # is never lost when this invocation's own accumulator starts fresh; every
     # task still executed this invocation appends its own seeds in place.
     seeded_findings = list(_read_seeded_findings(run_dir) or [])
+    # Widenings aggregate from passing receipts (Receipts and run state) and
+    # are read back like `deferrals`: a passed task is skipped on resume, so
+    # an accumulator that started empty would erase its entries.
+    widenings = _read_widenings(run_dir)
 
     # Incremental run.json: write `running` before the first task so --status/the
     # monitor can distinguish an in-progress run from a dead one, and rewrite after
@@ -2867,7 +3235,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    started_at=run_started, pid=run_pid, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
                    deferrals=deferrals or None, approved=approved_ids or None,
-                   unverified=unverified or None)
+                   unverified=unverified or None,
+                   widenings=widenings or None)
     # Drop a short launcher for the standing monitor and print a one-token command
     # (a long absolute path line-wraps in the session and is hard to run).
     write_watch_launcher(cwd, os.path.join(SCRIPTS_DIR, "forge-monitor.py"))
@@ -2902,7 +3271,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
                        deferrals=deferrals or None, approved=approved_ids or None,
-                       unverified=unverified or None)
+                       unverified=unverified or None,
+                       widenings=widenings or None)
         # Resume a frozen scope-decision halt on the task it names: replay the
         # paused attempt onto the fixed tree, then hand execute_task the
         # reconciliation context. `restore_freeze`'s own return value decides
@@ -2957,12 +3327,17 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_reason=halt_record.get("halt_reason"),
             )
         halt_out = {}
+        # The task's checkpoint, recorded once for this invocation just before
+        # its first worker dispatch — after a resumed task's frozen work is
+        # replayed (HEAD is unaffected by it), so a fix the human committed
+        # before re-invoking is inside it (Scope widening, The checkpoint).
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
             autofix_mode=autofix_mode, run_base=run_base,
             seeded_findings=seeded_findings, approved_ids=approved_ids,
             resume=resume_ctx, halt_out=halt_out,
+            checkpoint=_record_checkpoint(cwd, plan_path),
         )
         stage_deferrals(deferrals, outcome.deferrals,
                         task_number=task.number, carried=carried_deferrals)
@@ -2974,6 +3349,12 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             "ended_at": utc_iso(),
         })
         if outcome.status == "passed":
+            # The passing receipt, and only a passing one, carries the
+            # widenings this task adds to the run's close-out list.
+            widenings = aggregate_widenings(
+                widenings, "t{}".format(task.number),
+                (_read_latest_receipt(run_dir, task.number) or {}).get(
+                    "widenings"))
             annotate_ledger(
                 plan_path, task, "passed, {} attempt(s)".format(outcome.attempts)
             )
@@ -2991,6 +3372,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 seeded_findings=seeded_findings or None, halt=halt_state,
                 deferrals=deferrals or None, approved=approved_ids or None,
                 unverified=unverified or None,
+                widenings=widenings or None,
             )
         else:
             reviewer_wrote = halt_out.get("reviewer_wrote")
@@ -3061,6 +3443,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                         deferrals=deferrals or None,
                         approved=approved_ids or None,
                         unverified=unverified or None,
+                        widenings=widenings or None,
                     )
 
                 freeze_commit = _freeze_reviewer_wrote(
@@ -3086,6 +3469,10 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             if reviewer_wrote is not None:
                 halt_state["changes"] = reviewer_wrote["changes"]
                 halt_state["reviewer_head"] = reviewer_wrote["reviewer_head"]
+            if halt_out.get("deleted"):
+                halt_state["deleted"] = halt_out["deleted"]
+            if halt_out.get("worker_committed"):
+                halt_state["worker_committed"] = halt_out["worker_committed"]
             overall = "escalated"
             escalated = True
             break
@@ -3107,7 +3494,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,
                        deferrals=deferrals or None, approved=approved_ids or None,
-                       unverified=unverified or None)
+                       unverified=unverified or None,
+                       widenings=widenings or None)
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
@@ -3121,6 +3509,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_halt_out = {}
+            # The final stage's checkpoint: HEAD now, after the last task's
+            # commit (or its skipped commit — HEAD exists either way).
             final_outcome = run_final_review_loop(
                 spec_paths, run_base, run_dir,
                 codex_bin, cwd, final_tier,
@@ -3128,8 +3518,18 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 seeded_findings=seeded_findings, named_sections=named_sections,
                 halt_out=final_halt_out, approved_ids=approved_ids,
                 unverified=unverified,
+                checkpoint=_record_checkpoint(cwd, plan_path),
             )
             unverified = final_outcome.unverified
+            if final_outcome.status == "passed":
+                try:
+                    with open(os.path.join(run_dir, "final-review.json"),
+                              encoding="utf-8") as f:
+                        final_block = json.load(f).get("widenings")
+                except (OSError, ValueError) as e:
+                    raise RuntimeError(
+                        "cannot read the final review receipt: {}".format(e))
+                widenings = aggregate_widenings(widenings, "final", final_block)
             stage_deferrals(deferrals, final_outcome.deferrals,
                             stage="final-review", carried=carried_deferrals)
             if final_outcome.status == "escalated":
@@ -3141,6 +3541,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_state = _freeze_stage_halt(
                     cwd, run_dir, "final-review", final_outcome.halt_reason,
                     reviewer_wrote=final_halt_out.get("reviewer_wrote"),
+                    worker_committed=final_halt_out.get("worker_committed"),
                     write_halt=lambda rec: write_run_json(
                         run_dir, plan_path, spec_paths, "escalated-final-review",
                         task_summaries, run_base, started_at=run_started,
@@ -3149,6 +3550,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                         deferrals=deferrals or None,
                         approved=approved_ids or None,
                         unverified=unverified or None,
+                        widenings=widenings or None,
                     ),
                 )
             elif _open_unverified(unverified):
@@ -3204,7 +3606,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                    doc_sync=doc_sync_record, threads=threads,
                    seeded_findings=seeded_findings or None, halt=halt_state,
                    approved=approved_ids or None,
-                   unverified=unverified or None)
+                   unverified=unverified or None,
+                   widenings=widenings or None)
     return 0 if overall == "passed" else 2
 
 
@@ -3425,6 +3828,10 @@ def main(argv=None):
                     prior_unverified = _read_unverified(run_dir)
                 except RuntimeError:
                     prior_unverified = []
+                try:
+                    prior_widenings = _read_widenings(run_dir)
+                except RuntimeError:
+                    prior_widenings = []
                 specs = _read_specs(run_dir)
                 if specs is None:
                     try:
@@ -3442,6 +3849,7 @@ def main(argv=None):
                     started_at=_read_started_at(run_dir), pid=os.getpid(),
                     halt=prior_halt, approved=prior_approved or None,
                     unverified=prior_unverified or None,
+                    widenings=prior_widenings or None,
                 )
             except OSError:
                 pass

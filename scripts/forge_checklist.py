@@ -166,7 +166,7 @@ def build_task_checklist(plan_path, spec_path, task_number, *, repo_root=None):
     return items
 
 
-def citable_refs(plan_path, spec_path, task_number):
+def citable_refs(plan_path, spec_path, task_number, *, repo_root=None):
     """The set of ids a per-task review's findings may cite as
     ``contract_ref``: this task's own coverage item ids (``build_task_
     checklist``'s ``g<N>``/``t<N>.t<M>``/``t<N>.a<M>``) plus the
@@ -188,7 +188,7 @@ def citable_refs(plan_path, spec_path, task_number):
         raise RuntimeError(eb.diagnose_missing_task(lines, task_number, plan_path))
     _, gc_block = eb.extract_header(lines)
 
-    spec_set = eb.load_spec_set(plan_path, spec_path)
+    spec_set = eb.load_spec_set(plan_path, spec_path, repo_root=repo_root)
     sections = _task_sections(task_block, task_number, spec_set)
 
     refs = set()
@@ -244,7 +244,7 @@ def _final_items(plan_path, spec_path, *, repo_root=None):
     return items
 
 
-def final_citable_refs(plan_path, spec_path):
+def final_citable_refs(plan_path, spec_path, *, repo_root=None):
     """The set of ids a FINAL review's findings may cite as ``contract_ref``:
     every final-checklist item id (spec sections, global constraints,
     acceptance clauses, and the ``t<N>`` integration items) **plus** every
@@ -265,7 +265,8 @@ def final_citable_refs(plan_path, spec_path):
 
     Like ``citable_refs``, an empty result is never a defect to raise on.
     """
-    refs = {item.id for item in _final_items(plan_path, spec_path)}
+    refs = {item.id for item in _final_items(
+        plan_path, spec_path, repo_root=repo_root)}
     lines = eb.read_lines(plan_path)
     for task in forge_plan.parse_plan_tasks(plan_path):
         task_block = eb.extract_task_block(lines, task.number)

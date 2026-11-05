@@ -87,7 +87,12 @@ AUTOFIX_MODES = ("auto", "gate")
 # Halt reasons surfaced on an escalated TaskOutcome / final review (Disposition
 # matrix + Rework loop & convergence specs).
 HALT_REASONS = ("scope-decision", "regression", "stuck", "backstop", "gate",
-                "repair-out-of-scope")
+                "scope-delete")
+
+# Halt reasons only ever read from a halt record written before Scope widening
+# replaced the repair-scope check. No new code emits one; a persisted record
+# carrying it still resumes like any halt class.
+LEGACY_HALT_REASONS = ("repair-out-of-scope",)
 
 # Default subprocess timeout (seconds) for worker and reviewer `codex exec`
 # calls; overridable via --timeout. A hung worker/reviewer must not hang the
@@ -158,6 +163,18 @@ REVIEW_VERDICT_INSTRUCTION = (
     "convergence and carried_from only on a re-review, "
     "labeling each current finding resolved, carried, or new against the prior "
     "attempt's findings supplied in the packet — omit both on a first review. "
+    "When the packet lists a '## Widened files' section, add a \"widenings\" "
+    "array to the same object, on a pass verdict too: one ruling per path "
+    "listed there, each path copied verbatim, and no others — "
+    "{\"path\": \"a path from '## Widened files'\", \"ruling\": "
+    "\"accepted\" | \"rejected\", \"reason\": \"why the change was or was "
+    "not needed, and minimal\"}. \"accepted\" means the change was needed for "
+    "what it serves and no larger than that; \"rejected\" means either is "
+    "false. The worker's justification is a claim to check against the diff, "
+    "never evidence in itself. A missing, extra or duplicated path, an unknown "
+    "ruling, or an empty reason is rejected and re-dispatched. Omit "
+    "\"widenings\" or leave it [] when the packet lists none. Rulings never "
+    "change the verdict value, which speaks for findings alone. "
     "The runner parses the last JSON object in your message; emit nothing "
     "parseable as JSON after it."
 )
@@ -189,6 +206,8 @@ class Task:
     depends_on: list = field(default_factory=list)
     acceptance_checks: list = field(default_factory=list)
     checkbox_line: int = -1
+    # Declared repo-relative paths (Create/Modify/Test), plan order, deduped.
+    files: list = field(default_factory=list)
 
 
 @dataclass
@@ -242,6 +261,9 @@ class Verdict:
     kind: str  # "pass" | "findings"
     findings: list = field(default_factory=list)  # list[Finding]
     coverage: list = field(default_factory=list)  # list[CoverageEntry]
+    # [{"path", "ruling", "reason"}] as emitted (Reviewer verdict contract);
+    # forge_dispose.validate_widenings checks the shape.
+    widenings: list = field(default_factory=list)
 
 
 @dataclass
@@ -256,6 +278,10 @@ class TaskOutcome:
     # The final review's accumulated unverified entries (kind/id/reason/call),
     # merged with the set read back from run.json. Empty on a per-task outcome.
     unverified: list = field(default_factory=list)
+    # A trivial-tier task's widenings, which no reviewer ruled on (Scope
+    # widening): {"tasks": [N], "path", "added", "removed", "reason", "serves"}.
+    # Empty on every reviewed outcome.
+    widenings: list = field(default_factory=list)
 
 
 def finding_to_dict(finding):
@@ -478,3 +504,24 @@ def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
         tail=merged[-_ACC_TAIL_CHARS:],
         thread_id=thread_id,
     )
+
+
+# The worker-record instruction both harnesses put in every worker brief, cold
+# and resumed (Scope widening, The worker's record). One string, shared verbatim.
+WIDENING_INSTRUCTION = (
+    "If your work edits an existing file that this task's **Files:** does not "
+    "declare, say why. Write your whole current set of such edits to the "
+    "widenings record path named above, as a JSON array, rewriting the whole "
+    "file every turn: "
+    '[{"path": "<repo-relative path>", "reason": "<why the edit was needed>", '
+    '"serves": "<a ref or finding identity>" or null}]. '
+    "Every entry must carry all three keys, `path`, `reason` and `serves`; "
+    "`serves` may be null but is never omitted. "
+    "`path` must be a file you edited that the task does not declare; "
+    "`reason` must be non-empty; `serves` is a ref from the review checklist "
+    "or the identity of an outstanding finding this turn repairs, or null "
+    "when the edit serves neither. A path the record names that is not an "
+    "undeclared edit, a duplicate path, an empty reason, or an unknown "
+    "`serves` fails the turn. Never delete a file the task does not declare; "
+    "a deletion halts the run. Creating new files needs no entry."
+)

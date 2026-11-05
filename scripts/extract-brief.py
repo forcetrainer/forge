@@ -634,7 +634,22 @@ def resolve_entries(entries, spec_set, task_number):
     return resolved
 
 
-def build_brief(plan_path, task_number, spec_path=None):
+def widenings_section(record_path):
+    """The brief section naming the worker's widening record path and carrying
+    ``forge_common.WIDENING_INSTRUCTION`` (Scope widening). Imported lazily:
+    forge_common loads this file, so a module-level import would be circular."""
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from forge_common import WIDENING_INSTRUCTION
+    return (
+        "\n\n# Widenings record\n\n"
+        f"Widenings record path: {record_path}\n\n"
+        + WIDENING_INSTRUCTION + "\n"
+    )
+
+
+def build_brief(plan_path, task_number, spec_path=None, widenings_record=None):
     lines = read_lines(plan_path)
     task_block = extract_task_block(lines, task_number)
     if task_block is None:
@@ -663,6 +678,8 @@ def build_brief(plan_path, task_number, spec_path=None):
     for section in sections:
         parts.append(f"\n\n# Spec: {section.label}\n\n")
         parts.append("".join(section.lines).rstrip("\n") + "\n")
+    if widenings_record:
+        parts.append(widenings_section(widenings_record))
     return "".join(parts)
 
 
@@ -672,10 +689,12 @@ def main(argv):
     parser.add_argument("task_number", type=int)
     parser.add_argument("--spec")
     parser.add_argument("--out")
+    parser.add_argument("--widenings-record")
     args = parser.parse_args(argv)
 
     try:
-        brief = build_brief(args.plan, args.task_number, args.spec)
+        brief = build_brief(
+            args.plan, args.task_number, args.spec, args.widenings_record)
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 1

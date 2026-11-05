@@ -1,4 +1,6 @@
 """End-to-end plan-loop subprocess runs, resume, and the --effort CLI path."""
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -11,6 +13,8 @@ import types
 import unittest
 
 from _forge_support import *  # noqa: F401,F403
+
+import forge_common
 
 
 class LoopSubprocessTests(unittest.TestCase):
@@ -423,6 +427,9 @@ PLAN_FREEZE = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `grep -q FROZENWORK f1.txt` passes
 
 **Tier:** standard
@@ -438,6 +445,9 @@ PLAN_FREEZE_NOOP = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `true` passes
 
@@ -784,6 +794,9 @@ PLAN_REGRESSION = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Acceptance:** `test ! -f fail_flag` passes
 
 **Tier:** standard
@@ -801,6 +814,9 @@ PLAN_REGRESSION_SEQUENCE = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `grep -q PARTIALFIX f1.txt` passes
 
@@ -1115,3 +1131,662 @@ class FreezeEveryHaltClassTests(unittest.TestCase):
         self.assertEqual(self._git("cat-file", "-e", second_record["freeze_commit"]
                                     ), "")  # resolvable
         self.assertEqual(self._porcelain(), "")
+
+
+# --- Scope widening: detection after every worker turn (Task 5) -------------
+
+PLAN_WIDEN = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
+
+**Acceptance:** `{acceptance}` passes
+
+**Tier:** {tier}
+
+**Depends on:** nothing
+"""
+
+
+PLAN_WIDEN_TWO_TASKS = PLAN_WIDEN.format(acceptance="true", tier="standard") + """
+### Task 2: Second task
+- [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
+
+**Acceptance:** `true` passes
+
+**Tier:** standard
+
+**Depends on:** Task 1
+"""
+
+
+class WideningCase(ReviewerWroteCase):
+    """Runner harness for Scope widening: ``other.txt`` is tracked and outside
+    task 1's ``**Files:**``, so a worker that touches it widens the task. The
+    worker's record is written by the fake worker itself (``record_op``), as a
+    real worker would; ``run_main`` drives ``forge_run.main`` in-process so a
+    test can spy on the helpers the runner calls."""
+
+    ACCEPT_PASS = {"verdict": "pass", "widenings": [
+        {"path": "other.txt", "ruling": "accepted", "reason": "needed"}]}
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan()
+        with open(os.path.join(self.repo, "other.txt"), "w") as f:
+            f.write("other\n")
+        self.git("add", "-A")
+        self.git("commit", "-m", "other")
+        self.base_sha = self.git("rev-parse", "HEAD").strip()
+
+    @property
+    def tail(self):
+        """The calls after the last task: the final reviewer, then doc-sync."""
+        return [{"exit": 0, "msg": json.dumps({"verdict": "pass"})},
+                {"exit": 0, "msg": json.dumps({"doc_sync": "clean"})}]
+
+    def write_plan(self, acceptance="true", tier="standard"):
+        with open(self.plan, "w") as f:
+            f.write(PLAN_WIDEN.format(acceptance=acceptance, tier=tier))
+
+    def record_path(self, scope="task-1"):
+        return os.path.join(self.run_dir, scope, "widenings.json")
+
+    def record_op(self, entries, scope="task-1"):
+        return {"op": "write", "path": self.record_path(scope),
+                "text": json.dumps(entries)}
+
+    def edit_op(self, name="other.txt", text="more\n"):
+        return {"op": "append", "path": os.path.join(self.repo, name),
+                "text": text}
+
+    def entry(self, path="other.txt", reason="shared helper moved",
+              serves=None):
+        return {"path": path, "reason": reason, "serves": serves}
+
+    def worker(self, *ops, **extra):
+        return dict({"exit": 0, "msg": "", "file_ops": list(ops)}, **extra)
+
+    def reviewer(self, verdict, **extra):
+        return dict({"exit": 0, "msg": json.dumps(verdict)}, **extra)
+
+    def prompts(self):
+        return _log_prompts(self.log + ".prompts")
+
+    def receipt(self, attempt=1):
+        with open(os.path.join(self.run_dir,
+                               "task-1-attempt-{}.json".format(attempt))) as f:
+            return json.load(f)
+
+    def run_main(self, responses, extra_args=(), spies=()):
+        """``forge_run.main`` in-process; returns (rc, stdout, stderr)."""
+        from unittest import mock
+        env = {
+            "FORGE_FAKE_LOG": self.log,
+            "FORGE_FAKE_PROMPT_LOG": self.log + ".prompts",
+            "FORGE_FAKE_RESPONSES": self.write_responses(responses),
+        }
+        old_cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, old_cwd)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, env))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            self.mocks = [stack.enter_context(spy) for spy in spies]
+            rc = forge_run.main([
+                self.plan, "--spec", self.spec, "--run-dir", self.run_dir,
+                "--codex-bin", self.fake, *extra_args,
+            ])
+        return rc, out.getvalue(), err.getvalue()
+
+    def spy(self, name, module=None):
+        """A patch of ``module.name`` (default: forge_dispose) that wraps the
+        real function, for ``run_main(spies=...)``; the mocks come back, in
+        order, as ``self.mocks``."""
+        from unittest import mock
+        import forge_dispose
+        module = module or forge_dispose
+        return mock.patch.object(
+            module, name, wraps=getattr(module, name))
+
+
+class WideningPacketTests(WideningCase):
+    def test_a_worker_modifying_an_undeclared_file_gets_a_packet_listing_it(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        packet = self.prompts()[1]
+        self.assertIn("\n## Widened files\n\n", packet)
+        self.assertIn('- "other.txt"', packet)
+        self.assertIn("reason: shared helper moved", packet)
+        self.assertIn("serves: none", packet)
+
+    def test_an_unjustified_widening_is_listed_as_no_justification_given(self):
+        res = self.run_cli([
+            self.worker(self.edit_op()), self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("no justification given", self.prompts()[1])
+
+    def test_every_worker_brief_names_its_record_path(self):
+        responses = [
+            self.worker(self.edit_op("f1.txt", "NEW\n"),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer({"verdict": "findings", "findings": [{
+                "id": "f1", "summary": "NEEDS A FIX",
+                "location": {"file": "f1.txt", "lines": "2"},
+                "provenance": "in-diff", "impact": "contract-breaking",
+                "contract_ref": "Acceptance: `true`", "convergence": None,
+                "carried_from": None, "repair_task": None}]}),
+            self.worker(self.edit_op("f1.txt", "FIXED\n")),
+            self.reviewer({"verdict": "pass"}),
+            {"exit": 0, "msg": json.dumps({"verdict": "pass"})},
+            {"exit": 0, "msg": json.dumps({"doc_sync": "clean"})},
+        ]
+        rc, out, err = self.run_main(responses)
+        self.assertEqual(rc, 0, err)
+        record = self.record_path()
+        with open(os.path.join(self.run_dir, "task-1-attempt-1-brief.md")) as f:
+            cold = f.read()
+        with open(os.path.join(
+                self.run_dir, "task-1-attempt-2-resume-prompt.md")) as f:
+            resumed = f.read()
+        for text in (cold, resumed):
+            self.assertIn(record, text)
+            self.assertIn(forge_common.WIDENING_INSTRUCTION, text)
+        # The resumed prompt really is the resume form, not a cold fallback.
+        argvs = _log_argvs(self.log)
+        self.assertIn("resume", argvs[2])
+
+
+class WideningDetectionTurnTests(WideningCase):
+    FIX_FINDING = {"verdict": "findings", "findings": [{
+        "id": "f1", "summary": "NEEDS A FIX",
+        "location": {"file": "f1.txt", "lines": "2"},
+        "provenance": "in-diff", "impact": "contract-breaking",
+        "contract_ref": "Acceptance: `true`", "convergence": None,
+        "carried_from": None, "repair_task": None}]}
+
+    def rework_responses(self):
+        return [
+            self.worker(self.edit_op("f1.txt", "NEW\n"),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(self.FIX_FINDING),
+            self.worker(self.edit_op("f1.txt", "FIXED\n")),
+            self.reviewer({"verdict": "pass"}),
+            {"exit": 0, "msg": json.dumps({"verdict": "pass"})},
+            {"exit": 0, "msg": json.dumps({"doc_sync": "clean"})},
+        ]
+
+    def test_a_cold_turn_and_a_rework_resume_each_run_detection(self):
+        rc, out, err = self.run_main(
+            self.rework_responses(), spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 0, err)
+        spy = self.mocks[0]
+        # Two task turns, the cold attempt and the rework resume; the final
+        # review dispatched no fixer, so nothing at scope final.
+        self.assertEqual([c.args[3] for c in spy.call_args_list], ["t1", "t1"])
+        self.assertIn("resume", _log_argvs(self.log)[2])
+
+    def test_the_runner_never_passes_a_repair_snapshot_to_the_decision(self):
+        rc, out, err = self.run_main(
+            self.rework_responses(),
+            spies=[self.spy("convergence_decision", forge_run)])
+        self.assertEqual(rc, 0, err)
+        spy = self.mocks[0]
+        self.assertGreaterEqual(spy.call_count, 2)
+        for call in spy.call_args_list:
+            self.assertLessEqual(
+                set(call.kwargs), {"approved_ids", "failed_acceptance", "deleted"})
+
+
+class WideningHaltAndReworkTests(WideningCase):
+    DELETE = {"op": "delete", "path": None}
+
+    def delete_op(self, name="other.txt"):
+        return {"op": "delete", "path": os.path.join(self.repo, name)}
+
+    def test_an_out_of_scope_deletion_escalates_before_any_review_and_freezes(self):
+        res = self.run_cli([self.worker(self.delete_op())])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+        receipt = self.receipt()
+        self.assertEqual(receipt["status"], "escalated")
+        self.assertEqual(receipt["halt_reason"], "scope-delete")
+        guidance = " ".join(receipt["outstanding_findings"])
+        self.assertIn("other.txt", guidance)
+        self.assertIn("restore", guidance)
+        self.assertIn("approve", guidance)
+        halt = self.halt_record()
+        self.assertEqual(halt["halt_reason"], "scope-delete")
+        self.assertEqual(halt["task"], 1)
+        self.assertTrue(halt["freeze_commit"])
+        self.assertEqual(halt["deleted"], ["other.txt"])
+        self.assertEqual(self.porcelain(), "")
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "other.txt")))
+        self.assertEqual(self.commit_count(), 2)  # no task commit
+
+    def test_a_deletion_in_a_turn_whose_acceptance_failed_still_escalates(self):
+        self.write_plan(acceptance="false")
+        res = self.run_cli([self.worker(self.delete_op())])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        receipt = self.receipt()
+        self.assertEqual(receipt["halt_reason"], "scope-delete")
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+        self.assertEqual(len(self.dispatches("task-1-worker-last")), 1)
+
+    def test_a_deletion_in_a_crashed_worker_turn_still_escalates(self):
+        res = self.run_cli([dict(self.worker(self.delete_op()), exit=1)])
+        self.assertEqual(self.receipt()["halt_reason"], "scope-delete")
+        self.assertEqual(res.returncode, 2, res.stderr)
+
+    def test_resolve_naming_a_scope_delete_halt_is_a_contract_error(self):
+        res = self.run_cli([self.worker(self.delete_op())])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        res = self.run_cli(
+            [self.worker(), self.reviewer({"verdict": "pass"})],
+            extra_args=("--resolve", "t1:other=repair"))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("scope-delete", res.stderr)
+        self.assertIn("--resolve", res.stderr)
+        self.assertEqual(self.halt_record()["halt_reason"], "scope-delete")
+        self.assertEqual(len(_log_argvs(self.log)), 0)  # nothing dispatched
+
+    def test_a_scope_delete_halt_resumes_after_the_human_restores_the_path(self):
+        res = self.run_cli([self.worker(self.delete_op())])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # The human's answer: a commit that puts the path back in shape. The
+        # freeze's deletion no longer applies to it, so the task restarts from
+        # the corrected checkpoint.
+        with open(os.path.join(self.repo, "other.txt"), "a") as f:
+            f.write("restored by hand\n")
+        self.git("add", "-A")
+        self.git("commit", "-m", "restore other.txt")
+        res = self.run_cli(
+            [self.worker(), self.reviewer({"verdict": "pass"})] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(self.halt_record())
+        with open(os.path.join(self.run_dir, "task-1-attempt-2-brief.md")) as f:
+            brief = f.read()
+        self.assertIn("scope-delete", brief)
+
+    def test_a_defective_record_entry_reworks_without_a_review(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op(
+                [self.entry("ghost.txt")])),
+            self.worker(self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.receipt(1)["status"], "rework")
+        self.assertIsNone(self.receipt(1)["review_verdict"])
+        prompts = self.prompts()
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 1)
+        # The second worker prompt names the offending entry; the one review
+        # packet came after it.
+        self.assertIn("ghost.txt", prompts[1])
+        self.assertIn("\n## Widened files\n\n", prompts[2])
+        self.assertNotIn("ghost.txt", prompts[2])
+
+    def test_a_rejected_widening_drives_a_rework_carrying_the_rejection(self):
+        reject = {"verdict": "pass", "widenings": [
+            {"path": "other.txt", "ruling": "rejected",
+             "reason": "UNNEEDED CHURN"}]}
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()]),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(reject, stdout=thread_stream("th-r1")),
+            self.worker({"op": "git", "args": ["checkout", "--", "other.txt"]},
+                        self.record_op([])),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.receipt(1)["status"], "rework")
+        rework = self.prompts()[2]
+        self.assertIn("UNNEEDED CHURN", rework)
+        self.assertIn("other.txt", rework)
+        self.assertIn("resume", _log_argvs(self.log)[2])
+
+    def test_a_trivial_task_is_checked_once_and_its_widenings_are_tagged(self):
+        self.write_plan(tier="trivial — test fixture, mechanical")
+        outcomes = []
+        real = forge_run.execute_task
+
+        def capture(*args, **kwargs):
+            outcomes.append(real(*args, **kwargs))
+            return outcomes[-1]
+
+        from unittest import mock
+        rc, out, err = self.run_main(
+            [self.worker(self.edit_op(), self.record_op([self.entry()]))]
+            + self.tail,
+            spies=[self.spy("scope_widenings"),
+                   mock.patch.object(forge_run, "execute_task", capture)])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.mocks[0].call_count, 1)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+        # The unarbitrated widening, with the record's justification and the
+        # task number it is tagged with, reaches the outcome for the close-out
+        # list (Task 6 persists it).
+        self.assertEqual(outcomes[0].widenings, [{
+            "tasks": [1], "path": "other.txt", "added": 1, "removed": 0,
+            "reason": "shared helper moved", "serves": None}])
+
+
+class WorkerCommittedTests(WideningCase):
+    """A worker that commits, resets, amends, switches branch or detaches HEAD
+    halts `worker-committed` before detection (Scope widening, A worker commit
+    halts)."""
+
+    COMMIT = {"op": "git", "args": ["commit", "-am", "worker commit"]}
+
+    def halted(self, *ops, plan_tier=None, extra_args=()):
+        if plan_tier:
+            self.write_plan(tier=plan_tier)
+        return self.run_cli([self.worker(*ops)], extra_args=extra_args)
+
+    def test_a_worker_that_commits_halts_worker_committed_naming_the_commit_before_detection(self):
+        rc, out, err = self.run_main(
+            [self.worker(self.edit_op(), self.COMMIT)],
+            spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(self.mocks[0].call_count, 0)  # detection never ran
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+        receipt = self.receipt()
+        self.assertEqual(receipt["status"], "escalated")
+        self.assertEqual(receipt["halt_reason"], "worker-committed")
+        head = self.git("rev-parse", "HEAD").strip()
+        self.assertIn(head, " ".join(receipt["outstanding_findings"]))
+        halt = self.halt_record()
+        self.assertEqual(halt["halt_reason"], "worker-committed")
+        self.assertEqual(halt["task"], 1)
+        self.assertEqual(halt["worker_committed"], {
+            "recorded_head": self.base_sha, "recorded_branch": "refs/heads/main",
+            "current_head": head, "current_branch": "refs/heads/main",
+            "commits": [head]})
+
+    def test_the_worker_committed_freeze_moves_no_ref(self):
+        res = self.halted(self.edit_op(), self.COMMIT, self.edit_op(text="more\n"))
+        self.assertEqual(res.returncode, 2, res.stderr)
+        head = self.git("rev-parse", "HEAD").strip()
+        halt = self.halt_record()
+        self.assertEqual(halt["worker_committed"]["current_head"], head)
+        self.assertEqual(self.git("rev-parse", "refs/heads/main").strip(), head)
+        self.assertEqual(self.git("symbolic-ref", "HEAD").strip(), "refs/heads/main")
+        self.assertNotEqual(head, self.base_sha)  # the commit stays where the worker left it
+        self.assertEqual(halt["freeze_base"], head)
+        self.assertTrue(halt["freeze_commit"])  # the uncommitted part is parked
+        self.assertEqual(self.porcelain(), "")
+        self.assertEqual(self.commit_count(), 3)  # no task commit on top
+
+    def test_resolve_naming_a_worker_committed_halt_is_a_contract_error(self):
+        res = self.halted(self.edit_op(), self.COMMIT)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        res = self.run_cli(
+            [self.worker(), self.reviewer({"verdict": "pass"})],
+            extra_args=("--resolve", "t1:other=repair"))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("worker-committed", res.stderr)
+        self.assertIn("--resolve", res.stderr)
+        self.assertEqual(self.halt_record()["halt_reason"], "worker-committed")
+        self.assertEqual(len(_log_argvs(self.log)), 0)  # nothing dispatched
+
+    def assert_halts_worker_committed(self, *ops):
+        res = self.halted(*ops)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.receipt()["halt_reason"], "worker-committed")
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+        wc = self.halt_record()["worker_committed"]
+        self.assertEqual(wc["recorded_head"], self.base_sha)
+        self.assertEqual(wc["recorded_branch"], "refs/heads/main")
+        return wc
+
+    def test_a_worker_that_resets_halts_worker_committed(self):
+        wc = self.assert_halts_worker_committed(
+            {"op": "git", "args": ["reset", "--hard", "HEAD~1"]})
+        self.assertNotEqual(wc["current_head"], self.base_sha)
+
+    def test_a_worker_that_amends_halts_worker_committed(self):
+        wc = self.assert_halts_worker_committed(
+            {"op": "git", "args": ["commit", "--amend", "--allow-empty",
+                                   "-m", "rewritten"]})
+        self.assertNotEqual(wc["current_head"], self.base_sha)
+
+    def test_a_worker_that_switches_branch_halts_worker_committed(self):
+        wc = self.assert_halts_worker_committed(
+            {"op": "git", "args": ["checkout", "-b", "elsewhere"]})
+        self.assertEqual(wc["current_branch"], "refs/heads/elsewhere")
+        self.assertEqual(wc["current_head"], self.base_sha)
+
+    def test_a_worker_that_detaches_head_halts_worker_committed(self):
+        wc = self.assert_halts_worker_committed(
+            {"op": "git", "args": ["checkout", "--detach"]})
+        self.assertIsNone(wc["current_branch"])
+
+    def test_a_trivial_tier_workers_commit_halts_worker_committed(self):
+        res = self.halted(
+            self.edit_op(), self.COMMIT,
+            plan_tier="trivial — test fixture, mechanical")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.receipt()["halt_reason"], "worker-committed")
+
+    def test_a_rework_lap_commit_halts_worker_committed(self):
+        fix = {"verdict": "findings", "findings": [{
+            "id": "f1", "summary": "NEEDS A FIX",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "Acceptance: `true`", "convergence": None,
+            "carried_from": None, "repair_task": None}]}
+        res = self.run_cli([
+            self.worker(self.edit_op("f1.txt", "NEW\n"),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(fix),
+            self.worker(self.edit_op("f1.txt", "FIXED\n"), self.COMMIT),
+        ])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(self.receipt(2)["halt_reason"], "worker-committed")
+        self.assertEqual(
+            self.halt_record()["worker_committed"]["recorded_head"],
+            self.base_sha)
+
+    def test_a_resumed_run_whose_human_kept_the_workers_commit_records_a_fresh_checkpoint_containing_it(self):
+        res = self.halted(self.edit_op(), self.COMMIT)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        kept = self.git("rev-parse", "HEAD").strip()
+        res = self.run_cli(
+            [self.worker(self.edit_op("f1.txt", "ok\n")),
+             self.reviewer({"verdict": "pass"})] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(self.halt_record())
+        # The kept commit is inside the new checkpoint: not a widening, so no
+        # ruling is asked and the reviewer's packet lists none.
+        self.assertNotIn("\n## Widened files\n\n", self.prompts()[1])
+        self.assertTrue(self.in_commit(kept, "other.txt"))
+
+    def test_an_in_repo_plan_absent_at_the_checkpoint_fails_before_any_worker_is_dispatched(self):
+        # A git-ignored plan inside the repository is in no commit.
+        with open(os.path.join(self.repo, ".gitignore"), "a") as f:
+            f.write("ignored-plan.md\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-m", "ignore the plan")
+        inside = os.path.join(self.repo, "ignored-plan.md")
+        with open(inside, "w") as f:
+            f.write(PLAN_WIDEN.format(acceptance="true", tier="standard"))
+        self.plan = inside
+        res = self.run_cli([self.worker(self.edit_op())])
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("ignored-plan.md", res.stderr)
+        self.assertIn("checkpoint", res.stderr)
+        self.assertEqual(len(_log_argvs(self.log)), 0)  # no worker ran
+
+
+class CheckpointPassingTests(WideningCase):
+    FIX = {"verdict": "findings", "findings": [{
+        "id": "f1", "summary": "NEEDS A FIX",
+        "location": {"file": "f1.txt", "lines": "2"},
+        "provenance": "in-diff", "impact": "contract-breaking",
+        "contract_ref": "Acceptance: `true`", "convergence": None,
+        "carried_from": None, "repair_task": None}]}
+
+    def test_the_runner_passes_the_stages_checkpoint_on_every_rework_lap(self):
+        rc, out, err = self.run_main([
+            self.worker(self.edit_op("f1.txt", "NEW\n"),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(self.FIX),
+            self.worker(self.edit_op("f1.txt", "FIXED\n")),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail, spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 0, err)
+        calls = self.mocks[0].call_args_list
+        self.assertEqual([c.args[3] for c in calls], ["t1", "t1"])
+        # (cwd, plan, spec, scope, base, checkpoint, state, record)
+        self.assertEqual([c.args[5] for c in calls],
+                         [self.base_sha, self.base_sha])
+        self.assertEqual([c.args[4] for c in calls],
+                         [self.base_sha, self.base_sha])
+
+    def test_the_checkpoint_recorded_at_a_stages_first_dispatch_is_the_one_passed_on_its_later_laps(self):
+        from unittest import mock
+        real_head = forge_run._git_head
+        seen = {"after_first_dispatch": False}
+        real_dispatch = forge_run.dispatch_worker
+
+        def dispatch(*a, **k):
+            seen["after_first_dispatch"] = True
+            return real_dispatch(*a, **k)
+
+        def head(cwd):
+            # Once the first worker has been dispatched, HEAD is never a
+            # source for detection: a later read would yield this sha.
+            return "f" * 40 if seen["after_first_dispatch"] else real_head(cwd)
+
+        rc, out, err = self.run_main([
+            self.worker(self.edit_op("f1.txt", "NEW\n"),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(self.FIX),
+            self.worker(self.edit_op("f1.txt", "FIXED\n")),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail, spies=[
+            self.spy("scope_widenings"),
+            mock.patch.object(forge_run, "dispatch_worker", dispatch),
+            mock.patch.object(forge_run, "_git_head", head)])
+        task_calls = [c for c in self.mocks[0].call_args_list
+                      if c.args[3] == "t1"]
+        self.assertEqual([c.args[5] for c in task_calls],
+                         [self.base_sha, self.base_sha])
+
+    def test_a_final_stage_whose_last_tasks_commit_was_skipped_still_has_a_checkpoint(self):
+        with open(self.plan, "w") as f:
+            f.write(PLAN_WIDEN_TWO_TASKS)
+        # The final review cites an integration ref (`t1`), which is citable
+        # at scope final.
+        fix = json.loads(json.dumps(self.FIX))
+        fix["findings"][0]["contract_ref"] = "t1"
+        rc, out, err = self.run_main([
+            self.worker(self.edit_op("f1.txt", "NEW\n")),
+            self.reviewer({"verdict": "pass"}),
+            self.worker(),  # task 2 changes nothing: its commit is skipped
+            self.reviewer({"verdict": "pass"}),
+            self.reviewer(fix),  # the final review finds something
+            {"exit": 0, "msg": "", "file_ops": [
+                self.edit_op("f1.txt", "FINAL\n")]},
+            self.reviewer({"verdict": "pass"}),
+            {"exit": 0, "msg": json.dumps({"doc_sync": "clean"})},
+        ], spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 0, err)
+        finals = [c for c in self.mocks[0].call_args_list if c.args[3] == "final"]
+        self.assertEqual(len(finals), 1)
+        task1_commit = self.run_json()["tasks"][0]["commit"]
+        self.assertTrue(task1_commit)
+        self.assertIsNone(self.run_json()["tasks"][1].get("commit"))
+        self.assertEqual(finals[0].args[5], task1_commit)
+
+
+class WideningGitFailureTests(WideningCase):
+    def test_a_git_failure_inside_a_repo_during_detection_is_a_contract_error(self):
+        from unittest import mock
+        boom = mock.patch.object(
+            forge_run.forge_dispose, "scope_widenings",
+            side_effect=RuntimeError("git diff failed: BOOM"))
+        rc, out, err = self.run_main([self.worker()], spies=[boom])
+        self.assertEqual(rc, 1)
+        self.assertIn("BOOM", err)
+        self.assertEqual(len(self.dispatches("task-1-review-last")), 0)
+
+    def test_an_unreadable_head_inside_a_repo_is_a_contract_error(self):
+        from unittest import mock
+        self.write_plan(tier="trivial — test fixture, mechanical")
+        calls = []
+
+        def head(cwd):
+            # run_plan's run-base read is the first call; the task's is next.
+            calls.append(cwd)
+            return self.base_sha if len(calls) == 1 else None
+
+        head = mock.patch.object(forge_run, "_git_head", head)
+        rc, out, err = self.run_main([self.worker()], spies=[head])
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot read HEAD", err)
+
+    def test_a_reverted_accepted_widening_leaves_the_accepted_set(self):
+        fix = dict(WideningCase.ACCEPT_PASS, verdict="findings", findings=[{
+            "id": "f1", "summary": "NEEDS A FIX",
+            "location": {"file": "f1.txt", "lines": "2"},
+            "provenance": "in-diff", "impact": "contract-breaking",
+            "contract_ref": "Acceptance: `true`", "convergence": None,
+            "carried_from": None, "repair_task": None}])
+        seen = []
+        real = forge_run.convergence_decision
+
+        def capture(findings, state, *a, **k):
+            seen.append(sorted(state.accepted_widenings))
+            return real(findings, state, *a, **k)
+
+        from unittest import mock
+        rc, out, err = self.run_main([
+            self.worker(self.edit_op("f1.txt", "NEW\n"), self.edit_op(),
+                        self.record_op([self.entry()]),
+                        stdout=thread_stream("th-w1")),
+            self.reviewer(fix, stdout=thread_stream("th-r1")),
+            self.worker({"op": "git", "args": ["checkout", "--", "other.txt"]},
+                        self.record_op([])),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail, spies=[
+            mock.patch.object(forge_run, "convergence_decision", capture)])
+        self.assertEqual(rc, 0, err)
+        # Lap 1's ruling accepted other.txt; lap 2's detection saw it reverted.
+        self.assertEqual(seen[0], ["other.txt"])
+        self.assertEqual(seen[1], [])
+
+
+class WideningOutsideRepoTests(unittest.TestCase):
+    def test_a_directory_that_is_not_a_repository_skips_detection(self):
+        from unittest import mock
+        d = tempfile.mkdtemp(prefix="forge-nonrepo-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        fake = write_fake_codex(d)
+        plan = os.path.join(d, "plan.md")
+        with open(plan, "w") as f:
+            f.write(PLAN_PASS)
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        task = forge_run.parse_plan_tasks(plan)[0]
+        with mock.patch.object(
+                forge_run.forge_dispose, "scope_widenings") as spy:
+            outcome = forge_run.execute_task(
+                task, plan, spec, os.path.join(d, "run"), fake, d, {})
+        self.assertEqual(outcome.status, "passed")
+        spy.assert_not_called()

@@ -42,6 +42,10 @@ PLAN_STD_CHECKLIST = """# Fixture Plan
 ### Task 1: Standard task
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+- Create: `u_edit.txt`, `u_del.txt`, `u_add.txt`
+
 **Acceptance:**
 - the output file must contain the marker
 - `echo NEEDFIX >> f1.txt` passes
@@ -64,6 +68,9 @@ PLAN_STD_CHECKLIST_MULTI = """# Fixture Plan
 
 ### Task 1: Standard task
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:**
 - the output must contain marker one
@@ -442,22 +449,6 @@ class ExecuteTaskVerificationPacketTests(unittest.TestCase):
             {"exit": 0, "msg": _pass_msg()},
         ])
 
-    def test_repair_touching_a_file_outside_the_task_halts_out_of_scope(self):
-        plan = self._plan(PLAN_STD_CHECKLIST)
-        self._init_repo()
-        g = os.path.join(self.d, "g.txt")
-        with open(g, "w") as f:
-            f.write("base\n")
-        self._git("add", "g.txt")
-        self._git("commit", "-m", "g")
-        self._rework_lap_touching(g, "DRIFT\n")
-        outcome = forge_run.execute_task(
-            self._task1(plan), plan, self.spec, self.run_dir, self.fake, self.d, {},
-        )
-        self.assertEqual(outcome.status, "escalated")
-        self.assertEqual(outcome.halt_reason, "repair-out-of-scope")
-        self.assertIn("g.txt", " ".join(outcome.findings))
-
     def test_repair_within_the_task_files_passes(self):
         plan = self._plan(PLAN_STD_CHECKLIST)
         self._init_repo()
@@ -783,3 +774,68 @@ class NoRawDiffAtVerificationSitesTests(unittest.TestCase):
         src = (REPO_ROOT / "scripts" / "forge-run.py").read_text()
         self.assertNotRegex(src, r"_git_diff\([^)]*repair_snapshot")
         self.assertEqual(src.count("forge_git.repair_delta(cwd, repair_snapshot)"), 2)
+
+
+# --- Widened files on verification laps (Scope widening, Task 5) ------------
+
+import test_forge_loop as widening_loop  # noqa: E402
+
+
+class VerificationWidenedFilesTests(widening_loop.WideningCase):
+    FIX = {
+        "id": "f1", "summary": "NEEDS A FIX",
+        "location": {"file": "f1.txt", "lines": "2"},
+        "provenance": "in-diff", "impact": "contract-breaking",
+        "contract_ref": "Acceptance: `true`", "convergence": None,
+        "carried_from": None, "repair_task": None,
+    }
+
+    def widen_worker(self, reason="shared helper moved"):
+        return self.worker(
+            self.edit_op("f1.txt", "NEW\n"), self.edit_op(),
+            self.record_op([self.entry(reason=reason)]),
+            stdout=thread_stream("th-w1"))
+
+    def test_an_accepted_widening_is_not_relisted_on_the_next_verification_packet(self):
+        accepted_with_fix = {
+            "verdict": "findings", "findings": [self.FIX],
+            "widenings": [{"path": "other.txt", "ruling": "accepted",
+                           "reason": "needed"}]}
+        res = self.run_cli([
+            self.widen_worker(),
+            self.reviewer(accepted_with_fix, stdout=thread_stream("th-r1")),
+            self.worker(self.edit_op("f1.txt", "FIXED\n"),
+                        self.record_op([self.entry()])),
+            self.reviewer({"verdict": "pass"}),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        prompts = self.prompts()
+        self.assertIn("\n## Widened files\n\n", prompts[1])           # discovery
+        verification = prompts[3]
+        self.assertIn("## Review kind\n\nverification", verification)
+        self.assertNotIn("\n## Widened files\n\n", verification)
+
+    def test_a_rejected_widening_still_present_is_relisted_and_never_a_prior_finding(self):
+        reject = {"verdict": "pass", "widenings": [
+            {"path": "other.txt", "ruling": "rejected", "reason": "CHURN"}]}
+        accept = {"verdict": "pass", "widenings": [
+            {"path": "other.txt", "ruling": "accepted", "reason": "better now"}]}
+        res_mocks = []
+        rc, out, err = self.run_main([
+            self.widen_worker(),
+            self.reviewer(reject, stdout=thread_stream("th-r1")),
+            self.worker(self.record_op([self.entry(reason="a BETTER reason")])),
+            self.reviewer(accept),
+        ] + self.tail, spies=[self.spy("classify_findings", forge_run)])
+        self.assertEqual(rc, 0, err)
+        verification = self.prompts()[3]
+        self.assertIn("## Review kind\n\nverification", verification)
+        self.assertIn('- "other.txt"', verification)
+        self.assertIn("reason: a BETTER reason", verification)
+        # The rejection reaches the reviewer only through that section.
+        block = verification.split("## Outstanding findings\n\n```json\n", 1)[1]
+        self.assertEqual(json.loads(block.split("```", 1)[0]), [])
+        # ...and the decision's prior identities never name the widen identity.
+        for call in self.mocks[0].call_args_list:
+            identities = call.kwargs.get("prior_identities") or ()
+            self.assertFalse([i for i in identities if "widen" in i])

@@ -306,6 +306,9 @@ def read_run_state(run_dir, now=None):
         # The final review's accumulated unverified entries, each with its
         # human call once made (null until then); [] on a run with none.
         "unverified": (run.get("unverified") if run else None) or [],
+        # Accepted and unarbitrated widenings aggregated from passing
+        # receipts (Scope widening, Close-out); [] on a run with none.
+        "widenings": (run.get("widenings") if run else None) or [],
         # The run's recorded spec set; a pre-`specs` run.json's single `spec`
         # string reads as a one-element set.
         "specs": read_run_specs(run) if run else [],
@@ -361,7 +364,64 @@ def render_status(state):
         else:
             summaries = [_truncate(d.get("summary", "?")) for d in state["deferrals"]]
             lines.append("deferrals: {} — {}".format(len(summaries), "; ".join(summaries)))
+    if state.get("widenings"):
+        # Informational, like the deferrals list but with no call to make
+        # and nothing to file: every accepted widening, and every one no
+        # reviewer ruled on marked as such (Scope widening, Close-out).
+        if is_terminal(state.get("status")):
+            lines.append("")
+            lines.extend(render_widenings(state))
+        else:
+            lines.append("widened files: {}".format(len(state["widenings"])))
     return "\n".join(lines)
+
+
+def render_widenings(state):
+    """The close-out list of ``state["widenings"]``: one block per entry —
+    scope, path, lines added and removed, the worker's ``reason`` and
+    ``serves``, and the reviewer's ruling reason, or ``not reviewed`` for an
+    unarbitrated entry. Informational: no per-entry call."""
+    entries = state.get("widenings") or []
+    if not entries:
+        return []
+    lines = ["widened files:"]
+    for e in entries:
+        head = "  {} {} +{} -{}".format(
+            e.get("scope", "?"), json.dumps(e.get("path")),
+            e.get("added", 0), e.get("removed", 0))
+        if e.get("unarbitrated"):
+            head += " — not reviewed"
+        lines.append(head)
+        lines.append("    reason: {}".format(
+            " ".join((e.get("reason") or "no justification given").split())))
+        lines.append("    serves: {}".format(e.get("serves") or "none"))
+        if not e.get("unarbitrated"):
+            lines.append("    ruling: {}".format(
+                " ".join((e.get("ruling_reason") or "").split())))
+    return lines
+
+
+def _worker_committed_lines(halt):
+    """The `worker-committed` halt's payload (Scope widening, A worker commit
+    halts): the recorded and current HEAD and branch and every commit between
+    them. The freeze moved no ref, so the commits are still where the worker
+    left them; `--resolve` is refused for this class, so none is offered."""
+    wc = halt.get("worker_committed")
+    if not wc:
+        return []
+
+    def where(branch):
+        return branch or "a detached HEAD"
+
+    return [
+        "  recorded HEAD: {} on {}".format(
+            wc.get("recorded_head"), where(wc.get("recorded_branch"))),
+        "  current HEAD:  {} on {}".format(
+            wc.get("current_head"), where(wc.get("current_branch"))),
+        "  worker commits: {}".format(
+            ", ".join(wc.get("commits") or []) or "(none: HEAD was moved back)"),
+        "  keep, rewrite or drop the commit(s) in the tree, then re-invoke",
+    ]
 
 
 def render_halt(halt):
@@ -398,6 +458,7 @@ def render_halt(halt):
         if halt.get("changes"):
             lines.append("  changed by the reviewer: {}".format(
                 "; ".join(halt["changes"])))
+        lines.extend(_worker_committed_lines(halt))
         if halt.get("halt_reason") == "unverified":
             # The one stage class that poses a question `--resolve` answers:
             # the ids are the open entries', listed under the header.
@@ -413,6 +474,16 @@ def render_halt(halt):
         else "  frozen attempt: (nothing to freeze — the task starts from the "
              "checkpoint)"
     )
+    if halt.get("halt_reason") == "scope-delete":
+        # No finding to answer: the human restores the path or approves the
+        # deletion in the tree, then re-invokes (Scope widening, Deletion
+        # halts). `--resolve` is refused for this class, so none is offered.
+        lines.append("  deleted outside scope: {}".format(
+            ", ".join(halt.get("deleted") or []) or "(none recorded)"))
+        lines.append(
+            "  restore the path(s) or approve the deletion in the tree, then "
+            "re-invoke")
+    lines.extend(_worker_committed_lines(halt))
     approved = halt.get("approved") or {}
     # The finding's runner-stamped ``identity`` (``t<N>:<id>`` / ``final:<id>``)
     # — the key `run_plan` and `convergence_decision` match on and `--resolve`

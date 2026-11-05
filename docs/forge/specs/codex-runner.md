@@ -154,11 +154,31 @@ forge-run.py --status --run-dir DIR
    Acceptance clause grammar); prose clauses are never executed. Any clause whose command
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
+3a. After every worker turn — the cold attempt, each rework resume, each final-review
+   fixer turn — whether or not acceptance passed, and before step 3's rework or step 4's
+   review is acted on (`execution` spec: Scope widening):
+   - **Worker-commit check:** `HEAD` against the stage's checkpoint (recorded once per
+     stage per invocation, before the stage's first worker dispatch, held across its
+     rework laps) on the branch it was recorded on; anything else — an added commit, a
+     reset, an amend, a branch switch, a detached `HEAD` — escalates `worker-committed`,
+     naming the recorded and current `HEAD` and branch and every commit between them.
+     The runner makes no commit mid-stage, and a plan amendment on Codex lands between
+     invocations, inside the next checkpoint. The freeze is the ordinary one and moves
+     no ref; `--resolve` is refused for it.
+   - **Detection:** `forge_dispose.scope_widenings` from that checkpoint, against the
+     record at `task-<N>/widenings.json` (`final/widenings.json` for the final review),
+     the path every worker brief names. An out-of-scope deletion escalates
+     `scope-delete` before review; a record defect is a rework iteration naming the
+     entry.
+   - A trivial-tier task has no reviewer: its widenings go to the close-out list
+     unarbitrated, and its deletions and commits still escalate.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists so the diff is assembled
    once, by the runner, against the right base; it also pastes the spec sections the
    task names, as context (Runner).
+   It also carries `## Widened files`, the widenings due a ruling; the final-review
+   packet does too, with the record at `final/widenings.json`.
 5. Capture the verdict: the reviewer's final message is one JSON object, read from the
    `--output-last-message` file. That file, not the live log, is the verdict's channel.
    An unparseable verdict is a loud runner failure naming the cause — never guessed at,
@@ -260,6 +280,8 @@ setup.
   model + effort requested, brief path + SHA-256, worker exit code, acceptance results
   (command, stated outcome, exit code, output tail, passed), review verdict, attempt number, status
   (`passed` | `rework` | `escalated`), outstanding findings.
+  It also carries the review's `widenings` block (`execution` spec: Receipts and run
+  state); `run.json` aggregates accepted widenings under `widenings`.
 - `run.json` is the run summary and the monitor's contract:
 
 ```
@@ -318,7 +340,7 @@ setup.
   string, which readers accept as a one-element set.
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
   escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
-  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `halt`) are the
+  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `widenings`, `halt`) are the
   resume state.
 - The clean-tree precondition holds on resume too, **without exception**. Passed tasks
   are already committed and a halted task's attempt is frozen under a forge-owned ref
@@ -579,6 +601,24 @@ staleness is never an exit condition.
   completed — lit-row glyph and spinner present, live-panel header names the current
   task, banner text and semantic color per state. `--latest` selects the newest dir; the
   reduced-motion path renders static.
+- Scope widening: a worker edit to an existing out-of-scope file is listed under
+  `## Widened files` with the record's `reason` and `serves`, or `no justification
+  given`; detection runs on the cold attempt, a rework resume and a final-review fixer
+  turn; an out-of-scope deletion escalates `scope-delete` before any reviewer dispatch
+  (exit 2, frozen); a defective record entry is a rework iteration naming the entry and
+  is never reviewed; a trivial-tier widening reaches the close-out list without review;
+  receipts carry the `widenings` block and `run.json` aggregates accepted widenings;
+  an out-of-scope deletion in a turn whose acceptance failed still escalates
+  `scope-delete`; after a resume, a path accepted before the halt is not re-listed
+  while its content holds.
+- Checkpoint: a worker that commits, resets, amends, switches branch or detaches `HEAD`
+  during a turn halts `worker-committed` before detection, naming the commits; its freeze
+  moves no ref; `--resolve` naming a `worker-committed` halt is a contract error; a
+  trivial-tier worker's commit halts the same way; a worker that adds a path to its task's
+  `**Files:**` in the plan's working copy gains no scope; a resumed task's checkpoint is
+  `HEAD` at the new invocation, so a human's committed fix is not a widening; a final
+  stage whose last task's commit was skipped still has a checkpoint; a git failure in
+  detection exits 1 naming the cause.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
@@ -662,6 +702,8 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-11-04: amended by [execution] — step 3a detects from the stage's checkpoint, `HEAD` recorded once per stage per invocation before its first worker dispatch and held across rework laps
+2026-11-04: amended by [execution] — the task loop computes widenings after every worker turn against the record each brief names (`task-<N>/widenings.json`, `final/widenings.json`), escalates `scope-delete` before review, and the review packet carries `## Widened files`; receipts carry the `widenings` block
 2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
 2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
 2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)

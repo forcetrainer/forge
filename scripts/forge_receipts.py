@@ -260,12 +260,86 @@ def _read_unverified(run_dir):
     return list(_check_unverified(entries, path))
 
 
+def _check_widenings(entries, path):
+    """Validate a loaded ``widenings`` value; raises naming ``path`` on any
+    malformed entry (parsers-fail-loud). Each entry is ``{scope, path, added,
+    removed, reason, serves, ruling_reason, unarbitrated}``."""
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            "{}: `widenings` must be a list of entries, got {!r}".format(
+                path, entries))
+    for e in entries:
+        ok = (
+            isinstance(e, dict)
+            and isinstance(e.get("scope"), str) and e["scope"]
+            and isinstance(e.get("path"), str) and e["path"]
+            and isinstance(e.get("added"), int)
+            and isinstance(e.get("removed"), int)
+            and isinstance(e.get("unarbitrated"), bool)
+            and "reason" in e and "serves" in e and "ruling_reason" in e
+        )
+        if not ok:
+            raise RuntimeError(
+                "{}: malformed `widenings` entry {!r} — expected {{scope, "
+                "path, added, removed, reason, serves, ruling_reason, "
+                "unarbitrated}}".format(path, e))
+    return entries
+
+
+def _read_widenings(run_dir):
+    """The ``widenings`` aggregate from an existing ``run.json`` (read back on
+    resume, like ``deferrals``), or ``[]`` when there is no run.json or no
+    such key. A present-but-malformed value raises naming the file — silently
+    dropping an entry would leave a widening off the close-out list."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError("{}: malformed JSON ({})".format(path, e))
+    entries = data.get("widenings")
+    if entries is None:
+        return []
+    return list(_check_widenings(entries, path))
+
+
+def aggregate_widenings(existing, scope, block):
+    """``existing`` (the run's ``widenings`` list) with the entries of one
+    passing receipt's ``widenings`` block appended, each tagged with its review
+    ``scope`` (``t<N>`` or ``final``): the accepted entries, then the
+    ``unarbitrated`` ones (a trivial task's, no reviewer having ruled) marked
+    so. Any entry the list already holds for ``scope`` is replaced, so
+    aggregating a scope twice never lists it twice. A receipt with no block
+    adds nothing."""
+    out = [e for e in existing if e.get("scope") != scope]
+    block = block or {}
+    for e in block.get("accepted") or []:
+        out.append({
+            "scope": scope, "path": e["path"], "added": e["added"],
+            "removed": e["removed"], "reason": e.get("reason"),
+            "serves": e.get("serves"),
+            "ruling_reason": e.get("ruling_reason"), "unarbitrated": False,
+        })
+    for e in block.get("unarbitrated") or []:
+        out.append({
+            "scope": scope, "path": e["path"], "added": e["added"],
+            "removed": e["removed"], "reason": e.get("reason"),
+            "serves": e.get("serves"), "ruling_reason": None,
+            "unarbitrated": True,
+        })
+    return out
+
+
 def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_commit,
                    contract_error=None, current_task=None, current_phase=None,
                    started_at=None, updated_at=None, pid=None,
                    deferrals=None, autofix_mode=None, doc_sync=None, threads=None,
                    seeded_findings=None, halt=None, approved=None,
-                   unverified=None):
+                   unverified=None, widenings=None):
     """Write ``run.json``. ``spec_paths`` is the run's spec set (a list of
     paths, possibly empty), recorded absolute under ``specs``; None records
     nothing, for a caller that could not determine the set. The progress
@@ -306,7 +380,11 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
     ``unverified`` is the final review's accumulated list of ``{kind, id,
     reason, call}`` entries (``call`` null until the human answers); omitted
     on None, read back on resume, and — like ``approved`` — passed by every
-    write, because each call rebuilds ``run.json``."""
+    write, because each call rebuilds ``run.json``.
+    ``widenings`` is the aggregate of every passing review's accepted
+    widenings and every trivial task's unarbitrated ones
+    (``aggregate_widenings``); omitted on None, read back on resume, and —
+    like ``unverified`` — passed by every write."""
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
@@ -332,6 +410,7 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
         ("seeded_findings", seeded_findings),
         ("halt", halt),
         ("unverified", unverified),
+        ("widenings", widenings),
     ):
         if value is not None:
             data[key] = value
@@ -345,7 +424,8 @@ def write_run_json(run_dir, plan_path, spec_paths, status, task_summaries, base_
 
 def write_final_review_receipt(run_dir, verdict, halt_reason=None,
                                 coverage_skipped=None, coverage_retry=None,
-                                resume_fallback=None, unverified=None):
+                                resume_fallback=None, unverified=None,
+                                widenings=None):
     """Persist the plan-level final-review verdict alongside the task receipts.
     ``halt_reason`` (the convergence loop's disposition-matrix class —
     scope-decision | regression | stuck | backstop | gate) is additive and
@@ -361,7 +441,8 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
     — True when a final-reviewer or final-review-fixer resume fell back to a
     cold spawn this attempt; additive and optional, omitted when None.
     ``unverified`` is the loop's accumulated unverified entries (kind, id,
-    reason, call); omitted when None."""
+    reason, call); omitted when None. ``widenings`` is the final review's
+    ``widenings`` block (accepted, rejected, deleted); omitted when None."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "final-review.json")
     data = verdict_to_dict(verdict)
@@ -375,6 +456,8 @@ def write_final_review_receipt(run_dir, verdict, halt_reason=None,
         data["resume_fallback"] = resume_fallback
     if unverified is not None:
         data["unverified"] = unverified
+    if widenings is not None:
+        data["widenings"] = widenings
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return path

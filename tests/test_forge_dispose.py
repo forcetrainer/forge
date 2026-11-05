@@ -20,6 +20,36 @@ import forge_dispose  # noqa: E402 — derive_disposition, validate_coverage uni
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "forge_dispose.py")
 
+PLAN_TASK = """### Task {n}: Task {n}
+- [ ] Done
+
+**Files:**
+- Modify: `src.txt`
+
+**Tests:**
+- behavior {n}
+
+**Acceptance:**
+- `true` passes
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+PLAN_TEXT = (
+    "# Plan\n\n**Goal:** Build.\n**Global Constraints:**\n- Keep it small.\n\n"
+    + "\n".join(PLAN_TASK.format(n=n) for n in (1, 2, 3))
+)
+
+
+def write_plan(directory):
+    """A three-task plan whose every scope is src.txt, for the CLI's required --plan."""
+    path = os.path.join(directory, "plan.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(PLAN_TEXT)
+    return path
+
 
 class ForgeDisposeCLITests(unittest.TestCase):
     def setUp(self):
@@ -64,6 +94,8 @@ class ForgeDisposeCLITests(unittest.TestCase):
         return path
 
     def run_dispose(self, args):
+        if "--plan" not in args:
+            args = args + ["--plan", write_plan(self.workdir)]
         return subprocess.run(
             [sys.executable, SCRIPT] + args,
             cwd=self.repo_dir, capture_output=True, text=True,
@@ -74,10 +106,11 @@ class ForgeDisposeCLITests(unittest.TestCase):
                     citable_path=None, approved=None, prior_path=None):
         args = [
             "--verdict", verdict_path,
-            "--base", self.base,
+            "--base", self.base, "--checkpoint", self.base,
             "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,
+            "--plan", write_plan(self.workdir),
         ]
         if state_path:
             args += ["--state", state_path]
@@ -555,7 +588,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]})
 
     def _args_without_scope(self, verdict):
-        return ["--verdict", verdict, "--base", self.base, "--attempt", "1",
+        return ["--verdict", verdict, "--base", self.base, "--checkpoint", self.base, "--attempt", "1",
                 "--acceptance-ok", "true", "--autofix", "auto"]
 
     def test_missing_scope_is_a_usage_error_naming_it(self):
@@ -584,7 +617,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decision = json.loads(result.stdout)
         self.assertEqual(decision["findings"]["fix"][0]["identity"], "final:f1")
         result = self.run_dispose([
-            "--base", self.base, "--attempt", "1", "--acceptance-ok", "false",
+            "--base", self.base, "--checkpoint", self.base, "--attempt", "1", "--acceptance-ok", "false",
             "--autofix", "auto", "--scope", "t1", "--execution-failure",
             "--execution-detail", "crash"])
         decision = json.loads(result.stdout)
@@ -595,7 +628,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def test_execution_failure_is_fix_retry_not_halt_or_defer(self):
         result = self.run_dispose([
-            "--base", self.base,
+            "--base", self.base, "--checkpoint", self.base,
             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false", "--autofix", "auto",
             "--execution-failure", "--execution-detail", "worker crashed",
         ])
@@ -611,7 +644,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decision = None
         for i in range(1, 6):
             result = self.run_dispose([
-                "--base", self.base,
+                "--base", self.base, "--checkpoint", self.base,
                 "--scope", "t1", "--attempt", str(i), "--acceptance-ok", "false",
                 "--autofix", "auto", "--execution-failure",
                 "--execution-detail", "worker timed out",
@@ -628,7 +661,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
     def test_failed_acceptance_without_execution_failure_is_usage_error(self):
         v = self._write_json("vfa.json", {"verdict": "clean"})
         result = self.run_dispose([
-            "--verdict", v, "--base", self.base, "--scope", "t1", "--attempt", "1",
+            "--verdict", v, "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", "1",
             "--acceptance-ok", "false", "--autofix", "auto",
             "--failed-acceptance", "make a",
         ])
@@ -638,7 +671,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def test_failed_acceptance_with_acceptance_ok_true_is_usage_error(self):
         result = self.run_dispose([
-            "--base", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+            "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
             "--autofix", "auto", "--execution-failure",
             "--failed-acceptance", "make a",
         ])
@@ -651,7 +684,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decisions = []
         for i in (1, 2):
             result = self.run_dispose([
-                "--base", self.base, "--scope", "t1", "--attempt", str(i),
+                "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", str(i),
                 "--acceptance-ok", "false", "--autofix", "auto",
                 "--execution-failure", "--failed-acceptance", "make a",
             ] + (["--state", state_path] if state_path else []))
@@ -673,7 +706,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
              "impact": "contract-breaking", "contract_ref": "AC-1"},
         ]})
         result = self.run_dispose([
-            "--verdict", v, "--base", "not-a-real-ref-xyz",
+            "--verdict", v, "--base", "not-a-real-ref-xyz", "--checkpoint", "not-a-real-ref-xyz",
             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
         ])
         self.assertNotEqual(result.returncode, 0)
@@ -728,8 +761,9 @@ class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(verdict_obj, f)
         return subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", path, "--base", self.base,
-             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix],
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.base, "--checkpoint", self.base,
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix,
+             "--plan", write_plan(self.workdir)],
             cwd=self.repo_dir, capture_output=True, text=True,
         )
 
@@ -968,8 +1002,9 @@ class RunDiffParityGapTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.verdict_obj, f)
         result = subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base,
-             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto"],
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base, "--checkpoint", self.task_base,
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
+             "--plan", write_plan(self.workdir)],
             cwd=self.repo_dir, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1253,116 +1288,6 @@ class ProvenanceDispositionTests(unittest.TestCase):
     def test_pre_existing_cited_contract_breaking_halts(self):
         self.assertEqual(forge_dispose.derive_disposition(
             self._finding("pre-existing", "contract-breaking", "AC-1")), "halt")
-
-
-class RepairScopeCLITests(unittest.TestCase):
-    """--repair-snapshot: a repair that modifies or deletes a file outside the
-    pre-repair diff halts `repair-out-of-scope` naming the paths; a file the
-    repair creates is exempt."""
-
-    def setUp(self):
-        self.repo_dir = tempfile.mkdtemp(prefix="forge-dispose-scope-")
-        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
-        self._git("init")
-        self._git("config", "user.email", "test@example.com")
-        self._git("config", "user.name", "Test")
-        self._write("src.txt", "line1\nline2\nline3\n")
-        self._write("other.txt", "untouched\n")
-        self._git("add", ".")
-        self._git("commit", "-m", "base")
-        self.base = self._out("rev-parse", "HEAD").strip()
-        # The task's own change, then the pre-repair snapshot.
-        self._write("src.txt", "line1\nCHANGED\nline3\n")
-        import forge_git
-        self.snapshot = forge_git.capture_tree(self.repo_dir)
-        self.workdir = tempfile.mkdtemp(prefix="forge-dispose-scope-work-")
-        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
-
-    def _git(self, *args):
-        subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
-                       capture_output=True, text=True)
-
-    def _out(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
-                              capture_output=True, text=True).stdout
-
-    def _write(self, name, text):
-        with open(os.path.join(self.repo_dir, name), "w") as f:
-            f.write(text)
-
-    def _dispose(self, verdict, scope="t1", snapshot=None):
-        vpath = os.path.join(self.workdir, "v.json")
-        with open(vpath, "w") as f:
-            json.dump(verdict, f)
-        return subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
-             "--scope", scope, "--attempt", "2", "--acceptance-ok", "true",
-             "--autofix", "auto", "--repair-snapshot", snapshot or self.snapshot],
-            cwd=self.repo_dir, capture_output=True, text=True,
-        )
-
-    def _decision(self, verdict, **kw):
-        r = self._dispose(verdict, **kw)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(r.stdout)
-
-    def test_repair_within_the_diff_passes(self):
-        self._write("src.txt", "line1\nCHANGED AGAIN\nline3\n")
-        d = self._decision({"verdict": "pass"})
-        self.assertEqual(d["action"], "pass")
-        self.assertEqual(d["repair_out_of_scope"], [])
-
-    def test_repair_modifying_an_untouched_file_halts(self):
-        self._write("other.txt", "drifted\n")
-        d = self._decision({"verdict": "pass"})
-        self.assertEqual(d["action"], "halt")
-        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
-        self.assertEqual(d["repair_out_of_scope"], ["other.txt"])
-
-    def test_repair_deleting_an_untouched_file_halts(self):
-        os.remove(os.path.join(self.repo_dir, "other.txt"))
-        d = self._decision({"verdict": "pass"})
-        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
-        self.assertEqual(d["repair_out_of_scope"], ["other.txt"])
-
-    def test_repair_creating_a_new_file_passes(self):
-        self._write("test_new.py", "def test_x(): pass\n")
-        d = self._decision({"verdict": "pass"})
-        self.assertEqual(d["action"], "pass")
-        self.assertEqual(d["repair_out_of_scope"], [])
-
-    def test_out_of_scope_halts_ahead_of_outstanding_fix_findings(self):
-        self._write("other.txt", "drifted\n")
-        d = self._decision({"verdict": "findings", "findings": [
-            {"id": "f1", "summary": "still wrong",
-             "location": {"file": "src.txt", "lines": "2-2"},
-             "impact": "improvement"}]})
-        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
-
-    def test_final_scope_applies_the_same_rule_against_its_base(self):
-        self._write("other.txt", "drifted\n")
-        d = self._decision({"verdict": "pass"}, scope="final")
-        self.assertEqual(d["halt_reason"], "repair-out-of-scope")
-
-    def test_unknown_snapshot_fails_loud(self):
-        r = self._dispose({"verdict": "pass"}, snapshot="0" * 40)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("--repair-snapshot", r.stderr)
-
-    def test_without_the_flag_no_scope_key(self):
-        vpath = os.path.join(self.workdir, "v.json")
-        with open(vpath, "w") as f:
-            json.dump({"verdict": "pass"}, f)
-        self._write("other.txt", "drifted\n")
-        r = subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
-             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
-             "--autofix", "auto"],
-            cwd=self.repo_dir, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        d = json.loads(r.stdout)
-        self.assertEqual(d["action"], "pass")
-        self.assertNotIn("repair_out_of_scope", d)
 
 
 if __name__ == "__main__":

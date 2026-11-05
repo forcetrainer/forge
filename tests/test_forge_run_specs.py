@@ -40,6 +40,9 @@ system: {system}
 TASK_ONE = """### Task 1: First
 - [ ] Done
 
+**Files:**
+- Modify: `f1.txt`
+
 **Spec:** [alpha] Intro, [beta] Rules
 
 **Acceptance:** `echo CHANGE >> f1.txt` passes
@@ -53,6 +56,9 @@ TASK_ONE_ALPHA = TASK_ONE.replace("[alpha] Intro, [beta] Rules", "[alpha] Intro"
 
 TASK_TWO = """### Task 2: Second
 - [ ] Done
+
+**Files:**
+- Modify: `f1.txt`
 
 **Acceptance:** `test -f ok.flag` passes
 

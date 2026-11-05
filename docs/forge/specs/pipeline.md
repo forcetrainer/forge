@@ -265,6 +265,21 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   and with neither it has no spec. Completed plans are not migrated.
 - **Task heading** is `### Task N:` — three `#`, colon. The extraction scripts require
   it.
+- **`**Files:**`** is required on every task and **machine-read**: its paths are the
+  task's scope (`execution` spec: Scope widening). It takes the field clause grammar's
+  bulleted form **only**: the marker alone on its line, one `-` bullet per entry, the
+  block ending as that form's does, continuation lines joined to their bullet before the
+  entry is parsed. The marker with a value on its line, and a marker followed by no
+  bullet, are errors. An entry is a kind — `Create:`, `Modify:` or `Test:` — then one or
+  more backticked repo-relative paths separated by `, `, then optionally one
+  parenthetical note running to the end of the joined entry; inside the note, backticks are
+  literal text. All three kinds put their paths in scope. Errors, each naming the task
+  and the line the entry starts on and quoting the entry: an unknown kind; an entry with no backticked path;
+  text between paths or after the last path that is neither `, ` nor the note; a path
+  containing `*`, `?` or `[`, or ending in `/`; a path resolving outside the repository
+  root. A path is never checked for existence — an earlier task may create it. A file
+  that cannot be named at plan time is not written as prose: leave it out, and a
+  worker that needs it justifies it as a widening.
 - **`**Spec:**`** is an optional line after `**Files:**` naming the spec sections this
   task's worker needs, by heading text (unique prefix acceptable, matched
   case-insensitively at extraction). In a plan written from a spec, every task names
@@ -323,7 +338,8 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   denylist of two literal names, and an acceptance command that could never pass because
   its word was the file's own vocabulary.
 - **Field clause grammar** governs every machine-read multi-clause field —
-  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`, `**Spec files:**`. Exactly two forms are legal:
+  `**Tests:**`, `**Acceptance:**`, `**Global Constraints:**`, `**Spec files:**`, and
+  `**Files:**`, which admits the first form only (`**Files:**`, above). Exactly two forms are legal:
   the **marker alone** on its line followed by one `-` bullet per clause, the block ending
   at the first blank line, next `**Field:**`, or any heading line (`#` through `######` at
   column 0), whichever comes first; or the **marker with a value** on the same
@@ -592,6 +608,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
 2026-10-06: Agent files — break-the-code is bounded to one mutant per `**Tests:**` bullet, per execution spec Reviewer write discipline (#134)
 2026-10-05: Agent files — review mutates only in a scratch copy, per execution spec Reviewer write discipline (#127)

@@ -325,7 +325,7 @@ def build_acceptance_section(results):
 
 def build_packet(task_block, base, diff_output, prior_findings=None,
                   checklist=None, review_kind=None, *, spec_sections=None,
-                  citable=None, acceptance_results=None):
+                  citable=None, acceptance_results=None, widened=None):
     """``review_kind`` (None by default) opts into the '## Review kind'
     marker — the CLI (main(), below) never passes it, so its output stays
     byte-identical to pre-Task-6 behavior; forge_git.py's in-process callers
@@ -346,7 +346,11 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
 
     ``acceptance_results`` (None by default) is a list of result dicts rendered
     as '## Acceptance results' after the diff; ``None`` omits the section, an
-    empty list renders it with no rows."""
+    empty list renders it with no rows.
+
+    ``widened`` (None by default) is the ``## Widened files`` section text
+    (``forge_dispose.render_widened_section``), inserted verbatim after the
+    prior findings; ``None`` or empty omits it (Scope widening, The packet)."""
     if diff_output.strip() == "":
         diff_body = "no changes vs {}\n".format(base)
     else:
@@ -371,13 +375,21 @@ def build_packet(task_block, base, diff_output, prior_findings=None,
         packet += "\n" + build_citable_section(citable)
     if prior_findings is not None:
         packet += "\n" + build_prior_findings_section(prior_findings)
+    packet += _widened_part(widened)
     if review_kind is not None:
         packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
 
 
+def _widened_part(widened):
+    """The ``## Widened files`` section as a packet suffix, or nothing."""
+    if not widened or not widened.strip():
+        return ""
+    return "\n" + widened.rstrip("\n") + "\n"
+
+
 def build_verification_packet(findings, delta_diff, checklist, review_kind="verification",
-                              citable=None):
+                              citable=None, widened=None):
     """Delta-scoped verification packet for a resumed reviewer (Delta-scoped
     verification packets spec): the outstanding findings + the repair delta +
     the reduced checklist — never the task block, the full spec, or the
@@ -395,7 +407,9 @@ def build_verification_packet(findings, delta_diff, checklist, review_kind="veri
     longest backtick run in the delta, so a delta line containing ``` can't
     close the block early. ``review_kind`` defaults to "verification" (this
     builder's only real use) and prepends the '## Review kind' marker;
-    pass None to omit it."""
+    pass None to omit it. ``widened`` is the ``## Widened files`` section text
+    for the widenings due a ruling this lap, inserted verbatim; None or empty
+    omits it."""
     body = json.dumps(findings, indent=2)
     if not body.endswith("\n"):
         body += "\n"
@@ -420,6 +434,7 @@ def build_verification_packet(findings, delta_diff, checklist, review_kind="veri
         packet += "\n" + build_checklist_section(checklist)
     if citable is not None:
         packet += "\n" + build_citable_section(citable)
+    packet += _widened_part(widened)
     if review_kind is not None:
         packet = build_review_kind_section(review_kind) + "\n" + packet
     return packet
@@ -459,7 +474,26 @@ def main(argv=None):
         help="JSON file of citable ids (forge_checklist.py --citable output); "
         "appends a '## Citable refs' section to the packet",
     )
+    parser.add_argument(
+        "--widened",
+        default=None,
+        metavar="PATH",
+        help="markdown file holding a '## Widened files' section "
+        "(forge_dispose.py widened --format md output); inserted verbatim",
+    )
     args = parser.parse_args(argv)
+
+    widened = None
+    if args.widened is not None:
+        try:
+            with open(args.widened, "r", encoding="utf-8") as f:
+                widened = f.read()
+        except OSError as e:
+            print(
+                "error: cannot read widened file {}: {}".format(args.widened, e),
+                file=sys.stderr,
+            )
+            return 1
 
     citable = None
     if args.citable is not None:
@@ -585,7 +619,7 @@ def main(argv=None):
 
     packet = build_packet(
         task_block, args.base, diff_output, prior_findings, checklist,
-        citable=citable, spec_sections=spec_sections,
+        citable=citable, spec_sections=spec_sections, widened=widened,
     )
 
     out_dir = args.out if args.out else tempfile.mkdtemp()
