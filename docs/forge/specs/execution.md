@@ -806,7 +806,8 @@ plan.
 | task N | task N's `**Files:**` paths (`pipeline` spec: Plan documents) |
 | final | every task's `**Files:**` paths, plus every path `git diff <run_base> <checkpoint>` changes |
 
-**The checkpoint** is `HEAD`, recorded by the orchestrator once per stage per invocation —
+**The checkpoint** is `HEAD` — its commit sha and the branch it is on — recorded by the
+orchestrator once per stage per invocation —
 just before the stage's first worker dispatch in that invocation (a task's cold worker,
 the final review's first fixer) — and held for every later turn of the stage, rework laps
 included; `HEAD` is never re-read for detection after that. A worker's commit on one lap
