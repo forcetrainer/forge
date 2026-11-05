@@ -1278,6 +1278,34 @@ orchestrator pastes the `forge_dispose.py widened --format md` output into the
 reviewer's prompt, since that list is the runner's computation and the reviewer owes a
 ruling on exactly it. On Codex `review-packet.py` carries the same section.
 
+### Heartbeat and stalls (Claude)
+
+The orchestrator is idle between agent notifications, so a stalled agent and a long-running
+one look the same, and the user sees nothing either way.
+
+- **Turn rule (agent contracts, every forge agent).** An agent never ends its turn while a
+  command it started is still running. Commands run in the foreground. A command that may
+  outlast the 10-minute foreground limit runs in the background writing an exit marker;
+  the agent waits for it with a foreground `until [ -f <marker> ]` loop at the maximum
+  timeout, re-issued until the marker appears, then reads the output and reports.
+  `Monitor` is not a wait: it returns at once and notifies later.
+- **Progress file.** Every worker and reviewer prompt names a progress file in the
+  scratch directory (`task-<N>-progress.log`; `final-progress.log` for the final review).
+  The agent appends one line per step — time, then what it is doing.
+- **Heartbeat.** When execution starts, the orchestrator arms a `Monitor` that emits a
+  tick every 10 minutes, re-arms it on expiry, and stops it when the run passes, halts
+  or reaches close-out.
+- **Each tick** prints one status line: task `N/M`, stage (worker, acceptance, review,
+  rework lap `k`, final review), the agent, time since dispatch, the progress file's last
+  line and its age, and the tasks finished. A tick reads current state only; nothing is
+  counted across ticks.
+- **Stall.** An agent that has gone idle without delivering its report or verdict is
+  stalled. The tick's status line says so, and the orchestrator sends that agent one
+  `SendMessage`: read the output of anything still running, or re-run it in the
+  foreground, then report.
+- **Codex** has neither the stall nor the heartbeat: `codex exec` has no background
+  mode, and `forge-monitor.py` reads the run directory from outside.
+
 ### Serial by design
 
 Substantive implementation runs **serially, on purpose** — not because parallelism is
@@ -1598,6 +1626,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-05: Heartbeat and stalls (Claude) — agents never end a turn with a command still running and wait on long ones with a re-issued foreground loop; workers and reviewers append to a per-task progress file; the orchestrator prints a status line on a 10-minute `Monitor` tick and nudges an agent idle without its report (#146).
 2026-11-05: regression (rule 3) halts on acceptance going green→red or a resolved widening rejected again; a reviewer finding whose identity matches a resolved one is an ordinary fix finding. Reviewers never prove the repository unchanged — the orchestrator's fingerprint does, and gitignored paths such as `.forge/` run logs are out of scope. Standard- and complex-tier workers run the test files their change touches; the orchestrator alone runs acceptance (#144, #149, #147).
 2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI; `**Spec files:**` and the citable set are read at the checkpoint too, an in-repo plan absent at the checkpoint is a contract error before any worker runs, and an out-of-repo plan is read as given and recorded as unprotected. A post-commit security review found both escapes.
 2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`, and a worker commit halts, as `worker-committed`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
