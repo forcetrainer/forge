@@ -401,6 +401,29 @@ def render_widenings(state):
     return lines
 
 
+def _worker_committed_lines(halt):
+    """The `worker-committed` halt's payload (Scope widening, A worker commit
+    halts): the recorded and current HEAD and branch and every commit between
+    them. The freeze moved no ref, so the commits are still where the worker
+    left them; `--resolve` is refused for this class, so none is offered."""
+    wc = halt.get("worker_committed")
+    if not wc:
+        return []
+
+    def where(branch):
+        return branch or "a detached HEAD"
+
+    return [
+        "  recorded HEAD: {} on {}".format(
+            wc.get("recorded_head"), where(wc.get("recorded_branch"))),
+        "  current HEAD:  {} on {}".format(
+            wc.get("current_head"), where(wc.get("current_branch"))),
+        "  worker commits: {}".format(
+            ", ".join(wc.get("commits") or []) or "(none: HEAD was moved back)"),
+        "  keep, rewrite or drop the commit(s) in the tree, then re-invoke",
+    ]
+
+
 def render_halt(halt):
     """The resumable-halt block for `--status`: which task is frozen, the
     freeze commit (or the fact that there was nothing to freeze), the
@@ -435,6 +458,7 @@ def render_halt(halt):
         if halt.get("changes"):
             lines.append("  changed by the reviewer: {}".format(
                 "; ".join(halt["changes"])))
+        lines.extend(_worker_committed_lines(halt))
         if halt.get("halt_reason") == "unverified":
             # The one stage class that poses a question `--resolve` answers:
             # the ids are the open entries', listed under the header.
@@ -459,6 +483,7 @@ def render_halt(halt):
         lines.append(
             "  restore the path(s) or approve the deletion in the tree, then "
             "re-invoke")
+    lines.extend(_worker_committed_lines(halt))
     approved = halt.get("approved") or {}
     # The finding's runner-stamped ``identity`` (``t<N>:<id>`` / ``final:<id>``)
     # — the key `run_plan` and `convergence_decision` match on and `--resolve`

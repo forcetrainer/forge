@@ -106,10 +106,15 @@ class WideningTestBase(unittest.TestCase):
             f.write(raw if raw is not None else json.dumps(obj))
         return path
 
+    def commit(self, message="work"):
+        self.git("add", "-A")
+        self.git("commit", "-m", message)
+        return self.git("rev-parse", "HEAD").strip()
+
     def detect(self, scope="t1", base="HEAD", state=None, record=None,
-               spec=None):
+               spec=None, checkpoint="HEAD"):
         return forge_dispose.scope_widenings(
-            self.repo, self.plan, spec, scope, base, state,
+            self.repo, self.plan, spec, scope, base, checkpoint, state,
             record or os.path.join(self.work, "absent.json"))
 
     def paths(self, result):
@@ -187,7 +192,8 @@ class DetectionTests(WideningTestBase):
         with self.assertRaises(RuntimeError) as cm:
             self.detect(scope="final", base="no-such-ref")
         self.assertIn("no-such-ref", str(cm.exception))
-        proc = self.run_cli("--base", "no-such-ref", "--scope", "final")
+        proc = self.run_cli("--base", "no-such-ref", "--checkpoint", "HEAD",
+                            "--scope", "final")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("no-such-ref", proc.stderr)
 
@@ -195,7 +201,8 @@ class DetectionTests(WideningTestBase):
         with self.assertRaises(RuntimeError) as cm:
             self.detect(scope="t1", base="no-such-ref")
         self.assertIn("no-such-ref", str(cm.exception))
-        proc = self.run_cli("--base", "no-such-ref", "--scope", "t1")
+        proc = self.run_cli("--base", "no-such-ref", "--checkpoint", "HEAD",
+                            "--scope", "t1")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("no-such-ref", proc.stderr)
 
@@ -204,6 +211,207 @@ class DetectionTests(WideningTestBase):
             [sys.executable, SCRIPT, "widened", "--plan", plan or self.plan,
              *args],
             cwd=self.repo, capture_output=True, text=True)
+
+
+AMENDED_PLAN = PLAN.replace(
+    "- Modify: `a.py`\n", "- Modify: `a.py`\n- Modify: `c.py`\n", 1)
+
+
+class CheckpointTests(WideningTestBase):
+    """Detection compares from the recorded checkpoint, and reads the plan as
+    committed there (Scope widening, The checkpoint)."""
+
+    def test_a_checkpoint_older_than_a_commit_holding_an_out_of_scope_edit_still_lists_the_path_as_a_widening(self):
+        checkpoint = self.base
+        self.edit("c.py")
+        self.commit("worker commit")
+        result = self.detect(checkpoint=checkpoint)
+        self.assertEqual(self.paths(result), ["c.py"])
+        self.assertEqual(self.paths(self.detect(checkpoint="HEAD")), [])
+
+    def test_a_checkpoint_older_than_a_commit_holding_an_out_of_scope_deletion_still_lists_the_path_as_deleted(self):
+        checkpoint = self.base
+        os.remove(os.path.join(self.repo, "d.py"))
+        self.commit("worker deleted")
+        result = self.detect(checkpoint=checkpoint)
+        self.assertEqual(result.deleted, ["d.py"])
+        self.assertEqual(self.detect(checkpoint="HEAD").deleted, [])
+
+    def test_a_worker_that_adds_a_path_to_its_tasks_files_in_the_plans_working_copy_does_not_put_that_path_in_scope(self):
+        self.write("docs/plan.md", AMENDED_PLAN)
+        self.edit("c.py")
+        self.assertEqual(self.paths(self.detect(checkpoint=self.base)), ["c.py"])
+
+    def test_scope_is_read_from_the_plan_as_committed_at_the_checkpoint(self):
+        self.write("docs/plan.md", AMENDED_PLAN)
+        amended = self.commit("amend plan")
+        self.edit("c.py")
+        # the checkpoint before the amendment: c.py is outside task 1
+        self.assertEqual(self.paths(self.detect(checkpoint=self.base)), ["c.py"])
+        # the checkpoint at the amendment: c.py is inside it
+        self.assertEqual(self.detect(checkpoint=amended).widened, [])
+
+    def test_a_plan_amendment_committed_before_the_turn_does_change_scope(self):
+        self.write("docs/plan.md", AMENDED_PLAN)
+        checkpoint = self.commit("amend plan")
+        self.edit("c.py")
+        self.assertEqual(self.detect(checkpoint=checkpoint).widened, [])
+
+    def test_final_scope_adds_paths_changed_between_run_base_and_the_checkpoint_not_a_later_head(self):
+        self.edit("c.py")
+        checkpoint = self.commit("run work")
+        self.edit("d.py")
+        self.commit("later commit")  # a worker's commit after the checkpoint
+        result = self.detect(scope="final", base=self.base, checkpoint=checkpoint)
+        self.assertEqual(self.paths(result), ["d.py"])
+
+    def test_an_accepted_widening_is_pruned_when_its_path_no_longer_differs_from_the_checkpoint(self):
+        checkpoint = self.base
+        self.edit("c.py")
+        self.commit("worker commit")
+        self.write("c.py", "x = 1\ny = 2\n")  # back to the checkpoint's content
+        state = forge_dispose.ConvergenceState()
+        state.accepted_widenings = {"c.py": {
+            "blob": "x", "reason": "r", "serves": None, "ruling_reason": "ok"}}
+        result = self.detect(checkpoint=checkpoint, state=state)
+        self.assertEqual(result.widened, [])
+        forge_dispose.prune_accepted_widenings(state, result)
+        self.assertEqual(state.accepted_widenings, {})
+
+    def test_line_counts_are_measured_from_the_checkpoint(self):
+        self.edit("c.py")
+        self.commit("worker commit")
+        self.write("c.py", "x = 1\ny = CHANGED\nz = 3\nw = 4\n")
+        result = self.detect(checkpoint=self.base)
+        self.assertEqual((result.widened[0].added, result.widened[0].removed), (3, 1))
+
+    def test_decision_json_line_counts_are_measured_from_the_checkpoint(self):
+        self.edit("c.py")
+        self.commit("worker commit")
+        self.write("c.py", "x = 1\ny = CHANGED\nz = 3\nw = 4\n")
+        vpath = os.path.join(self.work, "v.json")
+        with open(vpath, "w") as f:
+            json.dump({"verdict": "pass", "widenings": [_ruling("c.py")]}, f)
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", vpath, "--base", "HEAD",
+             "--checkpoint", self.base, "--scope", "t1", "--attempt", "1",
+             "--acceptance-ok", "true", "--autofix", "auto", "--plan", self.plan],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (entry,) = json.loads(proc.stdout)["widenings"]["accepted"]
+        self.assertEqual((entry["added"], entry["removed"]), (3, 1))
+
+    def test_a_checkpoint_that_is_not_a_commit_raises_naming_the_cause_and_the_cli_exits_1(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.detect(checkpoint="not-a-commit")
+        self.assertIn("not-a-commit", str(cm.exception))
+        self.assertIn("checkpoint", str(cm.exception))
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        with self.assertRaises(RuntimeError) as cm:
+            self.detect(checkpoint=tree)  # an object, but not a commit
+        self.assertIn("checkpoint", str(cm.exception))
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "widened", "--plan", self.plan,
+             "--base", "HEAD", "--checkpoint", "not-a-commit", "--scope", "t1"],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("not-a-commit", proc.stderr)
+
+    def test_a_plan_that_does_not_exist_at_the_checkpoint_raises_naming_the_plan_and_the_checkpoint(self):
+        empty = self.git("hash-object", "-t", "tree", "/dev/null").strip()
+        bare = self.git("commit-tree", empty, "-m", "no plan").strip()
+        with self.assertRaises(RuntimeError) as cm:
+            self.detect(checkpoint=bare)
+        self.assertIn("plan.md", str(cm.exception))
+        self.assertIn(bare, str(cm.exception))
+
+    def test_a_plan_outside_the_repository_root_is_read_as_given(self):
+        outside = self.write("plan.md", self.plan_text, root=self.work)
+        result = forge_dispose.scope_widenings(
+            self.repo, outside, None, "t1", "HEAD", "HEAD", None,
+            os.path.join(self.work, "absent.json"))
+        self.edit("c.py")
+        result = forge_dispose.scope_widenings(
+            self.repo, outside, None, "t1", "HEAD", "HEAD", None,
+            os.path.join(self.work, "absent.json"))
+        self.assertEqual(self.paths(result), ["c.py"])
+
+    def test_an_in_repo_plan_that_is_git_ignored_untracked_or_deleted_raises_naming_the_plan_and_the_checkpoint(self):
+        head = self.git("rev-parse", "HEAD").strip()
+        # ignored (and untracked at a checkpoint that lacks it)
+        self.write("ignored-plan.md", self.plan_text)
+        self.write(".gitignore", "ignored-plan.md\n")
+        self.write("loose-plan.md", self.plan_text)
+        self.git("rm", "-q", "docs/plan.md")
+        self.git("commit", "-m", "remove plan")
+        removed = self.git("rev-parse", "HEAD").strip()
+        cases = [
+            (os.path.join(self.repo, "ignored-plan.md"), head),
+            (os.path.join(self.repo, "loose-plan.md"), head),
+            (self.plan, removed),  # deleted
+        ]
+        for plan, checkpoint in cases:
+            with self.subTest(plan=os.path.basename(plan)):
+                with self.assertRaises(RuntimeError) as cm:
+                    forge_dispose.scope_widenings(
+                        self.repo, plan, None, "t1", "HEAD", checkpoint, None,
+                        os.path.join(self.work, "absent.json"))
+                self.assertIn(os.path.basename(plan), str(cm.exception))
+                self.assertIn(checkpoint, str(cm.exception))
+
+    def test_an_amendment_committed_alone_moves_the_checkpoint_so_the_amended_path_is_in_scope(self):
+        self.edit("a.py")
+        self.commit("task commit")
+        self.write("docs/plan.md", AMENDED_PLAN)
+        amendment = self.commit("amend plan: task 1 also edits c.py")
+        # uncommitted task work on top: the amended path and another one
+        self.edit("c.py")
+        self.edit("d.py")
+        result = self.detect(base=amendment, checkpoint=amendment)
+        self.assertEqual(self.paths(result), ["d.py"])
+        # diffed from the amendment commit: the earlier a.py edit is not in play
+        self.assertEqual((result.widened[0].added, result.widened[0].removed), (2, 1))
+
+    def test_a_working_copy_spec_files_addition_does_not_exempt_the_spec(self):
+        declared = PLAN.replace(
+            "**Global Constraints:**",
+            "**Spec files:**\n- docs/spec.md\n**Global Constraints:**", 1)
+        self.write("docs/plan.md", declared)  # working copy only: not committed
+        self.write("docs/spec.md", SPEC + "\namended\n")
+        result = self.detect(checkpoint=self.base)
+        self.assertEqual(self.paths(result), ["docs/spec.md"])
+
+    def test_a_working_copy_only_test_case_is_not_a_citable_serves(self):
+        extra = PLAN.replace("- first behavior\n", "- first behavior\n- extra behavior\n", 1)
+        self.write("docs/plan.md", extra)  # working copy only: not committed
+        self.edit("c.py")
+        rec = self.record([{"path": "c.py", "reason": "r", "serves": "t1.t2"}])
+        result = self.detect(checkpoint=self.base, record=rec)
+        self.assertEqual(len(result.record_defects), 1)
+        self.assertIn("t1.t2", result.record_defects[0])
+        ok = self.record([{"path": "c.py", "reason": "r", "serves": "t1.t1"}])
+        self.assertEqual(self.detect(checkpoint=self.base, record=ok).record_defects, [])
+        # committed, it is citable
+        checkpoint = self.commit("amend plan: add a test case")
+        self.edit("d.py")
+        self.write("docs/plan.md", extra)
+        rec = self.record([{"path": "d.py", "reason": "r", "serves": "t1.t2"}])
+        self.assertEqual(self.detect(checkpoint=checkpoint, record=rec).record_defects, [])
+
+    def test_omitting_checkpoint_is_a_usage_error_naming_the_flag_on_both_clis(self):
+        widened = subprocess.run(
+            [sys.executable, SCRIPT, "widened", "--plan", self.plan,
+             "--base", "HEAD", "--scope", "t1"],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(widened.returncode, 2)
+        self.assertIn("--checkpoint", widened.stderr)
+        decision = subprocess.run(
+            [sys.executable, SCRIPT, "--verdict", "v.json", "--base", "HEAD",
+             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+             "--autofix", "auto", "--plan", self.plan],
+            cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(decision.returncode, 2)
+        self.assertIn("--checkpoint", decision.stderr)
 
 
 class RecordTests(WideningTestBase):
@@ -316,7 +524,7 @@ class OutputTests(WideningTestBase):
     def cli(self, *args):
         return subprocess.run(
             [sys.executable, SCRIPT, "widened", "--plan", self.plan,
-             "--base", "HEAD", "--scope", "t1", *args],
+             "--base", "HEAD", "--checkpoint", "HEAD", "--scope", "t1", *args],
             cwd=self.repo, capture_output=True, text=True)
 
     def test_the_md_format_renders_each_due_path_as_a_json_string_with_its_justification_or_no_justification_given(self):
@@ -523,7 +731,7 @@ class DecisionCLITests(WideningTestBase):
         with open(vpath, "w") as f:
             json.dump(verdict, f)
         args = [sys.executable, SCRIPT, "--verdict", vpath, "--base", self.base,
-                "--scope", scope, "--attempt", str(attempt),
+                "--checkpoint", self.base, "--scope", scope, "--attempt", str(attempt),
                 "--acceptance-ok", "true", "--autofix", autofix,
                 "--plan", self.plan]
         if state is not None:
@@ -546,7 +754,7 @@ class DecisionCLITests(WideningTestBase):
     def test_omitting_plan_is_a_usage_error_naming_the_flag(self):
         proc = subprocess.run(
             [sys.executable, SCRIPT, "--verdict", "v.json", "--base", "HEAD",
-             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+             "--checkpoint", "HEAD", "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
              "--autofix", "auto"],
             cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2)
@@ -667,7 +875,7 @@ class DecisionCLITests(WideningTestBase):
         os.remove(os.path.join(self.repo, "d.py"))
         proc = subprocess.run(
             [sys.executable, SCRIPT, "--execution-failure", "--base", self.base,
-             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false",
+             "--checkpoint", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false",
              "--autofix", "auto", "--plan", self.plan],
             cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)

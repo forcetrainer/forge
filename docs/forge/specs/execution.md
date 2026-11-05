@@ -816,8 +816,14 @@ records a fresh checkpoint for the stage it resumes, so a fix the human committe
 re-invoking is inside it, and a skipped task commit leaves nothing to look up. For a task
 the checkpoint equals its review base. Every
 `**Files:**` path is read from the plan **as committed at the checkpoint** (`git show
-<checkpoint>:<plan>`), so an edit to the plan's working copy, by a worker or anyone,
-never changes a scope. An orchestrator amendment to a running task's `**Files:**` is
+<checkpoint>:<plan>`) — and so is everything else detection takes from the plan: its
+`**Spec files:**` (the exempt set) and the citable set `serves` is checked against — so an
+edit to the plan's working copy, by a worker or anyone, never changes a scope or an
+exemption. A plan inside the repository that is absent at the checkpoint — ignored,
+untracked or deleted — is a contract error naming the plan and the checkpoint, checked
+when the checkpoint is recorded, before the stage's first worker dispatch. A plan
+outside the repository root has no commit to read: it is read as given at each detection
+and is **unprotected** (Risks / constraints). An orchestrator amendment to a running task's `**Files:**` is
 committed alone, and that task's checkpoint and review base move to the amendment
 commit.
 
@@ -1566,6 +1572,11 @@ Any cost claim requires measurement against a comparable run.
 - **Wall-clock on large all-independent plans** — the accepted cost of serial execution.
   Hybrid parallelism is a future optimization, not a defect.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
+- **An out-of-repository plan is unprotected.** Scope widening pins a plan to the
+  checkpoint only when a commit can hold it; a plan outside the repository is re-read at
+  each detection, so a worker able to write it could widen its own scope. Forge plans
+  live in `docs/forge/plans/`; only test fixtures sit outside. Accepted; revisit if a
+  real run keeps its plan outside the repository.
 - **A reviewer waving widenings through.** Scope widening trades a human stop on every
   out-of-scope edit for a reviewer's ruling, so a lenient reviewer lets scope creep land.
   Bounded by per-path rulings with a reason, by the close-out list putting every accepted
@@ -1575,7 +1586,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
-2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI. A post-commit security review found both escapes.
+2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI; `**Spec files:**` and the citable set are read at the checkpoint too, an in-repo plan absent at the checkpoint is a contract error before any worker runs, and an out-of-repo plan is read as given and recorded as unprotected. A post-commit security review found both escapes.
 2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`, and a worker commit halts, as `worker-committed`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.

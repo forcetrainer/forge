@@ -923,7 +923,7 @@ class ForgeDisposeCLIChecklistTests(unittest.TestCase):
                     autofix="auto", checklist_path=None, citable_path=None):
         args = [
             "--verdict", verdict_path,
-            "--base", self.base,
+            "--base", self.base, "--checkpoint", self.base,
             "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,

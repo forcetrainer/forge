@@ -106,7 +106,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
                     citable_path=None, approved=None, prior_path=None):
         args = [
             "--verdict", verdict_path,
-            "--base", self.base,
+            "--base", self.base, "--checkpoint", self.base,
             "--scope", "t1", "--attempt", str(attempt),
             "--acceptance-ok", acceptance_ok,
             "--autofix", autofix,
@@ -588,7 +588,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         ]})
 
     def _args_without_scope(self, verdict):
-        return ["--verdict", verdict, "--base", self.base, "--attempt", "1",
+        return ["--verdict", verdict, "--base", self.base, "--checkpoint", self.base, "--attempt", "1",
                 "--acceptance-ok", "true", "--autofix", "auto"]
 
     def test_missing_scope_is_a_usage_error_naming_it(self):
@@ -617,7 +617,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decision = json.loads(result.stdout)
         self.assertEqual(decision["findings"]["fix"][0]["identity"], "final:f1")
         result = self.run_dispose([
-            "--base", self.base, "--attempt", "1", "--acceptance-ok", "false",
+            "--base", self.base, "--checkpoint", self.base, "--attempt", "1", "--acceptance-ok", "false",
             "--autofix", "auto", "--scope", "t1", "--execution-failure",
             "--execution-detail", "crash"])
         decision = json.loads(result.stdout)
@@ -628,7 +628,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def test_execution_failure_is_fix_retry_not_halt_or_defer(self):
         result = self.run_dispose([
-            "--base", self.base,
+            "--base", self.base, "--checkpoint", self.base,
             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "false", "--autofix", "auto",
             "--execution-failure", "--execution-detail", "worker crashed",
         ])
@@ -644,7 +644,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decision = None
         for i in range(1, 6):
             result = self.run_dispose([
-                "--base", self.base,
+                "--base", self.base, "--checkpoint", self.base,
                 "--scope", "t1", "--attempt", str(i), "--acceptance-ok", "false",
                 "--autofix", "auto", "--execution-failure",
                 "--execution-detail", "worker timed out",
@@ -661,7 +661,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
     def test_failed_acceptance_without_execution_failure_is_usage_error(self):
         v = self._write_json("vfa.json", {"verdict": "clean"})
         result = self.run_dispose([
-            "--verdict", v, "--base", self.base, "--scope", "t1", "--attempt", "1",
+            "--verdict", v, "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", "1",
             "--acceptance-ok", "false", "--autofix", "auto",
             "--failed-acceptance", "make a",
         ])
@@ -671,7 +671,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
 
     def test_failed_acceptance_with_acceptance_ok_true_is_usage_error(self):
         result = self.run_dispose([
-            "--base", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
+            "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true",
             "--autofix", "auto", "--execution-failure",
             "--failed-acceptance", "make a",
         ])
@@ -684,7 +684,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
         decisions = []
         for i in (1, 2):
             result = self.run_dispose([
-                "--base", self.base, "--scope", "t1", "--attempt", str(i),
+                "--base", self.base, "--checkpoint", self.base, "--scope", "t1", "--attempt", str(i),
                 "--acceptance-ok", "false", "--autofix", "auto",
                 "--execution-failure", "--failed-acceptance", "make a",
             ] + (["--state", state_path] if state_path else []))
@@ -706,7 +706,7 @@ class ForgeDisposeCLITests(unittest.TestCase):
              "impact": "contract-breaking", "contract_ref": "AC-1"},
         ]})
         result = self.run_dispose([
-            "--verdict", v, "--base", "not-a-real-ref-xyz",
+            "--verdict", v, "--base", "not-a-real-ref-xyz", "--checkpoint", "not-a-real-ref-xyz",
             "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
         ])
         self.assertNotEqual(result.returncode, 0)
@@ -761,7 +761,7 @@ class GateModeAndRepairTaskConformanceTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(verdict_obj, f)
         return subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", path, "--base", self.base,
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.base, "--checkpoint", self.base,
              "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", autofix,
              "--plan", write_plan(self.workdir)],
             cwd=self.repo_dir, capture_output=True, text=True,
@@ -1002,7 +1002,7 @@ class RunDiffParityGapTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.verdict_obj, f)
         result = subprocess.run(
-            [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base,
+            [sys.executable, SCRIPT, "--verdict", path, "--base", self.task_base, "--checkpoint", self.task_base,
              "--scope", "t1", "--attempt", "1", "--acceptance-ok", "true", "--autofix", "auto",
              "--plan", write_plan(self.workdir)],
             cwd=self.repo_dir, capture_output=True, text=True,

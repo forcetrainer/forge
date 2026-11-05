@@ -1268,6 +1268,48 @@ class ScopeDeleteStatusTests(unittest.TestCase):
         self.assertIn("(repair-out-of-scope)", out)
         self.assertIn("halted task 1 is resumable", out)
 
+class WorkerCommittedStatusTests(unittest.TestCase):
+    WC = {
+        "recorded_head": "a" * 40, "recorded_branch": "refs/heads/main",
+        "current_head": "c" * 40, "current_branch": "refs/heads/main",
+        "commits": ["b" * 40, "c" * 40],
+    }
+
+    def _task_halt(self):
+        return {
+            "task": 1, "attempt": 1, "freeze_commit": "d" * 40,
+            "freeze_base": "c" * 40, "convergence_state": {},
+            "halt_reason": "worker-committed", "findings": [], "approved": {},
+            "worker_committed": self.WC,
+        }
+
+    def test_status_renders_a_worker_committed_task_halt_with_its_commits(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_run(d, "escalated", [_summary(1, "escalated")],
+                       halt=self._task_halt())
+            _write_receipt(d, 1, 1, "escalated",
+                           findings=["worker-committed: ..."],
+                           halt_reason="worker-committed")
+            out = forge_status.render_status(forge_status.read_run_state(d))
+        self.assertIn("(worker-committed)", out)
+        self.assertIn("halted task 1 is resumable", out)
+        self.assertIn("a" * 40, out)
+        self.assertIn("b" * 40, out)
+        self.assertIn("c" * 40, out)
+        self.assertIn("refs/heads/main", out)
+        self.assertNotIn("--resolve", out)
+
+    def test_status_renders_a_worker_committed_final_review_halt_with_its_commits(self):
+        halt = {
+            "stage": "final-review", "freeze_commit": None,
+            "freeze_base": "c" * 40, "halt_reason": "worker-committed",
+            "worker_committed": self.WC,
+        }
+        lines = "\n".join(forge_status.render_halt(halt))
+        self.assertIn("b" * 40, lines)
+        self.assertIn("c" * 40, lines)
+        self.assertNotIn("--resolve", lines)
+
 
 class WideningsCloseOutTests(unittest.TestCase):
     def _out(self, status):

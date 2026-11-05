@@ -331,7 +331,7 @@
 **Depends on:** Task 8
 
 ### Task 8: Detect from a recorded checkpoint; worker commits halt
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`scope_widenings` takes the checkpoint; scope read from the plan at the checkpoint; existence, deletion, final run-diff paths, pruning and line counts checkpoint-relative; `--checkpoint` on `widened` and the decision CLI)
@@ -355,6 +355,10 @@
 - scope_widenings given a checkpoint older than a commit holding an out-of-scope deletion still lists that path as deleted
 - a worker that adds a path to its task's Files in the plan's working copy does not put that path in scope
 - scope is read from the plan as committed at the checkpoint
+- a working-copy addition to the plan's Spec files does not exempt edits to that spec
+- a test case added only in the plan's working copy is not a citable serves
+- an in-repo plan that is git-ignored or absent at the checkpoint is a contract error raised before any worker is dispatched
+- a plan outside the repository root is read as given
 - a plan amendment committed before the turn does change scope
 - final scope adds paths changed between run_base and the checkpoint, not a later HEAD
 - an accepted widening is pruned when its path no longer differs from the checkpoint

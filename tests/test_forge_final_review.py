@@ -305,6 +305,9 @@ class RunFinalReviewLoopContinuityTests(unittest.TestCase):
             f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
         with open(os.path.join(self.d, "f1.txt"), "w") as f:
             f.write("base\n")
+        # The plan is committed in the base: scope reads its `**Files:**` from
+        # the checkpoint's commit (Scope widening, The checkpoint).
+        self._plan()
         self._git("add", "-A")
         self._git("commit", "-m", "base")
         run_base = forge_run._git_head(self.d)
@@ -874,6 +877,9 @@ class FinalReviewCitableSetTests(unittest.TestCase):
         path = os.path.join(self.d, "plan.md")
         with open(path, "w") as f:
             f.write(text)
+        # Committed: scope reads its `**Files:**` from the checkpoint's commit.
+        self._git("add", "plan.md")
+        self._git("commit", "-m", "plan")
         return path
 
     def test_seeded_finding_may_recite_its_per_task_test_id(self):
@@ -1260,7 +1266,7 @@ class FinalWideningTests(unittest.TestCase):
             json.dump(responses, f)
         self._set_env("FORGE_FAKE_RESPONSES", path)
 
-    def _loop(self, spy=None):
+    def _loop(self, spy=None, halt_out=None):
         import forge_dispose
         with mock.patch.object(
                 forge_dispose, "scope_widenings",
@@ -1268,7 +1274,8 @@ class FinalWideningTests(unittest.TestCase):
             self.wrapped = wrapped
             return forge_run.run_final_review_loop(
                 [self.spec], self.run_base, self.run_dir, self.fake, self.d,
-                "standard", "auto", {}, plan_path=self.plan)
+                "standard", "auto", {}, plan_path=self.plan,
+                halt_out=halt_out)
 
     def _fix_finding(self):
         return _fix_findings_msg(
@@ -1320,6 +1327,49 @@ class FinalWideningTests(unittest.TestCase):
         self.assertEqual(len(_log_argvs(self.log)), 2)  # reviewer, fixer only
         with open(os.path.join(self.run_dir, "final-review.json")) as f:
             self.assertEqual(json.load(f)["halt_reason"], "scope-delete")
+
+    def test_a_final_review_fixer_that_commits_halts_worker_committed(self):
+        before = forge_run._git_head(self.d)
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            self._fixer(
+                {"op": "append", "path": os.path.join(self.d, "f1.txt"),
+                 "text": "fixed\n"},
+                {"op": "git", "args": [
+                    "-C", self.d, "commit", "-am", "fixer commit"]}),
+        ])
+        record = {}
+        outcome = self._loop(halt_out=record)
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "worker-committed")
+        after = forge_run._git_head(self.d)
+        self.assertNotEqual(before, after)
+        self.assertIn(after, " ".join(outcome.findings))
+        self.assertEqual(len(_log_argvs(self.log)), 2)  # reviewer, fixer only
+        wc = record["worker_committed"]
+        self.assertEqual(wc["recorded_head"], before)
+        self.assertEqual(wc["current_head"], after)
+        self.assertEqual(wc["commits"], [after])
+        self.assertEqual(wc["recorded_branch"], wc["current_branch"])
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            self.assertEqual(json.load(f)["halt_reason"], "worker-committed")
+        # no detection ran on the turn
+        self.assertEqual(self.wrapped.call_count, 0)
+
+    def test_the_final_loop_passes_the_checkpoint_recorded_before_its_first_fixer_to_detection(self):
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            self._fixer(self._edit_other(), self._record([
+                {"path": "other.txt", "reason": "r", "serves": None}])),
+            self._accept(),
+        ])
+        before = forge_run._git_head(self.d)
+        outcome = self._loop()
+        self.assertEqual(outcome.status, "passed")
+        (call,) = self.wrapped.call_args_list
+        self.assertEqual(call.args[5], before)
+        self.assertEqual(call.args[4], self.run_base)
+
 
     def test_a_rejected_final_widening_reworks_with_the_rejection_in_the_fixer_prompt(self):
         self._responses([

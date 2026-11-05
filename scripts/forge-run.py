@@ -763,6 +763,13 @@ HALT_CAUSE_FOR_WORKER = {
                     "`**Files:**`. The human has restored the path or "
                     "approved the deletion. Never delete a file outside the "
                     "task's own files.",
+    "worker-committed": "The run stopped on a `worker-committed` halt: a "
+                        "worker turn committed, reset, amended, switched "
+                        "branch or detached HEAD. Workers never commit; the "
+                        "human has kept, rewritten or dropped what the "
+                        "worker left, and the commits that remain are part "
+                        "of the checkpoint you are resuming from. Never "
+                        "commit.",
     "reviewer-wrote": "The run stopped on a `reviewer-wrote` halt: the "
                       "reviewer changed the repository during its review, so "
                       "its verdict was discarded. The tree you are resuming "
@@ -969,6 +976,91 @@ def _in_git_work_tree(cwd):
         "{}: {}".format(cwd, proc.stderr.strip()))
 
 
+def _git_out(cwd, args, what, ok_codes=(0,)):
+    """``(returncode, stdout)`` of ``git <args>`` in ``cwd``; RuntimeError
+    naming ``what`` and the cause when git cannot run or exits with a code
+    outside ``ok_codes`` — a git failure inside the checkpoint machinery is a
+    contract error, never a skipped check."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True)
+    except OSError as e:
+        raise RuntimeError("{}: failed to invoke git: {}".format(what, e))
+    if proc.returncode not in ok_codes:
+        raise RuntimeError("{}: git {} failed in {}: {}".format(
+            what, " ".join(args), cwd, proc.stderr.strip()))
+    return proc.returncode, proc.stdout
+
+
+def _current_branch(cwd, what):
+    """The full ref ``HEAD`` is attached to (``refs/heads/<name>``), or None
+    for a detached ``HEAD``."""
+    code, out = _git_out(
+        cwd, ["symbolic-ref", "--quiet", "HEAD"], what, ok_codes=(0, 1))
+    return out.strip() if code == 0 else None
+
+
+def _record_checkpoint(cwd, plan_path=None):
+    """The stage checkpoint (Scope widening, The checkpoint): ``HEAD`` — its
+    commit sha and the branch it is attached to — recorded once per stage per
+    invocation, just before the stage's first worker dispatch. ``None`` outside
+    a git work tree, where there is nothing to compare against. Detection and
+    the worker-commit check use this value for every later turn of the stage;
+    ``HEAD`` is never re-read for detection. With ``plan_path``, an in-repo
+    plan absent at the checkpoint (ignored, untracked, deleted) is a contract
+    error raised here, before any worker is dispatched."""
+    if not _in_git_work_tree(cwd):
+        return None
+    sha = _git_head(cwd)
+    if sha is None:
+        raise RuntimeError(
+            "widening detection: cannot read HEAD in {} — a git failure "
+            "inside a repository is never a skipped check".format(cwd))
+    if plan_path is not None:
+        forge_dispose.require_plan_at_checkpoint(cwd, plan_path, sha)
+    return {"sha": sha,
+            "branch": _current_branch(cwd, "recording the checkpoint")}
+
+
+def _worker_commit_check(cwd, checkpoint):
+    """After a worker turn: ``None`` when ``HEAD`` is the stage's checkpoint on
+    the branch it was recorded on, else the ``worker_committed`` halt-record
+    block — the recorded and current ``HEAD`` and branch and every commit
+    between them (A worker commit halts). Covers an added commit, a reset, an
+    amend, a branch switch and a detached ``HEAD``. Moves no ref."""
+    what = "worker-commit check"
+    _, out = _git_out(cwd, ["rev-parse", "HEAD"], what)
+    head = out.strip()
+    branch = _current_branch(cwd, what)
+    if head == checkpoint["sha"] and branch == checkpoint["branch"]:
+        return None
+    _, out = _git_out(
+        cwd, ["rev-list", "--reverse", "{}..{}".format(checkpoint["sha"], head)],
+        what)
+    return {
+        "recorded_head": checkpoint["sha"],
+        "recorded_branch": checkpoint["branch"],
+        "current_head": head,
+        "current_branch": branch,
+        "commits": out.split(),
+    }
+
+
+def _worker_committed_guidance(record, who):
+    """The halt's one-line cause and the human's next step."""
+    def where(branch):
+        return branch if branch else "a detached HEAD"
+    commits = ", ".join(record["commits"]) or "(none: HEAD was moved back)"
+    return (
+        "worker-committed: {} changed the repository's history — HEAD was "
+        "{} on {} and is now {} on {}; commits between them: {}. Workers "
+        "never commit. Nothing was moved or discarded: keep, rewrite or drop "
+        "the commit(s), then re-invoke — the resumed run records a fresh "
+        "checkpoint that contains whatever you keep.".format(
+            who, record["recorded_head"], where(record["recorded_branch"]),
+            record["current_head"], where(record["current_branch"]), commits))
+
+
 def _widenings_record(run_dir, task_number=None):
     """The worker's widening record path (Scope widening, The worker's record):
     ``task-<N>/widenings.json`` in the run dir, or ``final/widenings.json`` for
@@ -1160,7 +1252,7 @@ def _check_halt_identities(halt_record, run_dir):
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                   effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto",
                   run_base=None, seeded_findings=None, approved_ids=frozenset(),
-                  resume=None, halt_out=None):
+                  resume=None, halt_out=None, checkpoint=None):
     """Run one task through the convergence rework loop: worker -> acceptance ->
     (standard/complex) reviewer -> classify -> convergence_decision, backed by a
     per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
@@ -1212,25 +1304,27 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
     outstanding findings as dicts, the drafted ``repair_task``, and the
     serialized ConvergenceState as of this attempt. An out-parameter for the
     same reason ``threads``/``seeded_findings`` are: the caller owns run.json,
-    and TaskOutcome is the loop's summary shape, not a run-state record."""
+    and TaskOutcome is the loop's summary shape, not a run-state record.
+
+    ``checkpoint`` (``_record_checkpoint``'s value, or None to record it now,
+    before the first worker dispatch) is the stage checkpoint: the task's
+    review base, the origin of every widening comparison, and the ``HEAD`` every
+    worker turn must leave untouched (``worker-committed``). It is held across
+    every rework lap and never re-read."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
-    # Per-task review base = HEAD at task start (the prior task's commit; the
-    # run-start commit for task 1). Each passed task commits, so the tree is clean
-    # here and `git diff <review_base>` isolates this task's own changes. Taken
-    # once (trivial tiers need no reviewer).
-    review_base = _git_head(cwd) if task.tier != "trivial" else None
-    # Widening detection's base: HEAD at task start for every tier (a trivial
-    # task has no review diff but still has a scope). None outside a git repo,
-    # where there is no HEAD to widen against and detection does not apply.
-    detect_base = None
-    if _in_git_work_tree(cwd):
-        detect_base = _git_head(cwd)
-        if detect_base is None:
-            raise RuntimeError(
-                "widening detection: cannot read HEAD in {} — a git failure "
-                "inside a repository is never a skipped check".format(cwd))
+    # The stage checkpoint: HEAD (sha and branch) recorded once, before the
+    # first worker dispatch, and held across every rework lap. A task's
+    # checkpoint is its review base — the prior task's commit, the run-start
+    # commit for task 1 — so `git diff <review_base>` isolates this task's own
+    # changes — and the origin of every widening comparison (Scope widening).
+    # None outside a git repo, where neither applies.
+    if checkpoint is None:
+        checkpoint = _record_checkpoint(cwd, plan_path)
+    review_base = (
+        checkpoint["sha"] if checkpoint and task.tier != "trivial" else None)
+    detect_base = checkpoint["sha"] if checkpoint else None
     widen_record = _widenings_record(run_dir, task.number)
     scope = "t{}".format(task.number)
     state = resume.state if resume is not None else ConvergenceState()
@@ -1300,20 +1394,29 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 task, brief_path, codex_bin, run_dir, threads,
                 effort_override=effort_override, timeout=timeout,
             )
+        # After every worker turn, before detection: HEAD must still be the
+        # stage's checkpoint on the branch it was recorded on, else the task
+        # halts `worker-committed` (Scope widening, A worker commit halts).
+        worker_committed = (
+            _worker_commit_check(cwd, checkpoint) if checkpoint else None)
         # Widening detection (Scope widening) runs after every worker turn,
         # whether or not it crashed or its acceptance passes, and before
-        # either is acted on — through the one implementation. A git failure
-        # raises RuntimeError (a contract error), never a skipped check.
+        # either is acted on — through the one implementation, from the
+        # checkpoint. A git failure raises RuntimeError (a contract error),
+        # never a skipped check.
         widen = None
-        if detect_base is not None:
+        if detect_base is not None and worker_committed is None:
             widen = forge_dispose.scope_widenings(
-                cwd, plan_path, spec_path, scope, detect_base, state,
-                widen_record)
+                cwd, plan_path, spec_path, scope, detect_base, detect_base,
+                state, widen_record)
             forge_dispose.prune_accepted_widenings(state, widen)
         deleted = list(widen.deleted) if widen else []
 
-        update_run_progress(run_dir, task.number, "acceptance")
-        acceptance = run_acceptance(task, cwd, live_path)
+        if worker_committed is not None:
+            acceptance = []   # the tree is not the attempt a commit hides
+        else:
+            update_run_progress(run_dir, task.number, "acceptance")
+            acceptance = run_acceptance(task, cwd, live_path)
 
         worker_ok = worker.exit_code == 0 and not worker.timed_out
         acc_ok = all(r.passed for r in acceptance)
@@ -1328,7 +1431,12 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         rejected = []       # fix findings raised for rejected widenings
         failed_acceptance = None  # first failing clause's command, when acceptance is the execution failure
 
-        if deleted:
+        if worker_committed is not None:
+            # A worker commit halts before detection, acceptance or review.
+            # No finding: the halt is the whole outcome.
+            cause = _worker_committed_guidance(
+                worker_committed, "task {}'s worker".format(task.number))
+        elif deleted:
             # An out-of-scope deletion halts here, before any rework or
             # review, whatever else the turn did (Scope widening, Deletion
             # halts). No finding: the halt is the whole outcome.
@@ -1521,7 +1629,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                         _seed_record(f) for f in findings if f.disposition == "seed"
                     )
 
-        if reviewer_wrote is not None:
+        if worker_committed is not None:
+            # Not a convergence class either: no review or execution signal
+            # was produced, the state is not advanced.
+            action, halt_reason = "halt", "worker-committed"
+        elif reviewer_wrote is not None:
             # Not a convergence class: the attempt's verdict was discarded, so
             # the state is not advanced and no finding exists to disposition.
             action, halt_reason = "halt", "reviewer-wrote"
@@ -1555,7 +1667,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
         outstanding = [f.summary for f in findings] if action == "halt" else []
         if reviewer_wrote is not None:
             outstanding = list(reviewer_wrote.changes)
-        elif deleted:
+        elif worker_committed is not None or deleted:
             outstanding = [cause]
 
         # The review's `widenings` block (decision.json's shape); a trivial
@@ -1633,6 +1745,8 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
                 })
                 if deleted:
                     halt_out["deleted"] = deleted
+                if worker_committed is not None:
+                    halt_out["worker_committed"] = worker_committed
                 if reviewer_wrote is not None:
                     halt_out["reviewer_wrote"] = _reviewer_wrote_record(reviewer_wrote)
             return TaskOutcome(
@@ -1948,7 +2062,7 @@ def _freeze_reviewer_wrote(cwd, ref_name, record, record_halt=None):
 
 
 def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
-                       write_halt=None):
+                       write_halt=None, worker_committed=None):
     """Freeze a halted whole-run stage (``final-review`` | ``doc-sync``) and
     return its halt record.
 
@@ -1998,12 +2112,17 @@ def _freeze_stage_halt(cwd, run_dir, stage, halt_reason, reviewer_wrote=None,
         return stage_record(freeze_commit)
     freeze_base = _git_head(cwd)
     freeze_commit = freeze_attempt(cwd, freeze_stage_ref_name(run_id, stage))
-    return {
+    record = {
         "stage": stage,
         "freeze_commit": freeze_commit,
         "freeze_base": freeze_base,
         "halt_reason": halt_reason,
     }
+    if worker_committed is not None:
+        # The ordinary freeze: it moved no ref, so the commits stay where the
+        # fixer left them for the human to keep, rewrite or drop.
+        record["worker_committed"] = worker_committed
+    return record
 
 
 def _collect_unverified(verdict):
@@ -2067,7 +2186,8 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                           autofix_mode, threads=None, timeout=DEFAULT_TIMEOUT,
                           plan_path=None, seeded_findings=None,
                           named_sections=None, halt_out=None,
-                          approved_ids=frozenset(), unverified=None):
+                          approved_ids=frozenset(), unverified=None,
+                          checkpoint=None):
     """Whole-plan final review through the same convergence loop as
     ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
     always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
@@ -2129,9 +2249,18 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
     carries — is never replaced, and a verification lap that omits one never
     clears it. The merged list rides the final-review receipt and every
     returned outcome's ``unverified``; deciding whether any entry still needs
-    a call is the caller's, after the loop."""
+    a call is the caller's, after the loop.
+
+    ``checkpoint`` (``_record_checkpoint``'s value, or None to record it now,
+    before the first fixer dispatch) is the stage checkpoint: the final scope's
+    upper bound, the origin of every widening comparison, and the ``HEAD`` every
+    fixer turn must leave untouched — a fixer that commits halts
+    ``worker-committed`` (``halt_out['worker_committed']`` carries the record).
+    It is held across every lap and never re-read."""
     if threads is None:
         threads = {}
+    if checkpoint is None:
+        checkpoint = _record_checkpoint(cwd, plan_path)
     unverified = [dict(e) for e in unverified or []]
     state = ConvergenceState()
     fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
@@ -2231,12 +2360,30 @@ def run_final_review_loop(spec_paths, run_base, run_dir, codex_bin, cwd, tier,
                     timeout=timeout,
                 )
             applied_fix = True
+            # After the fixer turn, before detection: HEAD must still be the
+            # stage's checkpoint on the branch it was recorded on (Scope
+            # widening, A worker commit halts).
+            committed = (
+                _worker_commit_check(cwd, checkpoint) if checkpoint else None)
+            if committed is not None:
+                guidance = _worker_committed_guidance(
+                    committed, "the final-review fixer")
+                write_final_review_halt(run_dir, "worker-committed", [guidance])
+                if halt_out is not None:
+                    halt_out["worker_committed"] = committed
+                return TaskOutcome(
+                    status="escalated", attempts=attempt, summary=guidance,
+                    findings=[guidance], halt_reason="worker-committed",
+                    unverified=unverified,
+                )
             # Widening detection after the fixer turn, crashed or not, before
             # either is acted on (Scope widening, Detection): the final scope
-            # is every task's Files plus every path the run changed.
+            # is every task's Files plus every path the run changed up to the
+            # checkpoint.
             if plan_path is not None:
                 widen = forge_dispose.scope_widenings(
-                    cwd, plan_path, legacy_spec, "final", run_base, state,
+                    cwd, plan_path, legacy_spec, "final", run_base,
+                    checkpoint["sha"] if checkpoint else run_base, state,
                     widen_record)
                 forge_dispose.prune_accepted_widenings(state, widen)
                 final_widened, final_deleted = widen.widened, widen.deleted
@@ -2873,13 +3020,16 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     # at run level has no resolution to restate; it stays an exemption.
     for approved_id in _read_approved(run_dir):
         approved.setdefault(approved_id, "approved")
-    if resolve and (halt_record or {}).get("halt_reason") == "scope-delete":
-        # A `scope-delete` halt poses no question for `--resolve` to answer:
-        # the human restores the path or approves the deletion in the tree
-        # (Scope widening, Deletion halts).
+    if resolve and (halt_record or {}).get("halt_reason") in (
+            "scope-delete", "worker-committed"):
+        # A `scope-delete` or `worker-committed` halt poses no question for
+        # `--resolve` to answer: the human restores the path or approves the
+        # deletion (Scope widening, Deletion halts), or keeps, rewrites or
+        # drops the worker's commits (A worker commit halts), in the tree.
         raise RuntimeError(
-            "--resolve {}: {} takes no --resolve — restore the deleted "
-            "path(s) or approve the deletion, then re-invoke without "
+            "--resolve {}: {} takes no --resolve — act on the tree (restore "
+            "the deleted path(s) or approve the deletion; keep, rewrite or "
+            "drop the worker's commits), then re-invoke without "
             "it".format(", ".join(sorted(resolve)), _describe_halt(halt_record)))
     unverified_halt = (
         halt_record is not None
@@ -3177,12 +3327,17 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_reason=halt_record.get("halt_reason"),
             )
         halt_out = {}
+        # The task's checkpoint, recorded once for this invocation just before
+        # its first worker dispatch — after a resumed task's frozen work is
+        # replayed (HEAD is unaffected by it), so a fix the human committed
+        # before re-invoking is inside it (Scope widening, The checkpoint).
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd, threads,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
             autofix_mode=autofix_mode, run_base=run_base,
             seeded_findings=seeded_findings, approved_ids=approved_ids,
             resume=resume_ctx, halt_out=halt_out,
+            checkpoint=_record_checkpoint(cwd, plan_path),
         )
         stage_deferrals(deferrals, outcome.deferrals,
                         task_number=task.number, carried=carried_deferrals)
@@ -3316,6 +3471,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_state["reviewer_head"] = reviewer_wrote["reviewer_head"]
             if halt_out.get("deleted"):
                 halt_state["deleted"] = halt_out["deleted"]
+            if halt_out.get("worker_committed"):
+                halt_state["worker_committed"] = halt_out["worker_committed"]
             overall = "escalated"
             escalated = True
             break
@@ -3352,6 +3509,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
             final_halt_out = {}
+            # The final stage's checkpoint: HEAD now, after the last task's
+            # commit (or its skipped commit — HEAD exists either way).
             final_outcome = run_final_review_loop(
                 spec_paths, run_base, run_dir,
                 codex_bin, cwd, final_tier,
@@ -3359,6 +3518,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 seeded_findings=seeded_findings, named_sections=named_sections,
                 halt_out=final_halt_out, approved_ids=approved_ids,
                 unverified=unverified,
+                checkpoint=_record_checkpoint(cwd, plan_path),
             )
             unverified = final_outcome.unverified
             if final_outcome.status == "passed":
@@ -3381,6 +3541,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 halt_state = _freeze_stage_halt(
                     cwd, run_dir, "final-review", final_outcome.halt_reason,
                     reviewer_wrote=final_halt_out.get("reviewer_wrote"),
+                    worker_committed=final_halt_out.get("worker_committed"),
                     write_halt=lambda rec: write_run_json(
                         run_dir, plan_path, spec_paths, "escalated-final-review",
                         task_summaries, run_base, started_at=run_started,

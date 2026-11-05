@@ -507,6 +507,13 @@ class ReconcileResumeTests(unittest.TestCase):
         p = os.path.join(self.d, name)
         with open(p, "w") as f:
             f.write(content)
+        # Committed (not ignored): scope reads the plan as committed at the
+        # checkpoint, and an in-repo plan absent there is a contract error.
+        subprocess.run(["git", "add", "-f", name], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m",
+                        "plan " + name], cwd=self.d, check=True,
+                       capture_output=True, text=True)
         return p
 
     def _set_responses(self, responses):
@@ -1050,7 +1057,11 @@ class ApprovalsOutliveHaltTests(unittest.TestCase):
         # f1 approved while resolving task 2 (identity t2:h1) must not exempt
         # task 5's own h1 (identity t5:h1): it halts scope-decision.
         os.makedirs(self.run_dir, exist_ok=True)
-        plan5 = os.path.join(self.run_dir, "plan5.md")  # run/ is gitignored
+        # Outside the repository: an in-repo plan must be committed (scope
+        # reads it at the checkpoint), and this one is deliberately not.
+        outside = tempfile.mkdtemp(prefix="forge-plan5-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        plan5 = os.path.join(outside, "plan5.md")
         with open(plan5, "w") as f:
             f.write(PLAN_APPROVED.replace("Task 1", "Task 5"))
         task = forge_run.order_tasks(forge_run.parse_plan_tasks(plan5))[0]
@@ -1385,6 +1396,27 @@ class WideningResumeTests(test_forge_loop.WideningCase):
             [self.worker(), self.reviewer({"verdict": "pass"})] + self.tail)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.run_json()["widenings"], [entry])
+
+    def test_a_resumed_tasks_checkpoint_is_head_at_the_new_invocation_so_a_humans_committed_fix_is_not_a_widening(self):
+        delete = {"op": "delete", "path": os.path.join(self.repo, "other.txt")}
+        res = self.run_cli([self.worker(delete)])
+        self.assertEqual(res.returncode, 2, res.stderr)
+        # The human's fix edits an existing file outside the task's Files and
+        # is committed before re-invoking.
+        with open(os.path.join(self.repo, "other.txt"), "a") as f:
+            f.write("human fix\n")
+        self.commit_all("human fix")
+        fixed = self.git("rev-parse", "HEAD").strip()
+        rc, out, err = self.run_main(
+            [self.worker(self.edit_op("f1.txt", "ok\n")),
+             self.reviewer({"verdict": "pass"})] + self.tail,
+            spies=[self.spy("scope_widenings")])
+        self.assertEqual(rc, 0, err)
+        task_calls = [c for c in self.mocks[0].call_args_list
+                      if c.args[3] == "t1"]
+        self.assertEqual([c.args[5] for c in task_calls], [fixed])
+        self.assertNotIn("\n## Widened files\n\n", self.prompts()[1])
+
 
     def test_a_path_accepted_before_a_halt_is_not_relisted_after_resume(self):
         res = self.run_cli([

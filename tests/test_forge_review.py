@@ -1013,6 +1013,11 @@ class TaskReviewRetryResumeTests(unittest.TestCase):
         plan = os.path.join(self.d, "plan.md")
         with open(plan, "w") as f:
             f.write(PLAN_STD_TRACKED)
+        # Committed before the run: scope reads the plan as committed at the
+        # task's checkpoint (Scope widening, The checkpoint).
+        for args in (["add", "plan.md"], ["commit", "-m", "plan"]):
+            subprocess.run(["git", *args], cwd=self.d, check=True,
+                           capture_output=True, text=True)
         path = os.path.join(self.d, "responses.json")
         with open(path, "w") as f:
             json.dump(responses, f)

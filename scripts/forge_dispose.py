@@ -16,6 +16,7 @@ forge-run.py and this module — the same discipline forge_git/forge_plan/
 forge_receipts follow.
 """
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -23,6 +24,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 
 import forge_checklist
@@ -1043,11 +1045,11 @@ def _repo_relative(cwd, toplevel, path):
     )
 
 
-def _name_status(cwd):
-    """``(modified, deleted)`` path sets: ``HEAD`` against the working tree,
-    renames split into a delete plus an add, only paths existing at ``HEAD``
-    (created paths are never listed)."""
-    out = _git(cwd, ["diff", "--name-status", "--no-renames", "-z", "HEAD"])
+def _name_status(cwd, checkpoint):
+    """``(modified, deleted)`` path sets: the checkpoint against the working
+    tree, renames split into a delete plus an add, only paths existing at the
+    checkpoint (created paths are never listed)."""
+    out = _git(cwd, ["diff", "--name-status", "--no-renames", "-z", checkpoint])
     fields = out.split("\0")
     modified, deleted = set(), set()
     i = 0
@@ -1063,8 +1065,8 @@ def _name_status(cwd):
     return modified, deleted
 
 
-def _numstat(cwd):
-    out = _git(cwd, ["diff", "--numstat", "--no-renames", "-z", "HEAD"])
+def _numstat(cwd, checkpoint):
+    out = _git(cwd, ["diff", "--numstat", "--no-renames", "-z", checkpoint])
     counts = {}
     for entry in out.split("\0"):
         if not entry:
@@ -1077,10 +1079,11 @@ def _numstat(cwd):
     return counts
 
 
-def _scope_paths(cwd, tasks, scope, base):
+def _scope_paths(cwd, tasks, scope, base, checkpoint):
     if scope == "final":
         paths = {p for t in tasks for p in t.files}
-        out = _git(cwd, ["diff", "--name-only", "--no-renames", "-z", base, "HEAD"])
+        out = _git(cwd, ["diff", "--name-only", "--no-renames", "-z", base,
+                         checkpoint])
         paths.update(p for p in out.split("\0") if p)
         return paths
     number = int(scope[1:])
@@ -1090,10 +1093,13 @@ def _scope_paths(cwd, tasks, scope, base):
     raise RuntimeError("scope {}: the plan has no task {}".format(scope, number))
 
 
-def _exempt_paths(cwd, toplevel, plan_path, spec_path):
+def _exempt_paths(cwd, toplevel, plan_path, spec_path, plan_copy):
+    """The documents the orchestrator amends during a run: the plan file
+    itself, and the spec files ``plan_copy`` (the plan as committed at the
+    checkpoint) declares, or the legacy ``--spec`` file."""
     exempt = {_repo_relative(cwd, toplevel, plan_path)}
     declared = forge_checklist.eb.parse_spec_files(
-        forge_checklist.eb.read_lines(plan_path)
+        forge_checklist.eb.read_lines(plan_copy)
     )
     for rel in declared:
         exempt.add(posixpath.normpath(rel))
@@ -1162,22 +1168,72 @@ def _apply_record(entries, by_path, citable, outstanding):
     return defects
 
 
-def scope_widenings(cwd, plan_path, spec_path, scope, base, state, record_path):
+@contextlib.contextmanager
+def _plan_at_checkpoint(cwd, toplevel, plan_path, checkpoint):
+    """Yield ``(path, repo_root)`` of the plan as committed at ``checkpoint``
+    (``git show <checkpoint>:<plan>`` written to a scratch file), never the
+    working copy: an edit to the plan's working tree changes nothing detection
+    takes from it — the tasks' ``**Files:**``, the declared ``**Spec files:**``
+    and the citable set are all read from this one copy. Raises RuntimeError
+    naming the plan and the checkpoint when the plan does not exist there
+    (ignored, untracked or deleted). A plan outside the repository root has no
+    commit to read and is read as given, with no repo root forced on it."""
+    rel = _repo_relative(cwd, toplevel, plan_path)
+    if rel == os.pardir or rel.startswith(os.pardir + "/"):
+        yield plan_path, None
+        return
+    try:
+        text = _git(cwd, ["show", "{}:{}".format(checkpoint, rel)])
+    except RuntimeError as e:
+        raise RuntimeError(
+            "the plan {} does not exist at checkpoint {}: {}".format(
+                rel, checkpoint, e))
+    with tempfile.TemporaryDirectory(prefix="forge-plan-at-") as tmp:
+        path = os.path.join(tmp, os.path.basename(rel))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        yield path, toplevel
+
+
+def scope_widenings(cwd, plan_path, spec_path, scope, base, checkpoint, state,
+                    record_path):
     """The one implementation of widening detection (Scope widening): the
-    existing-at-``HEAD`` paths the working tree modifies outside the review's
-    scope and not exempt, the out-of-scope deletions, the worker record's
-    defects, and which widenings are due a ruling. ``scope`` is ``t<N>`` or
-    ``final``; ``base`` is the review base; ``state`` a ConvergenceState or
-    None. Raises RuntimeError naming the cause on any git failure."""
+    paths existing at the checkpoint that the working tree modifies outside
+    the review's scope and not exempt, the out-of-scope deletions, the worker
+    record's defects, and which widenings are due a ruling. ``scope`` is
+    ``t<N>`` or ``final``; ``base`` is the review base; ``checkpoint`` the
+    commit sha recorded for the stage — every comparison starts there, and
+    everything detection takes from the plan — the ``**Files:**`` paths, the
+    declared ``**Spec files:**`` and the citable set — is read from the plan
+    as committed there;
+    ``state`` a ConvergenceState or None. Raises RuntimeError naming the cause
+    on any git failure, a checkpoint that is not a commit, or a plan absent
+    at the checkpoint."""
     if not SCOPE_PATTERN.fullmatch(scope):
         raise RuntimeError("scope must be t<N> or final, got {!r}".format(scope))
     toplevel = _git(cwd, ["rev-parse", "--show-toplevel"]).strip()
     _verify_ref(cwd, base)
-    tasks = forge_plan.parse_plan_tasks(plan_path)
-    in_scope = _scope_paths(cwd, tasks, scope, base)
-    exempt = _exempt_paths(cwd, toplevel, plan_path, spec_path)
-    modified, deleted = _name_status(cwd)
-    counts = _numstat(cwd)
+    try:
+        _verify_ref(cwd, checkpoint)
+    except RuntimeError as e:
+        raise RuntimeError(
+            "checkpoint {!r} is not a commit: {}".format(checkpoint, e))
+    with _plan_at_checkpoint(cwd, toplevel, plan_path, checkpoint) as (
+            plan_copy, repo_root):
+        return _widenings_from(
+            cwd, toplevel, plan_path, spec_path, plan_copy, repo_root, scope,
+            base, checkpoint, state, record_path)
+
+
+def _widenings_from(cwd, toplevel, plan_path, spec_path, plan_copy, repo_root,
+                    scope, base, checkpoint, state, record_path):
+    """``scope_widenings``' body once the plan as committed at the checkpoint
+    is in hand (``plan_copy``): every plan-derived input comes from it."""
+    tasks = forge_plan.parse_plan_tasks(plan_copy)
+    in_scope = _scope_paths(cwd, tasks, scope, base, checkpoint)
+    exempt = _exempt_paths(cwd, toplevel, plan_path, spec_path, plan_copy)
+    modified, deleted = _name_status(cwd, checkpoint)
+    counts = _numstat(cwd, checkpoint)
 
     widened = [
         Widening(p, None, None, *counts.get(p, (0, 0)))
@@ -1189,9 +1245,11 @@ def scope_widenings(cwd, plan_path, spec_path, scope, base, state, record_path):
     entries, defects = _read_record(record_path)
     if entries:
         citable = (
-            forge_checklist.final_citable_refs(plan_path, spec_path)
+            forge_checklist.final_citable_refs(
+                plan_copy, spec_path, repo_root=repo_root)
             if scope == "final"
-            else forge_checklist.citable_refs(plan_path, spec_path, int(scope[1:]))
+            else forge_checklist.citable_refs(
+                plan_copy, spec_path, int(scope[1:]), repo_root=repo_root)
         )
         defects += _apply_record(
             entries, {w.path: w for w in widened}, citable,
@@ -1203,6 +1261,15 @@ def scope_widenings(cwd, plan_path, spec_path, scope, base, state, record_path):
         if accepted.get(w.path, {}).get("blob") != blob_id(cwd, w.path)
     ]
     return WideningResult(widened, gone, defects, due)
+
+
+def require_plan_at_checkpoint(cwd, plan_path, checkpoint):
+    """Raise RuntimeError naming the plan and the checkpoint when an in-repo
+    plan does not exist at ``checkpoint`` — the check the runner makes when it
+    records a checkpoint, before the stage's first worker dispatch."""
+    toplevel = _git(cwd, ["rev-parse", "--show-toplevel"]).strip()
+    with _plan_at_checkpoint(cwd, toplevel, plan_path, checkpoint):
+        pass
 
 
 def _verify_ref(cwd, ref):
@@ -1325,7 +1392,7 @@ def widenings_block(state, widened, rejected, deleted):
 
 def prune_accepted_widenings(state, result):
     """Drop every ``accepted_widenings`` entry whose path is no longer a
-    widening (reverted, or now in scope)."""
+    widening (no longer differs from the checkpoint, or now in scope)."""
     current = {w.path for w in result.widened}
     for path in list(state.accepted_widenings):
         if path not in current:
@@ -1349,6 +1416,7 @@ def widened_main(argv):
     parser.add_argument("--plan", required=True)
     parser.add_argument("--spec", default=None)
     parser.add_argument("--base", required=True)
+    parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--scope", required=True, type=_scope_arg)
     parser.add_argument("--state", default=None)
     parser.add_argument("--widenings", default=None)
@@ -1357,8 +1425,8 @@ def widened_main(argv):
     try:
         state = _load_state_file(args.state)
         result = scope_widenings(
-            os.getcwd(), args.plan, args.spec, args.scope, args.base, state,
-            args.widenings,
+            os.getcwd(), args.plan, args.spec, args.scope, args.base,
+            args.checkpoint, state, args.widenings,
         )
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
@@ -1437,6 +1505,11 @@ def main(argv=None):
         "--base", required=True,
         help="diff base: the task's prior commit, or run-start HEAD for the "
              "final review",
+    )
+    parser.add_argument(
+        "--checkpoint", required=True,
+        help="the stage's checkpoint commit (Scope widening): HEAD recorded "
+             "once per stage per invocation before its first worker dispatch",
     )
     parser.add_argument(
         "--state", default=None,
@@ -1604,8 +1677,8 @@ def main(argv=None):
     verdict = None
     try:
         widened = scope_widenings(
-            os.getcwd(), args.plan, args.spec, args.scope, args.base, state,
-            args.widenings,
+            os.getcwd(), args.plan, args.spec, args.scope, args.base,
+            args.checkpoint, state, args.widenings,
         )
         prune_accepted_widenings(state, widened)
         rejected = []
