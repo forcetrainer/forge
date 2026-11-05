@@ -154,11 +154,17 @@ forge-run.py --status --run-dir DIR
    Acceptance clause grammar); prose clauses are never executed. Any clause whose command
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
+3a. Compute widenings with `forge_dispose.scope_widenings` (`execution` spec: Scope
+   widening) against the record at `task-<N>/widenings.json` in the run dir, the path
+   every worker brief names. An out-of-scope deletion escalates `scope-delete` before
+   review; a record defect is a rework iteration naming the entry.
 4. Trivial tier: command clauses are the whole verification. Standard/complex:
    assemble the reviewer's input with `review-packet.py` and dispatch the reviewer via
    `codex exec` at the task's own tier. The packet exists so the diff is assembled
    once, by the runner, against the right base; it also pastes the spec sections the
    task names, as context (Runner).
+   It also carries `## Widened files`, the widenings due a ruling; the final-review
+   packet does too, with the record at `final/widenings.json`.
 5. Capture the verdict: the reviewer's final message is one JSON object, read from the
    `--output-last-message` file. That file, not the live log, is the verdict's channel.
    An unparseable verdict is a loud runner failure naming the cause — never guessed at,
@@ -260,6 +266,8 @@ setup.
   model + effort requested, brief path + SHA-256, worker exit code, acceptance results
   (command, stated outcome, exit code, output tail, passed), review verdict, attempt number, status
   (`passed` | `rework` | `escalated`), outstanding findings.
+  It also carries the review's `widenings` block (`execution` spec: Receipts and run
+  state); `run.json` aggregates accepted widenings under `widenings`.
 - `run.json` is the run summary and the monitor's contract:
 
 ```
@@ -662,6 +670,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-11-04: amended by [execution] — the task loop computes widenings after every worker turn against the record each brief names (`task-<N>/widenings.json`, `final/widenings.json`), escalates `scope-delete` before review, and the review packet carries `## Widened files`; receipts carry the `widenings` block
 2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
 2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
 2026-10-05: `unverified` stage halt after a final-review pass with an open unverified entry; `--resolve` gains `accept:<evidence>` and answers that class too; `unverified` and `approved` join the resume state (#127)

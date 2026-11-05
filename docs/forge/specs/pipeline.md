@@ -265,6 +265,19 @@ update-constraint`, and a denied direct edit is the mechanism working, not an ob
   and with neither it has no spec. Completed plans are not migrated.
 - **Task heading** is `### Task N:` — three `#`, colon. The extraction scripts require
   it.
+- **`**Files:**`** is required on every task and **machine-read**: its paths are the
+  task's scope (`execution` spec: Scope widening). The marker stands alone on its line,
+  followed by one `-` bullet per entry, the block ending as the field clause grammar's
+  bulleted form does. An entry is a kind — `Create:`, `Modify:` or `Test:` — then one or
+  more backticked repo-relative paths separated by `, `, then optionally one
+  parenthetical note running to the end of the line; inside the note, backticks are
+  literal text. All three kinds put their paths in scope. Errors, each naming the task
+  and line and quoting the entry: an unknown kind; an entry with no backticked path;
+  text between paths or after the last path that is neither `, ` nor the note; a path
+  containing `*`, `?` or `[`, or ending in `/`; a path resolving outside the repository
+  root. A path is never checked for existence — an earlier task may create it. A file
+  that cannot be named at plan time is not written as prose: leave it out, and a
+  worker that needs it justifies it as a widening.
 - **`**Spec:**`** is an optional line after `**Files:**` naming the spec sections this
   task's worker needs, by heading text (unique prefix acceptable, matched
   case-insensitively at extraction). In a plan written from a spec, every task names
@@ -592,6 +605,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
 2026-10-06: Agent files — break-the-code is bounded to one mutant per `**Tests:**` bullet, per execution spec Reviewer write discipline (#134)
 2026-10-05: Agent files — review mutates only in a scratch copy, per execution spec Reviewer write discipline (#127)

@@ -219,6 +219,7 @@ invocation stays, since a plan can be edited between review and dispatch.
 | `**Acceptance:**` present per task | names the task |
 | every `**Acceptance:**` clause beginning with inline code parses as a command clause (`pipeline` spec: Acceptance clause grammar) | names the task and line, quotes the clause, lists the legal outcomes |
 | `**Tests:**` parses — bulleted form, or `none — <reason>` | names the task and quotes the offending line |
+| `**Files:**` present per task and parses (`pipeline` spec: Plan documents) | names the task and line, quotes the entry — a prose or glob entry is never read as a path |
 | checklist generates for every task and for `--final` | names the task; an empty checklist is a **warning**, not an error |
 | every **changed** spec section, in every spec the plan declares, is named by some task's `**Spec:**` line | names the spec and the unclaimed section |
 | `**Spec files:**` parses; every path is a living spec; no two share a spec id | names the path and the defect |
@@ -285,7 +286,10 @@ reason.
 
 **Lint must never reject a legal plan.** `**Spec:**`, `**Global Constraints:**` and
 prose acceptance are all optional per the planning skill; absence is never an error.
-And lint never edits: a plan or spec is the contract, and a worker rewriting its own
+`**Files:**` is required, because Scope widening reads it: a task without one has no
+scope, so every edit it made to an existing file would be a widening. A plan in flight
+whose `**Files:**` entries are prose fails lint at its next invocation, naming each
+entry; plans already completed are not migrated. And lint never edits: a plan or spec is the contract, and a worker rewriting its own
 contract is self-dealing, so a document defect is always reported for a human, never
 auto-corrected mid-run.
 
@@ -407,6 +411,9 @@ identical contract.
       "carried_from": "f1" | null,
       "repair_task": {"title": "…", "files": ["…"], "spec": "…", "tests": ["…"], "acceptance": ["…"], "tier": "standard"} | null
     }
+  ],
+  "widenings": [
+    {"path": "a path copied verbatim from the packet's ## Widened files", "ruling": "accepted" | "rejected", "reason": "why the change was or was not needed, and minimal"}
   ]
 }
 ```
@@ -482,6 +489,14 @@ identical contract.
   `seeded_findings`, `unverified`, a halt record's outstanding findings). Reviewers
   may reuse `f1` in every review; the runner never confuses task 2's `f1` with task
   5's, and an approval given to `t2:f1` exempts exactly that finding (#128).
+- `widenings` holds exactly one ruling per path the packet lists under
+  `## Widened files` (Scope widening), each path copied verbatim, and no others; it is
+  absent or `[]` when the packet lists none. A missing, extra or duplicated path, an
+  unknown `ruling`, or an empty `reason` is a validation defect (one retry naming it,
+  then a contract error). `accepted` means the change was needed for what it serves and
+  no larger than that; `rejected` means either is false. The worker's justification is
+  a claim to check against the diff, never evidence in itself. Rulings never change the
+  `verdict` value, which speaks for `findings` alone.
 - An unparseable verdict is a loud failure naming the cause — a contract error (exit 1),
   distinct from a task halt (exit 2). Never guessed at, never silently retried.
 
@@ -699,8 +714,9 @@ the final review for the same reason.
 
 - **fix** — reworked in-loop: the task's own new code. An autonomous fixer's failure
   mode is over-fixing, and over-fixing is diff over-scoping wearing a new hat, so the
-  rule is fix-what-this-task-wrote and nothing else — enforced on the repair itself by
-  the repair-scope check below.
+  rule is fix-what-this-task-wrote and nothing else. An edit beyond the task's declared
+  files is a widening, justified by the worker and arbitrated by the reviewer (Scope
+  widening).
 - **defer** — logged, never fixed: an improvement off the diff (`in-run` or
   `pre-existing`).
 - **seed** — logged, the run **continues**, and the finding is carried into the final
@@ -717,16 +733,6 @@ the final review for the same reason.
   be silently fixed *or* silently deferred, and never fixed autonomously. The halt
   surfaces the drafted `repair_task` for the human and freezes the paused task, so the
   run is resumable once they resolve it (Halt resolution).
-
-**Repair-scope check.** After every rework lap — task or final — the runner compares the
-repair delta (the pre-repair tree against the working tree after the repair, the same
-capture as Delta-scoped verification packets) with the pre-repair diff (review base
-against the pre-repair tree; for the final review the review base is `run_base`). A
-repair that **modifies or deletes** a file the pre-repair diff never touched halts
-`repair-out-of-scope`, naming every such path; it is never auto-passed. A file the
-repair **creates** is exempt — a new file changes no existing code. A rename counts as
-a delete plus an add. The check is file-level: an edit inside a file the task already
-touched passes it.
 
 In the final review, `run_base` **is** the diff base, so `in-run` and `in-diff` coincide
 and the cross-task route to `seed` is unreachable. The `unverifiable` route is not:
@@ -786,6 +792,91 @@ self-labeling it resolved. A false claim is still caught: the identity reappeari
 trips the regression rule against the runner's authoritative resolved-id set. The convergence
 decision itself is not modified; a dropped finding never reaches it.
 
+## Scope widening
+
+The spec and plan locate the work; they cannot locate all of it. A worker may edit an
+existing file its task does not declare, provided it says why and the reviewer agrees.
+What is stopped is an edit no finding or requirement needed, not an edit outside the
+plan.
+
+**Scope** is a file set, file-level: an edit inside an in-scope file is in scope.
+
+| review | in scope |
+|---|---|
+| task N | task N's `**Files:**` paths (`pipeline` spec: Plan documents) |
+| final | every task's `**Files:**` paths, plus every path `git diff <run_base> HEAD` changes |
+
+Task work stays uncommitted until its review passes and the final fix lands as one
+commit on pass (Commit discipline), so `HEAD` at review time is the review's committed
+checkpoint on both rows.
+
+**A widening** is a path, existing at `HEAD`, that `HEAD` against the working tree
+modifies, outside scope. Never a widening:
+
+- a created path — a new file changes no existing code;
+- the plan file, and every spec file the plan declares (or the `--spec` file of a
+  legacy plan) — the orchestrator amends those during a run.
+
+A rename is a delete plus an add.
+
+**Deletion halts.** A path existing at `HEAD`, outside scope and not exempt, that the
+working tree deletes halts `scope-delete`, naming every such path, whatever any record or
+ruling says. It freezes and resumes like every halt class (Halt resolution); it takes no
+`--resolve`.
+
+**Detection** runs after every worker turn — first attempt and every rework lap, task
+and final — through `forge_dispose.scope_widenings`, the one implementation, called
+in-process by the Codex runner and via the `forge_dispose.py widened` CLI on Claude
+(The shared decision helper).
+
+**The worker's record.** Every worker brief, cold and resumed, names a record path in the
+run's scratch area and carries `forge_common.WIDENING_INSTRUCTION`, shared verbatim by
+both harnesses. The record is the worker's whole current set, rewritten each turn:
+
+```json
+[
+  {"path": "src/lib/portal/broadcast.ts", "reason": "why the edit was needed", "serves": "t5:f3"}
+]
+```
+
+- `serves` is a citable ref for this review (Contract checklist) or the identity of an
+  outstanding finding the turn repairs.
+- An absent record means no justification for any path. A record that does not parse, a
+  `path` that is not a current widening, a duplicate `path`, an empty `reason`, or a
+  `serves` outside both sets is an **execution failure** naming the entry: the turn
+  reworks under the rework loop's execution-failure rules and is never reviewed on it.
+
+**The packet.** Every review packet — discovery, verification, and the validation retry —
+lists the widenings due a ruling under `## Widened files`: each path as a JSON string,
+then the record's `reason` and `serves`, or `no justification given`. The packet asks for
+exactly one ruling per listed path (Reviewer verdict contract).
+
+- Discovery: every current widening.
+- Verification: every current widening not accepted at its current content — new this
+  lap, changed since its acceptance, or rejected and still present.
+
+**Rulings.** An `accepted` path is recorded in the convergence state with its blob id at
+acceptance and is not listed again while that content holds. A `rejected` path becomes
+a fix finding the runner raises, identity `<scope>:widen:<path>`, summary the reviewer's
+`reason`, location the path. It reworks like any fix finding: the worker reverts the
+edit and solves the need in scope, or keeps it and states a better justification in its
+record. The runner, not the reviewer, labels it:
+
+- resolved — the path is no longer a widening, or the next ruling accepts it;
+- carried — the next ruling rejects it again; two consecutive carried rounds with
+  nothing resolved halt `stuck` (Rework loop and convergence), which is where a worker
+  and reviewer who still disagree reach the human;
+- a resolved widening rejected again later is a regression.
+
+`--autofix gate` halts on a rejected widening as on any finding. A trivial-tier task has
+no reviewer: its widenings, with the record's justification, go to the close-out list
+unarbitrated, as inline's do; its deletions still halt.
+
+**Close-out.** Every accepted widening — task, path, lines added and removed, the
+worker's `reason` and `serves`, the reviewer's `reason` — is listed at the close-out
+gate beside the staged deferrals (Deferral handling). The list is informational: no
+per-entry call, nothing filed.
+
 ## Rework loop and convergence
 
 Per task — standard and complex; trivial runs acceptance only, with no reviewer. Each
@@ -799,8 +890,9 @@ acceptance-stuck and backstop rules. Then the decision is taken deterministicall
 
 1. **Gate mode** and any reviewer finding → **halt** (`gate`). A transient execution
    failure is exempt: it carries no impact.
-1a. A **repair-scope violation** (The disposition matrix: Repair-scope check) →
-   **halt** (`repair-out-of-scope`), whatever the findings.
+1a. An out-of-scope **deletion** (Scope widening) → **halt** (`scope-delete`),
+   whatever the findings. A rejected widening is a fix finding and takes the steps
+   below like any other.
 2. Any **halt-disposition** finding → **halt** (`scope-decision`). A finding whose
    identity is carried in as human-approved (Halt resolution) is exempt from this step
    for the rest of the run; the regression rule (3) still applies to it.
@@ -828,11 +920,13 @@ surface another — and converging work runs to completion. The backstop is a se
 against slow oscillation, not the primary stop. The runner owns the authoritative
 resolved-id set across attempts, so a reviewer mislabeling a reappearance as `new` is
 still caught. Convergence's halt reasons are exactly `scope-decision`, `regression`, `stuck`,
-`backstop`, `gate`, `repair-out-of-scope` — `forge_common.HALT_REASONS`, what
+`backstop`, `gate`, `scope-delete` — `forge_common.HALT_REASONS`, what
 `convergence_decision` can return. Two further halt **classes** are raised outside it and
 never appear in `decision.json`: `reviewer-wrote` (Reviewer write discipline) and
 `unverified` (The disposition matrix). The receipt and halt-record `halt_reason` field
-accepts all eight.
+accepts all eight, and also reads `repair-out-of-scope` from a record written before
+Scope widening: such a run resumes like any halt class, and the reconciled task runs
+under Scope widening.
 
 ## Halt resolution — freeze, resolve, reconcile
 
@@ -986,8 +1080,19 @@ python3 forge_dispose.py \
   --scope <t<N>|final> \          # the review's identity scope (Reviewer verdict contract); required
   [--approved <identity> ...] \   # human-resolved finding identities (Halt resolution)
   [--prior-identities <json>] \   # identities of the prior findings this review's packet carried; omitted = none, so any scoped carried_from is a defect
-  [--repair-snapshot <tree>]      # pre-repair tree sha (forge_fingerprint.py snapshot's `tree`); given on every rework lap — the repair-scope check
+  --plan <plan> \                 # the plan being run: `**Files:**` scope and the exempt documents (Scope widening); required
+  [--spec <spec>] \               # legacy plan only, as for every pipeline script
+  [--widenings <record.json>]     # the worker's widening record; absent = no justifications
 ```
+
+`python3 forge_dispose.py widened --plan <plan> [--spec <spec>] --base <sha> --scope
+<t<N>|final> --state <state.json> [--widenings <record.json>] [--format json|md]` prints
+the widenings due a ruling — JSON (`{"widened": [{"path", "reason", "serves"}],
+"deleted": ["path"], "record_defects": ["…"]}`) or the packet's `## Widened files`
+section — computed by the same `scope_widenings` the decision uses. The orchestrator
+runs it after every worker turn: a non-empty `deleted` halts `scope-delete` before review,
+a non-empty `record_defects` is the turn's execution failure, and the `md` form goes into
+the reviewer's prompt.
 
 The CLI computes the authoritative diff itself and writes `decision.json` to stdout:
 
@@ -995,7 +1100,7 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
 {
   "action": "pass" | "rework" | "halt",
   "halt_reason": "scope-decision" | "regression" | "stuck" | "backstop" | "gate"
-                 | "repair-out-of-scope" | null,
+                 | "scope-delete" | null,
                  // convergence's six; `reviewer-wrote` and `unverified` are halt classes
                  // raised outside `convergence_decision` and appear only on receipts and
                  // the halt record, never in decision.json
@@ -1005,8 +1110,13 @@ The CLI computes the authoritative diff itself and writes `decision.json` to std
     "halt":   [ {"…": "…", "repair_task": {"…": "…"}} ],
     "seeded": [ {"…": "…"} ]
   },
-  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null},
-  "repair_out_of_scope": ["path", "…"]   // only with --repair-snapshot; sorted, empty when in scope
+  "state": {"resolved_ids": ["…"], "carried_ids": ["…"], "prev_acceptance_ok": true, "prev_failed_acceptance": "…" | null,
+            "accepted_widenings": {"path": "blob id at acceptance"}},
+  "widenings": {
+    "accepted": [ {"path": "…", "reason": "…", "serves": "…" | null, "ruling_reason": "…", "added": 6, "removed": 4} ],
+    "rejected": [ {"path": "…", "identity": "t5:widen:path"} ],
+    "deleted":  ["path"]
+  }
 }
 ```
 
@@ -1018,8 +1128,12 @@ missing `--scope` is a usage error, never defaulted.
 acceptance was its execution failure, else `null`; every attempt overwrites it. A state
 file without the key reads as `null`. `--failed-acceptance` without
 `--execution-failure`, or with `--acceptance-ok true`, is a usage error (exit non-zero,
-naming the conflict), never ignored. An unknown `--repair-snapshot` sha is an error
-(exit 1, naming the flag), never a skipped check.
+naming the conflict), never ignored. `--repair-snapshot` is gone: passing it is a
+usage error naming the flag, never ignored. A state file without
+`accepted_widenings` reads as `{}`. The verdict's `widenings` are checked against the
+widenings the helper recomputes (Reviewer verdict contract), never against a list the
+caller supplies. `accepted` lists every accepted widening so far in this review, with
+line counts from `HEAD` against the working tree.
 
 **Authority.** `forge_dispose` computes the diff it verifies against. The reviewer's own
 diff view is advisory and its provenance claims are overridden regardless, so a reviewer
@@ -1043,6 +1157,9 @@ the orchestrator's role there. Per task, in order:
 3. **Acceptance** — run each command clause and check its stated outcome (`pipeline`
    spec: Acceptance clause grammar); capture pass or fail and, on fail, the first
    failing clause's command for `--failed-acceptance`.
+3a. **Widenings** (Scope widening) — after every implementer turn: an out-of-scope
+   deletion halts `scope-delete` here, before any review; a record defect is the turn's
+   execution failure; otherwise the widenings due a ruling go into the reviewer's input.
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the
@@ -1079,7 +1196,10 @@ subagent self-service plus `forge_dispose` self-computing the diff, not by a pac
 Acceptance results reach a Claude reviewer the same way everything else does: the
 orchestrator writes them as JSON — the same records — to the scratch directory and the
 reviewer prompt names that path with the do-not-re-run assertion; no packet, no pasted
-output.
+output. The `## Widened files` section is the one exception on Claude: the
+orchestrator pastes the `forge_dispose.py widened --format md` output into the
+reviewer's prompt, since that list is the runner's computation and the reviewer owes a
+ruling on exactly it. On Codex `review-packet.py` carries the same section.
 
 ### Serial by design
 
@@ -1163,6 +1283,8 @@ contract, different mechanism; no thread-id plumbing on the Claude path.
   way, compared to the snapshot — no separate untracked-file append pass, so an
   unchanged formerly-untracked file produces no hunk, an edited one only its edit, and
   an addition or deletion appears exactly once.
+- A verification packet also carries `## Widened files` with the widenings due a ruling
+  this lap (Scope widening); a path accepted at its current content is not re-listed.
 - The final-review fixer's brief is findings, affected paths and referenced spec
   sections. The whole-plan diff is never pasted; the fixer reads the repo.
 
@@ -1198,7 +1320,8 @@ gate and the labels). Staged deferrals persist across a resume rather than being
 by the current invocation's entries, so an earlier stage's entries are never erased. The
 end-of-plan summary lists them. The same gate presents the final review's `unverified`
 findings (The disposition matrix), each with its reviewer's reason, for the same
-three-way call — accept, defer, repair.
+three-way call — accept, defer, repair. It also lists every accepted widening (Scope
+widening), informational, with no call asked for.
 
 Implementers may defer **non-spec scope only** — nice-to-haves, refactors, edge polish.
 Anything the spec requires surfaces at the review gate and is never silently deferred
@@ -1226,6 +1349,13 @@ one that must never be silently fixed *or* silently deferred: the orchestrator d
 disposition (a repair-task sketch, or a fix/defer rationale) and **surfaces it to the
 user** for the call. Inline runs in-session, so the human gate is the conversation itself;
 no notify machinery.
+
+**Widenings, inline.** After each task's implementation the orchestrator runs
+`forge_dispose.py widened` like a dispatch orchestrator (Scope widening). An
+out-of-scope deletion surfaces to the user as a `scope-delete` halt. Every other
+widening carries the orchestrator's own `reason` and `serves` and goes straight to the
+close-out list, unarbitrated — inline has no independent reviewer to rule on it, and the
+user is already in the session. Inline never halts on a widening that is not a deletion.
 
 Fix-cell rework **converges** rather than counting. The session holds the prior attempt in
 context, so the labels come for free and no re-review packet is needed: the self-review
@@ -1311,8 +1441,11 @@ is open work (issue #52).
 - Receipts also carry `coverage_skipped` when the checklist was empty, `coverage_retry`
   when the validation retry fired, and `resume_fallback` when continuity degraded to a
   cold spawn. The end-of-plan summary reports per-task lap counts, staged deferrals,
-  seeded findings whether or not the final review confirmed them, and the halt reason
-  class.
+  seeded findings whether or not the final review confirmed them, accepted widenings,
+  and the halt reason class.
+- Each task and final receipt carries the review's `widenings` block from
+  `decision.json`; `run.json` aggregates the accepted entries under `widenings`, each
+  tagged with its review scope, and reads them back on resume like `deferrals`.
 - A lint failure is a contract error before any receipt exists, consistent with a
   malformed plan.
 
@@ -1364,9 +1497,16 @@ Any cost claim requires measurement against a comparable run.
 - **Wall-clock on large all-independent plans** — the accepted cost of serial execution.
   Hybrid parallelism is a future optimization, not a defect.
 - **Backstop of 5** is a starting value; tune it on the halt-mix the receipts produce.
+- **A reviewer waving widenings through.** Scope widening trades a human stop on every
+  out-of-scope edit for a reviewer's ruling, so a lenient reviewer lets scope creep land.
+  Bounded by per-path rulings with a reason, by the close-out list putting every accepted
+  widening in front of the human, and by `scope-delete` still stopping the most
+  destructive case. If the close-out list shows widenings the human would have refused,
+  revisit.
 
 ## Changelog
 
+2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and two carried rounds halt `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.
 2026-10-06: Break-the-code is bounded to one mutant per `**Tests:**` bullet, none for a `none` task; an unmappable bullet or a behavior outside the list is a finding, not a mutation (#134)
