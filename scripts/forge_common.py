@@ -480,3 +480,24 @@ def run_json_teed(argv, *, cwd=None, timeout, live_path, events_path, header,
         tail=merged[-_ACC_TAIL_CHARS:],
         thread_id=thread_id,
     )
+
+
+# The worker-record instruction both harnesses put in every worker brief, cold
+# and resumed (Scope widening, The worker's record). One string, shared verbatim.
+WIDENING_INSTRUCTION = (
+    "If your work edits an existing file that this task's **Files:** does not "
+    "declare, say why. Write your whole current set of such edits to the "
+    "widenings record path named above, as a JSON array, rewriting the whole "
+    "file every turn: "
+    '[{"path": "<repo-relative path>", "reason": "<why the edit was needed>", '
+    '"serves": "<a ref or finding identity>" or null}]. '
+    "Every entry must carry all three keys, `path`, `reason` and `serves`; "
+    "`serves` may be null but is never omitted. "
+    "`path` must be a file you edited that the task does not declare; "
+    "`reason` must be non-empty; `serves` is a ref from the review checklist "
+    "or the identity of an outstanding finding this turn repairs, or null "
+    "when the edit serves neither. A path the record names that is not an "
+    "undeclared edit, a duplicate path, an empty reason, or an unknown "
+    "`serves` fails the turn. Never delete a file the task does not declare; "
+    "a deletion halts the run. Creating new files needs no entry."
+)

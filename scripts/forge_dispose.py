@@ -19,12 +19,15 @@ import argparse
 import copy
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 
+import forge_checklist
 import forge_git
+import forge_plan
 from forge_common import (
     AUTOFIX_MODES,
     rp,
@@ -966,6 +969,291 @@ def execution_failure_finding(detail):
     )
 
 
+# --- scope widening: detection and the worker's record -----------------------
+
+
+@dataclass
+class Widening:
+    """An edit to an existing file outside the review's scope (Scope
+    widening). ``reason``/``serves`` come from the worker's record, ``None``
+    when unjustified; ``added``/``removed`` are line counts, ``HEAD`` against
+    the working tree."""
+
+    path: str
+    reason: str | None
+    serves: str | None
+    added: int
+    removed: int
+
+
+@dataclass
+class WideningResult:
+    widened: list
+    deleted: list
+    record_defects: list
+    due: list
+
+
+def _git(cwd, args):
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True
+        )
+    except OSError as e:
+        raise RuntimeError("failed to invoke git: {}".format(e))
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "git {} failed in {}: {}".format(
+                " ".join(args), cwd, proc.stderr.strip()
+            )
+        )
+    return proc.stdout
+
+
+def blob_id(cwd, path):
+    """The blob id of ``path``'s current working-tree content."""
+    return _git(cwd, ["hash-object", "--", path]).strip()
+
+
+def _repo_relative(cwd, toplevel, path):
+    absolute = path if os.path.isabs(path) else os.path.join(cwd, path)
+    return posixpath.normpath(
+        os.path.relpath(os.path.realpath(absolute), os.path.realpath(toplevel))
+        .replace(os.sep, "/")
+    )
+
+
+def _name_status(cwd):
+    """``(modified, deleted)`` path sets: ``HEAD`` against the working tree,
+    renames split into a delete plus an add, only paths existing at ``HEAD``
+    (created paths are never listed)."""
+    out = _git(cwd, ["diff", "--name-status", "--no-renames", "-z", "HEAD"])
+    fields = out.split("\0")
+    modified, deleted = set(), set()
+    i = 0
+    while i + 1 < len(fields):
+        status, path = fields[i], fields[i + 1]
+        i += 2
+        if status == "A":
+            continue
+        if status == "D":
+            deleted.add(path)
+        else:
+            modified.add(path)
+    return modified, deleted
+
+
+def _numstat(cwd):
+    out = _git(cwd, ["diff", "--numstat", "--no-renames", "-z", "HEAD"])
+    counts = {}
+    for entry in out.split("\0"):
+        if not entry:
+            continue
+        added, removed, path = entry.split("\t", 2)
+        counts[path] = (
+            int(added) if added.isdigit() else 0,
+            int(removed) if removed.isdigit() else 0,
+        )
+    return counts
+
+
+def _scope_paths(cwd, tasks, scope, base):
+    if scope == "final":
+        paths = {p for t in tasks for p in t.files}
+        out = _git(cwd, ["diff", "--name-only", "--no-renames", "-z", base, "HEAD"])
+        paths.update(p for p in out.split("\0") if p)
+        return paths
+    number = int(scope[1:])
+    for task in tasks:
+        if task.number == number:
+            return set(task.files)
+    raise RuntimeError("scope {}: the plan has no task {}".format(scope, number))
+
+
+def _exempt_paths(cwd, toplevel, plan_path, spec_path):
+    exempt = {_repo_relative(cwd, toplevel, plan_path)}
+    declared = forge_checklist.eb.parse_spec_files(
+        forge_checklist.eb.read_lines(plan_path)
+    )
+    for rel in declared:
+        exempt.add(posixpath.normpath(rel))
+    if not declared and spec_path:
+        exempt.add(_repo_relative(cwd, toplevel, spec_path))
+    return exempt
+
+
+def _read_record(record_path):
+    """``(entries, defects)``: an absent record is no entries; a record that
+    cannot be read or is not a JSON array is one defect."""
+    if not record_path or not os.path.exists(record_path):
+        return [], []
+    try:
+        with open(record_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return [], ["widenings record {} does not parse: {}".format(record_path, e)]
+    if not isinstance(data, list):
+        return [], [
+            "widenings record {} must be a JSON array of entries, got {}".format(
+                record_path, type(data).__name__)
+        ]
+    return data, []
+
+
+def _apply_record(entries, by_path, citable, outstanding):
+    """Attach each valid entry's reason/serves to its widening; return the
+    defects, each naming its entry."""
+    defects, seen = [], set()
+    for n, entry in enumerate(entries, start=1):
+        label = "widenings record entry {}".format(n)
+        if not isinstance(entry, dict):
+            defects.append("{} is not an object".format(label))
+            continue
+        missing = [k for k in ("path", "reason", "serves") if k not in entry]
+        if missing:
+            defects.append("{} lacks {}".format(label, ", ".join(missing)))
+            continue
+        path, reason, serves = entry["path"], entry["reason"], entry["serves"]
+        if not isinstance(path, str):
+            defects.append("{}: path must be a string".format(label))
+            continue
+        label = "{} (path {})".format(label, json.dumps(path))
+        if path in seen:
+            defects.append("{}: duplicate path".format(label))
+            continue
+        seen.add(path)
+        if path not in by_path:
+            defects.append("{}: not a current widening".format(label))
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            defects.append("{}: reason must be a non-empty string".format(label))
+            continue
+        if serves is not None and (
+            not isinstance(serves, str)
+            or (serves not in citable and serves not in outstanding)
+        ):
+            defects.append(
+                "{}: serves {} is neither a citable ref for this review nor "
+                "an outstanding finding identity".format(label, json.dumps(serves))
+            )
+            continue
+        by_path[path].reason = reason
+        by_path[path].serves = serves
+    return defects
+
+
+def scope_widenings(cwd, plan_path, spec_path, scope, base, state, record_path):
+    """The one implementation of widening detection (Scope widening): the
+    existing-at-``HEAD`` paths the working tree modifies outside the review's
+    scope and not exempt, the out-of-scope deletions, the worker record's
+    defects, and which widenings are due a ruling. ``scope`` is ``t<N>`` or
+    ``final``; ``base`` is the review base; ``state`` a ConvergenceState or
+    None. Raises RuntimeError naming the cause on any git failure."""
+    if not SCOPE_PATTERN.fullmatch(scope):
+        raise RuntimeError("scope must be t<N> or final, got {!r}".format(scope))
+    toplevel = _git(cwd, ["rev-parse", "--show-toplevel"]).strip()
+    _verify_ref(cwd, base)
+    tasks = forge_plan.parse_plan_tasks(plan_path)
+    in_scope = _scope_paths(cwd, tasks, scope, base)
+    exempt = _exempt_paths(cwd, toplevel, plan_path, spec_path)
+    modified, deleted = _name_status(cwd)
+    counts = _numstat(cwd)
+
+    widened = [
+        Widening(p, None, None, *counts.get(p, (0, 0)))
+        for p in sorted(modified - in_scope - exempt)
+    ]
+    gone = sorted(deleted - in_scope - exempt)
+
+    state = state or ConvergenceState()
+    entries, defects = _read_record(record_path)
+    if entries:
+        citable = (
+            forge_checklist.final_citable_refs(plan_path, spec_path)
+            if scope == "final"
+            else forge_checklist.citable_refs(plan_path, spec_path, int(scope[1:]))
+        )
+        defects += _apply_record(
+            entries, {w.path: w for w in widened}, citable,
+            set(state.carried_ids),
+        )
+    accepted = getattr(state, "accepted_widenings", None) or {}
+    due = [
+        w for w in widened
+        if accepted.get(w.path, {}).get("blob") != blob_id(cwd, w.path)
+    ]
+    return WideningResult(widened, gone, defects, due)
+
+
+def _verify_ref(cwd, ref):
+    _git(cwd, ["rev-parse", "--verify", "--quiet", ref + "^{commit}"])
+
+
+def render_widened_section(result):
+    """The packet's ``## Widened files`` section for the widenings due a
+    ruling; the empty string when none is due."""
+    if not result.due:
+        return ""
+    lines = ["## Widened files", ""]
+    for w in result.due:
+        lines.append("- {}".format(json.dumps(w.path)))
+        if w.reason is None:
+            lines.append("  no justification given")
+        else:
+            lines.append("  reason: {}".format(" ".join(w.reason.split())))
+            lines.append("  serves: {}".format(w.serves or "none"))
+    return "\n".join(lines) + "\n"
+
+
+def _load_state_file(path):
+    """A ConvergenceState from ``path``; absent/unset is a fresh state. Also
+    carries ``accepted_widenings``, which ``ConvergenceState`` does not yet
+    round-trip itself."""
+    if not (path and os.path.exists(path)):
+        return ConvergenceState()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError("cannot read state file {}: {}".format(path, e))
+    state = ConvergenceState.from_dict(raw)
+    state.accepted_widenings = dict((raw or {}).get("accepted_widenings") or {})
+    return state
+
+
+def widened_main(argv):
+    parser = argparse.ArgumentParser(prog="forge_dispose.py widened")
+    parser.add_argument("--plan", required=True)
+    parser.add_argument("--spec", default=None)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--scope", required=True, type=_scope_arg)
+    parser.add_argument("--state", default=None)
+    parser.add_argument("--widenings", default=None)
+    parser.add_argument("--format", choices=["json", "md"], default="json")
+    args = parser.parse_args(argv)
+    try:
+        state = _load_state_file(args.state)
+        result = scope_widenings(
+            os.getcwd(), args.plan, args.spec, args.scope, args.base, state,
+            args.widenings,
+        )
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+    if args.format == "md":
+        sys.stdout.write(render_widened_section(result))
+    else:
+        print(json.dumps({
+            "widened": [
+                {"path": w.path, "reason": w.reason, "serves": w.serves}
+                for w in result.due
+            ],
+            "deleted": result.deleted,
+            "record_defects": result.record_defects,
+        }))
+    return 0
+
+
 def _run_git_diff(base):
     """The review diff against ``base`` in the caller's cwd — the CLI computes
     its own authoritative diff (never trusts a caller-supplied diff), exactly as
@@ -1012,6 +1300,10 @@ def _scope_arg(value):
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "widened":
+        return widened_main(argv[1:])
     parser = argparse.ArgumentParser(prog="forge_dispose.py")
     parser.add_argument(
         "--verdict", default=None,

@@ -97,7 +97,7 @@
 **Depends on:** Task 1
 
 ### Task 3: Detect widenings and the worker record
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (`scope_widenings`; `widened` subcommand)

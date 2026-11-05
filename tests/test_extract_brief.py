@@ -8,6 +8,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 
@@ -1085,6 +1086,23 @@ class SpecSetTests(unittest.TestCase):
         code, _out, err = self._run([plan, "2", "--out", self.root])
         self.assertNotEqual(code, 0)
         self.assertIn("task 2", err)
+
+
+class WideningsRecordTests(unittest.TestCase):
+    def test_the_brief_names_the_record_path_and_carries_widening_instruction_verbatim_when_widenings_record_is_given(self):
+        sys.path.insert(0, str(SCRIPT_PATH.parent))
+        import forge_common
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = os.path.join(tmp, "plan.md")
+            with open(plan, "w") as f:
+                f.write(PLAN_NO_SPEC)
+            record = os.path.join(tmp, "scratch", "widenings-t1.json")
+            with_record = extract_brief.build_brief(
+                plan, 1, widenings_record=record)
+            without = extract_brief.build_brief(plan, 1)
+        self.assertIn(record, with_record)
+        self.assertIn(forge_common.WIDENING_INSTRUCTION, with_record)
+        self.assertNotIn(forge_common.WIDENING_INSTRUCTION, without)
 
 
 if __name__ == "__main__":
