@@ -155,9 +155,9 @@ forge-run.py --status --run-dir DIR
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
 3a. On every worker turn, whether or not acceptance passed — before step 3's rework
-   or step 4's review is acted on — compute widenings from the checkpoint recorded before
-   the worker dispatch (the task's start commit; for a final-review fixer turn, the commit of
-   the last passed task) with `forge_dispose.scope_widenings` (`execution` spec: Scope
+   or step 4's review is acted on — compute widenings from the stage's checkpoint (`execution`
+   spec: Scope widening — `HEAD` recorded once per stage per invocation, before the stage's
+   first worker dispatch, and held across its rework laps) with `forge_dispose.scope_widenings` (`execution` spec: Scope
    widening) against the record at `task-<N>/widenings.json` in the run dir, the path
    every worker brief names — after every worker turn: the cold attempt, each rework
    resume, and each final-review fixer turn (against `final/widenings.json`). An
@@ -603,6 +603,12 @@ staleness is never an exit condition.
   an out-of-scope deletion in a turn whose acceptance failed still escalates
   `scope-delete`; after a resume, a path accepted before the halt is not re-listed
   while its content holds.
+- Checkpoint: a worker that commits its out-of-scope edit during a turn still has the
+  path listed, on that lap and the next; a worker that adds a path to its task's
+  `**Files:**` in the plan's working copy gains no scope; a resumed task's checkpoint is
+  `HEAD` at the new invocation, so a human's committed fix is not a widening; a final
+  stage whose last task's commit was skipped still has a checkpoint; a git failure in
+  detection exits 1 naming the cause.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
@@ -686,7 +692,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
-2026-11-04: amended by [execution] — step 3a detects from the checkpoint recorded before each worker dispatch, never from `HEAD` read afterwards
+2026-11-04: amended by [execution] — step 3a detects from the stage's checkpoint, `HEAD` recorded once per stage per invocation before its first worker dispatch and held across rework laps
 2026-11-04: amended by [execution] — the task loop computes widenings after every worker turn against the record each brief names (`task-<N>/widenings.json`, `final/widenings.json`), escalates `scope-delete` before review, and the review packet carries `## Widened files`; receipts carry the `widenings` block
 2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
 2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)

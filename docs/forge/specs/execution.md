@@ -806,9 +806,14 @@ plan.
 | task N | task N's `**Files:**` paths (`pipeline` spec: Plan documents) |
 | final | every task's `**Files:**` paths, plus every path `git diff <run_base> <checkpoint>` changes |
 
-**The checkpoint** is the commit a worker turn starts from, recorded by the orchestrator
-before the dispatch and never read from `HEAD` afterwards: for task N its review base
-(the prior commit), for the final review the commit of the last passed task. Every
+**The checkpoint** is `HEAD`, recorded by the orchestrator once per stage per invocation —
+just before the stage's first worker dispatch in that invocation (a task's cold worker,
+the final review's first fixer) — and held for every later turn of the stage, rework laps
+included; `HEAD` is never re-read for detection after that. A worker's commit on one lap
+therefore cannot move the next lap's checkpoint past its edit. A resumed invocation
+records a fresh checkpoint for the stage it resumes, so a fix the human committed before
+re-invoking is inside it, and a skipped task commit leaves nothing to look up. For a task
+the checkpoint equals its review base. Every
 `**Files:**` path is read from the plan **as committed at the checkpoint** (`git show
 <checkpoint>:<plan>`), so an edit to the plan's working copy, by a worker or anyone,
 never changes a scope. An orchestrator amendment to a running task's `**Files:**` is
@@ -1105,7 +1110,7 @@ other cell.
 python3 forge_dispose.py \
   --verdict <verdict.json> \      # the reviewer's proposed verdict
   --base <sha> \                  # diff base: prior commit (per task) | run-start HEAD (final)
-  --checkpoint <sha> \            # the worker turn's recorded start commit (Scope widening): the review base per task, the last passed task's commit for final; required
+  --checkpoint <sha> \            # the stage's checkpoint (Scope widening): HEAD recorded once per stage per invocation before its first worker dispatch; required
   --state <state.json> \          # prior ConvergenceState (empty/absent on attempt 1)
   --attempt <N> \
   --acceptance-ok <true|false> \
