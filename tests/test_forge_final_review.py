@@ -1200,3 +1200,152 @@ class UnverifiedHaltTests(UnverifiedCase):
              "call": None},
             {"kind": "finding", "id": "final:f2", "reason": "race untimed",
              "call": None}])
+
+
+# --- Scope widening in the final review (Task 5) ----------------------------
+
+
+class FinalWideningTests(unittest.TestCase):
+    """The final-review fixer's turns run widening detection against the
+    whole-plan scope, with the record at ``final/widenings.json``."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-final-widening-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(SPEC_WITH_ALPHA)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir)
+        self.log = os.path.join(self.d, "fakelog")
+        self.plog = self.log + ".prompts"
+        for key, value in (("FORGE_FAKE_LOG", self.log),
+                           ("FORGE_FAKE_PROMPT_LOG", self.plog)):
+            self._set_env(key, value)
+        self.plan = os.path.join(self.d, "plan.md")
+        with open(self.plan, "w") as f:
+            f.write(PLAN_FINAL)
+        with open(os.path.join(self.d, ".gitignore"), "w") as f:
+            f.write("fakelog*\nresponses.json\nrun/\n.forge/\n")
+        for name, text in (("f1.txt", "base\n"), ("other.txt", "other\n")):
+            with open(os.path.join(self.d, name), "w") as f:
+                f.write(text)
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+        self.run_base = forge_run._git_head(self.d)
+        with open(os.path.join(self.d, "f1.txt"), "a") as f:
+            f.write("NEEDFIX\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "task work")
+        self.record = os.path.join(self.run_dir, "final", "widenings.json")
+
+    def _set_env(self, key, value):
+        old = os.environ.get(key)
+        os.environ[key] = value
+        self.addCleanup(
+            lambda: os.environ.__setitem__(key, old)
+            if old is not None else os.environ.pop(key, None))
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+
+    def _responses(self, responses):
+        path = os.path.join(self.d, "responses.json")
+        with open(path, "w") as f:
+            json.dump(responses, f)
+        self._set_env("FORGE_FAKE_RESPONSES", path)
+
+    def _loop(self, spy=None):
+        import forge_dispose
+        with mock.patch.object(
+                forge_dispose, "scope_widenings",
+                wraps=forge_dispose.scope_widenings) as wrapped:
+            self.wrapped = wrapped
+            return forge_run.run_final_review_loop(
+                [self.spec], self.run_base, self.run_dir, self.fake, self.d,
+                "standard", "auto", {}, plan_path=self.plan)
+
+    def _fix_finding(self):
+        return _fix_findings_msg(
+            "f1.txt", "2", "needs a fix", contract_ref="spec:Alpha section")
+
+    def _fixer(self, *ops):
+        return {"exit": 0, "msg": "", "file_ops": list(ops)}
+
+    def _edit_other(self):
+        return {"op": "append", "path": os.path.join(self.d, "other.txt"),
+                "text": "more\n"}
+
+    def _record(self, entries):
+        return {"op": "write", "path": self.record, "text": json.dumps(entries)}
+
+    def _accept(self):
+        return {"exit": 0, "msg": json.dumps({"verdict": "pass", "widenings": [
+            {"path": "other.txt", "ruling": "accepted", "reason": "needed"}]})}
+
+    def test_a_final_fixer_turn_runs_detection_and_the_packet_lists_the_widening(self):
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            self._fixer(self._edit_other(), self._record([
+                {"path": "other.txt", "reason": "the shared helper moved",
+                 "serves": "final:f1"}])),
+            self._accept(),
+        ])
+        outcome = self._loop()
+        self.assertEqual(outcome.status, "passed")
+        # Detection ran once, after the fixer turn, at scope final.
+        self.assertEqual(
+            [c.args[3] for c in self.wrapped.call_args_list], ["final"])
+        with open(os.path.join(self.run_dir, "final-review.md")) as f:
+            packet = f.read()
+        self.assertIn("## Widened files", packet)
+        self.assertIn('- "other.txt"', packet)
+        self.assertIn("reason: the shared helper moved", packet)
+
+    def test_a_final_fixer_deletion_escalates_scope_delete_before_any_review(self):
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            self._fixer({"op": "delete", "path": os.path.join(
+                self.d, "other.txt")}),
+        ])
+        outcome = self._loop()
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-delete")
+        self.assertIn("other.txt", " ".join(outcome.findings))
+        self.assertEqual(len(_log_argvs(self.log)), 2)  # reviewer, fixer only
+        with open(os.path.join(self.run_dir, "final-review.json")) as f:
+            self.assertEqual(json.load(f)["halt_reason"], "scope-delete")
+
+    def test_a_rejected_final_widening_reworks_with_the_rejection_in_the_fixer_prompt(self):
+        self._responses([
+            {"exit": 0, "msg": self._fix_finding()},
+            dict(self._fixer(self._edit_other(), self._record([
+                {"path": "other.txt", "reason": "helper", "serves": None}])),
+                 stdout=_stream("th-fixer")),
+            {"exit": 0, "msg": json.dumps({"verdict": "pass", "widenings": [
+                {"path": "other.txt", "ruling": "rejected",
+                 "reason": "UNNEEDED CHURN"}]}), "stdout": _stream("th-rev")},
+            self._fixer({"op": "git", "args": [
+                "-C", self.d, "checkout", "--", "other.txt"]},
+                        self._record([])),
+            {"exit": 0, "msg": json.dumps({"verdict": "pass"})},
+        ])
+        outcome = self._loop()
+        self.assertEqual(outcome.status, "passed", outcome)
+        fixer_two = _log_prompts(self.plog)[3]
+        self.assertIn("UNNEEDED CHURN", fixer_two)
+        self.assertIn("other.txt", fixer_two)
+
+    def test_the_final_fixer_brief_and_resume_prompt_name_the_final_record(self):
+        brief = forge_run._final_review_fix_brief([], self.run_dir, 2)
+        prompt = forge_run._final_review_fix_resume_prompt([], self.run_dir, 3)
+        for path in (brief, prompt):
+            with open(path) as f:
+                text = f.read()
+            self.assertIn(self.record, text)
+            self.assertIn(forge_common.WIDENING_INSTRUCTION, text)

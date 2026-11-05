@@ -1385,3 +1385,39 @@ class AcceptanceInPacketTests(ReviewerWroteCase):
         self.assertIn("## Acceptance results", discovery)
         self.assertIn("echo NEEDFIX >> f1.txt", discovery)
         self.assertNotIn("## Acceptance results", verification)
+
+
+# --- Widened files and the reviewer contract (Scope widening, Task 5) -------
+
+import test_forge_loop as widening_loop  # noqa: E402
+
+
+class ReviewerWideningTests(widening_loop.WideningCase):
+    def test_a_validation_retry_falling_back_cold_carries_the_widened_files(self):
+        # The first verdict rules on nothing (a defect: the packet listed
+        # other.txt); the resumed retry crashes; the cold fallback is sent the
+        # whole retry packet, `## Widened files` included.
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer({"verdict": "pass"}, stdout=thread_stream("th-r1")),
+            {"exit": 1, "msg": ""},
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        argvs = _log_argvs(self.log)
+        self.assertIn("resume", argvs[2])
+        self.assertNotIn("resume", argvs[3])
+        cold = self.prompts()[3]
+        self.assertIn("\n## Widened files\n\n", cold)
+        self.assertIn('- "other.txt"', cold)
+        self.assertIn("## Coverage retry", cold)
+
+    def test_the_codex_reviewer_prompt_carries_the_verdict_instruction_verbatim(self):
+        res = self.run_cli([
+            self.worker(self.edit_op(), self.record_op([self.entry()])),
+            self.reviewer(self.ACCEPT_PASS),
+        ] + self.tail)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        reviewer = self.prompts()[1]
+        self.assertIn(forge_common.REVIEW_VERDICT_INSTRUCTION, reviewer)
+        self.assertIn("'## Widened files' section", reviewer)

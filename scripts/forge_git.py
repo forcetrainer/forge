@@ -112,7 +112,7 @@ def _git_diff(cwd, base):
 
 def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
                  checklist=None, spec_path=None, citable=None,
-                 acceptance_results=None):
+                 acceptance_results=None, widened=None):
     """Per-task review packet via review-packet.py: the task block + ``git diff
     <base>``. Missing task block raises (fail-loud). On a rework attempt
     ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
@@ -159,6 +159,7 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None,
         block, base, diff, prior_findings=prior_findings, checklist=checklist,
         review_kind="discovery", spec_sections=spec_sections,
         citable=citable, acceptance_results=acceptance_results,
+        widened=widened,
     )
     path = os.path.join(run_dir, "task-{}-review.md".format(task.number))
     with open(path, "w", encoding="utf-8") as f:
@@ -190,7 +191,8 @@ def named_spec_sections(plan_path, spec_path):
 
 
 def _final_packet(spec_paths, base, diff, run_dir, prior_findings=None,
-                   checklist=None, citable=None, named_sections=None):
+                   checklist=None, citable=None, named_sections=None,
+                   widened=None):
     """Whole-plan final-review packet: the spec listing + the whole-plan ``git
     diff <base>``, assembled by review-packet.py's fence-safe builder. The
     listing names each spec path and the section labels the plan's tasks name
@@ -204,11 +206,12 @@ def _final_packet(spec_paths, base, diff, run_dir, prior_findings=None,
     ``checklist`` mirrors ``_packet_for``'s: the final contract checklist (or
     None, the empty-checklist skip case), rendered after the diff and before
     the prior-findings section. ``citable`` is the final citable set, rendered
-    as a '## Citable refs' section after the checklist (None omits it)."""
+    as a '## Citable refs' section after the checklist (None omits it).
+    ``widened`` is the ``## Widened files`` section text, or None."""
     listing = rp.build_spec_files_section(spec_paths, named_sections)
     packet = rp.build_packet(
         listing, base, diff, prior_findings=prior_findings, checklist=checklist,
-        review_kind="discovery", citable=citable,
+        review_kind="discovery", citable=citable, widened=widened,
     )
     path = os.path.join(run_dir, "final-review.md")
     with open(path, "w", encoding="utf-8") as f:

@@ -289,7 +289,14 @@ class ExecuteTaskResumeTests(unittest.TestCase):
         self.assertIn("GUARDXYZ", prompt)
         self.assertNotIn(self.spec_marker, prompt)
         self.assertNotIn("Do the thing", prompt)  # the plan's Goal text (brief re-paste)
-        self.assertNotIn("Files:", prompt)
+        # The task block is never re-pasted; the record path and instruction
+        # are the one addition every resumed worker prompt carries (Scope
+        # widening, The worker's record), so the widenings text itself, which
+        # mentions `**Files:**`, is cut off before checking for the block.
+        self.assertNotIn("### Task 1", prompt)
+        body, _, record = prompt.partition("# Widenings record")
+        self.assertNotIn("Files:", body)
+        self.assertIn("task-1/widenings.json", record)
 
     def test_discovery_review_dispatches_cold_even_with_a_preexisting_thread_id(self):
         plan = self._plan(PLAN_STD)

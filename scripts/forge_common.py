@@ -278,6 +278,10 @@ class TaskOutcome:
     # The final review's accumulated unverified entries (kind/id/reason/call),
     # merged with the set read back from run.json. Empty on a per-task outcome.
     unverified: list = field(default_factory=list)
+    # A trivial-tier task's widenings, which no reviewer ruled on (Scope
+    # widening): {"tasks": [N], "path", "added", "removed", "reason", "serves"}.
+    # Empty on every reviewed outcome.
+    widenings: list = field(default_factory=list)
 
 
 def finding_to_dict(finding):

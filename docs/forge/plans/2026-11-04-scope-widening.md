@@ -217,7 +217,7 @@
 **Depends on:** Task 3
 
 ### Task 5: Codex runner checks every worker turn
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (detection after every worker turn before acceptance is acted on; `scope-delete` escalation; record paths `task-<N>/widenings.json` and `final/widenings.json` passed to every brief; verdict rulings to the decision; repair snapshot scope check removed; trivial-batch union scope; `scope-delete` halt guidance text)

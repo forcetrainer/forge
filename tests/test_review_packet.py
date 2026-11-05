@@ -1007,3 +1007,92 @@ class CliSpecContextTests(unittest.TestCase):
         marker = "## Review kind\n\ndiscovery\n\n"
         self.assertTrue(runner_packet.startswith(marker))
         self.assertEqual(cli_packet, runner_packet[len(marker):])
+
+
+# --- Widened files section (Scope widening, The packet) ---------------------
+
+WIDENED_MD = (
+    "## Widened files\n\n"
+    "- \"src/lib/portal/broadcast.ts\"\n"
+    "  reason: the shared type moved\n"
+    "  serves: t1:f3\n"
+)
+
+
+class WidenedFilesSectionTests(unittest.TestCase):
+    TASK = "### Task 1: First task\n- [ ] Done\n"
+
+    def setUp(self):
+        self.repo_dir = tempfile.mkdtemp(prefix="review-packet-widened-")
+        self.addCleanup(shutil.rmtree, self.repo_dir, ignore_errors=True)
+        for args in (["init"], ["config", "user.email", "t@example.com"],
+                     ["config", "user.name", "Test"]):
+            subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
+                           capture_output=True, text=True)
+        self.plan_path = os.path.join(self.repo_dir, "plan.md")
+        with open(self.plan_path, "w") as f:
+            f.write(PLAN_TASK1)
+        for args in (["add", "."], ["commit", "-m", "initial"]):
+            subprocess.run(["git", *args], cwd=self.repo_dir, check=True,
+                           capture_output=True, text=True)
+        self.commit1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True,
+            capture_output=True, text=True).stdout.strip()
+
+    def _widened_file(self, text=WIDENED_MD):
+        path = os.path.join(self.repo_dir, "widened.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_build_packet_inserts_the_section_verbatim(self):
+        packet = rp.build_packet(
+            self.TASK, "HEAD", "", review_kind="discovery", widened=WIDENED_MD)
+        self.assertIn(WIDENED_MD, packet)
+
+    def test_build_packet_without_widened_has_no_section(self):
+        packet = rp.build_packet(self.TASK, "HEAD", "", review_kind="discovery")
+        self.assertNotIn("## Widened files", packet)
+
+    def test_empty_widened_text_adds_no_section(self):
+        packet = rp.build_packet(
+            self.TASK, "HEAD", "", review_kind="discovery", widened="")
+        self.assertNotIn("## Widened files", packet)
+
+    def test_verification_packet_inserts_the_section_verbatim(self):
+        packet = rp.build_verification_packet([], "", None, widened=WIDENED_MD)
+        self.assertIn(WIDENED_MD, packet)
+        self.assertNotIn(
+            "## Widened files", rp.build_verification_packet([], "", None))
+
+    def test_cli_widened_flag_inserts_the_files_section_verbatim(self):
+        out = os.path.join(self.repo_dir, "out")
+        result = run_script([
+            self.plan_path, "1", "--base", self.commit1, "--out", out,
+            "--widened", self._widened_file()])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            self.assertIn(WIDENED_MD, f.read())
+
+    def test_cli_without_widened_flag_has_no_section(self):
+        out = os.path.join(self.repo_dir, "out")
+        result = run_script([
+            self.plan_path, "1", "--base", self.commit1, "--out", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            self.assertNotIn("## Widened files", f.read())
+
+    def test_cli_unreadable_widened_file_exits_one_naming_it(self):
+        result = run_script([
+            self.plan_path, "1", "--base", self.commit1,
+            "--widened", os.path.join(self.repo_dir, "missing.md")])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing.md", result.stderr)
+
+    def test_final_packet_carries_the_section(self):
+        import forge_git
+        d = tempfile.mkdtemp(prefix="final-widened-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(forge_git._final_packet(
+                ["spec.md"], "HEAD", "", d, widened=WIDENED_MD)) as f:
+            self.assertIn(WIDENED_MD, f.read())
