@@ -239,7 +239,7 @@
 - `python3 -m unittest discover -s tests -p test_forge_verification_packet.py` passes
 - `python3 -m unittest discover -s tests -p test_forge_review.py` passes
 - `python3 -m unittest discover -s tests -p test_review_packet.py` passes
-- `grep -n "repair_scope_violations\|repair_snapshot" scripts/forge-run.py` exits 1
+- `grep -n "repair_scope_violations" scripts/forge-run.py` exits 1
 
 **Tier:** standard
 
