@@ -825,7 +825,8 @@ ruling says. It freezes and resumes like every halt class (Halt resolution); it 
 `--resolve`.
 
 **Detection** runs after every worker turn — first attempt and every rework lap, task
-and final — through `forge_dispose.scope_widenings`, the one implementation, called
+and final, whether or not acceptance passed, and before an execution failure or a
+review is acted on, so a deletion halts even in a turn that also failed acceptance — through `forge_dispose.scope_widenings`, the one implementation, called
 in-process by the Codex runner and via the `forge_dispose.py widened` CLI on Claude
 (The shared decision helper).
 
@@ -845,6 +846,9 @@ both harnesses. The record is the worker's whole current set, rewritten each tur
   `path` that is not a current widening, a duplicate `path`, an empty `reason`, or a
   `serves` outside both sets is an **execution failure** naming the entry: the turn
   reworks under the rework loop's execution-failure rules and is never reviewed on it.
+- Accepted widenings (`accepted_widenings` in the convergence state, and `run.json`'s
+  `widenings`) survive a resume: a path accepted before a halt is not re-listed while
+  its content holds.
 
 **The packet.** Every review packet — discovery, verification, and the validation retry —
 lists the widenings due a ruling under `## Widened files`: each path as a JSON string,
@@ -1157,9 +1161,11 @@ the orchestrator's role there. Per task, in order:
 3. **Acceptance** — run each command clause and check its stated outcome (`pipeline`
    spec: Acceptance clause grammar); capture pass or fail and, on fail, the first
    failing clause's command for `--failed-acceptance`.
-3a. **Widenings** (Scope widening) — after every implementer turn: an out-of-scope
-   deletion halts `scope-delete` here, before any review; a record defect is the turn's
-   execution failure; otherwise the widenings due a ruling go into the reviewer's input.
+3a. **Widenings** (Scope widening) — after every implementer turn, whether or not
+   acceptance passed, and before the acceptance result is acted on: an out-of-scope
+   deletion halts `scope-delete` here, before any rework or review; a record defect is
+   the turn's execution failure; otherwise the widenings due a ruling go into the
+   reviewer's input.
 4. **Dispatch the reviewer** at the task's own tier with the review base (the prior
    commit), covering spec compliance and code quality together. On a rework re-review
    the prior attempt's findings — ids and summaries, which are small — ride in the

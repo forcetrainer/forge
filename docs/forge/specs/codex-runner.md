@@ -154,7 +154,8 @@ forge-run.py --status --run-dir DIR
    Acceptance clause grammar); prose clauses are never executed. Any clause whose command
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
-3a. Compute widenings with `forge_dispose.scope_widenings` (`execution` spec: Scope
+3a. On every worker turn, whether or not acceptance passed — before step 3's rework
+   or step 4's review is acted on — compute widenings with `forge_dispose.scope_widenings` (`execution` spec: Scope
    widening) against the record at `task-<N>/widenings.json` in the run dir, the path
    every worker brief names — after every worker turn: the cold attempt, each rework
    resume, and each final-review fixer turn (against `final/widenings.json`). An
@@ -329,7 +330,7 @@ setup.
   string, which readers accept as a one-element set.
 - Re-invocation skips tasks whose receipt status is `passed` and resumes at the
   escalated/incomplete task. Receipts, plan checkboxes, and `run.json`'s read-back
-  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `halt`) are the
+  fields (`deferrals`, `seeded_findings`, `unverified`, `approved`, `widenings`, `halt`) are the
   resume state.
 - The clean-tree precondition holds on resume too, **without exception**. Passed tasks
   are already committed and a halted task's attempt is frozen under a forge-owned ref
@@ -596,7 +597,10 @@ staleness is never an exit condition.
   turn; an out-of-scope deletion escalates `scope-delete` before any reviewer dispatch
   (exit 2, frozen); a defective record entry is a rework iteration naming the entry and
   is never reviewed; a trivial-tier widening reaches the close-out list without review;
-  receipts carry the `widenings` block and `run.json` aggregates accepted widenings.
+  receipts carry the `widenings` block and `run.json` aggregates accepted widenings;
+  an out-of-scope deletion in a turn whose acceptance failed still escalates
+  `scope-delete`; after a resume, a path accepted before the halt is not re-listed
+  while its content holds.
 - Manifests: JSON validity and version equality across both plugin manifests.
 - Worker isolation: each recorded `codex exec` argv carries the isolation args —
   task worker cold and resume, task reviewer cold and resume, final reviewer cold and
