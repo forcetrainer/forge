@@ -804,14 +804,21 @@ plan.
 | review | in scope |
 |---|---|
 | task N | task N's `**Files:**` paths (`pipeline` spec: Plan documents) |
-| final | every task's `**Files:**` paths, plus every path `git diff <run_base> HEAD` changes |
+| final | every task's `**Files:**` paths, plus every path `git diff <run_base> <checkpoint>` changes |
 
-Task work stays uncommitted until its review passes and the final fix lands as one
-commit on pass (Commit discipline), so `HEAD` at review time is the review's committed
-checkpoint on both rows.
+**The checkpoint** is the commit a worker turn starts from, recorded by the orchestrator
+before the dispatch and never read from `HEAD` afterwards: for task N its review base
+(the prior commit), for the final review the commit of the last passed task. Every
+`**Files:**` path is read from the plan **as committed at the checkpoint** (`git show
+<checkpoint>:<plan>`), so an edit to the plan's working copy, by a worker or anyone,
+never changes a scope. An orchestrator amendment to a running task's `**Files:**` is
+committed alone, and that task's checkpoint and review base move to the amendment
+commit.
 
-**A widening** is a path, existing at `HEAD`, that `HEAD` against the working tree
-modifies, outside scope. Never a widening:
+**A widening** is a path, existing at the checkpoint, that the checkpoint against the
+working tree modifies, outside scope. Comparing from the recorded checkpoint, not
+`HEAD`, is what keeps a worker's own commit from hiding its edit: a committed change is
+still in the checkpoint-to-working-tree diff. Never a widening:
 
 - a created path — a new file changes no existing code;
 - the plan file, and every spec file the plan declares (or the `--spec` file of a
@@ -819,8 +826,8 @@ modifies, outside scope. Never a widening:
 
 A rename is a delete plus an add.
 
-**Deletion halts.** A path existing at `HEAD`, outside scope and not exempt, that the
-working tree deletes halts `scope-delete`, naming every such path, whatever any record or
+**Deletion halts.** A path existing at the checkpoint, outside scope and not exempt,
+that the working tree deletes halts `scope-delete`, naming every such path, whatever any record or
 ruling says. It freezes and resumes like every halt class (Halt resolution); it takes no
 `--resolve`.
 
@@ -899,7 +906,7 @@ worker's `reason` and `serves`, the reviewer's `reason` — is listed at the clo
 gate beside the staged deferrals (Deferral handling). The list is informational: no
 per-entry call, nothing filed. An entry is listed only while its path is still a
 widening at the review's pass commit: `accepted` drops any `accepted_widenings` entry
-whose path no longer differs from `HEAD`, and `run.json` aggregates a review's accepted
+whose path no longer differs from the checkpoint, and `run.json` aggregates a review's accepted
 entries only from its passing receipt, never from an escalated one — so an edit later
 reverted, discarded at reconcile, or never replayed is never listed.
 
@@ -1098,6 +1105,7 @@ other cell.
 python3 forge_dispose.py \
   --verdict <verdict.json> \      # the reviewer's proposed verdict
   --base <sha> \                  # diff base: prior commit (per task) | run-start HEAD (final)
+  --checkpoint <sha> \            # the worker turn's recorded start commit (Scope widening): the review base per task, the last passed task's commit for final; required
   --state <state.json> \          # prior ConvergenceState (empty/absent on attempt 1)
   --attempt <N> \
   --acceptance-ok <true|false> \
@@ -1111,7 +1119,7 @@ python3 forge_dispose.py \
   [--widenings <record.json>]     # the worker's widening record; absent = no justifications
 ```
 
-`python3 forge_dispose.py widened --plan <plan> [--spec <spec>] --base <sha> --scope
+`python3 forge_dispose.py widened --plan <plan> [--spec <spec>] --base <sha> --checkpoint <sha> --scope
 <t<N>|final> [--state <state.json>] [--widenings <record.json>] [--format json|md]` prints
 the widenings due a ruling — JSON (`{"widened": [{"path", "reason", "serves"}],
 "deleted": ["path"], "record_defects": ["…"]}`) or the packet's `## Widened files`
@@ -1161,7 +1169,7 @@ usage error naming the flag, never ignored. A state file without
 `accepted_widenings` reads as `{}`. The verdict's `widenings` are checked against the
 widenings the helper recomputes (Reviewer verdict contract), never against a list the
 caller supplies. `accepted` lists every accepted widening so far in this review,
-rebuilt from `accepted_widenings`, with line counts from `HEAD` against the working
+rebuilt from `accepted_widenings`, with line counts from the checkpoint against the working
 tree.
 
 **Authority.** `forge_dispose` computes the diff it verifies against. The reviewer's own
@@ -1542,6 +1550,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI. A post-commit security review found both escapes.
 2026-11-04: Scope widening — a worker may modify an existing file outside its task's `**Files:**` (final review: outside every task's files and the committed run diff) when its record justifies the path; the reviewer rules `accepted` or `rejected` per path in a verdict `widenings` array; a rejection is a runner-raised fix finding the worker answers by reverting or re-justifying, and a widening rejected on two consecutive rulings halts `stuck`; accepted widenings are listed, informational, at close-out; inline lists them unarbitrated. Only an out-of-scope deletion halts, as `scope-delete`. Detection covers the first attempt as well as repairs. CLI: `--plan` and `--widenings`, the `widened` subcommand, decision.json `widenings`. `serves` may be null; detection runs on every worker turn before acceptance is acted on, and a git failure in it is a contract error; accepted widenings survive a resume; a trivial batch is checked against the union of its tasks' files. Five of five halts on the replaced repair-scope check in one lla-website session were approved, and four of them were on files the plan declared or the run had already written.
 2026-11-02: document review — `dependencies_read[].file` accepts `path`, `path:N` or `path:N-M`; `findings[].section` is one name from the packet's Section names list, copied verbatim, a finer location in `evidence`. 45 of 256 document-review verdicts were rejected, three quarters of the defects for a section, reference or file named not quite as listed.
 2026-11-02: every verifiable `in-diff` finding is fixed in-loop whatever its impact label; off the diff, impact still decides (cited contract-breaking: `in-run` seeds, `pre-existing` halts; else defer). A repair-scope check after every rework lap halts `repair-out-of-scope` when the repair modifies or deletes a file outside the pre-repair diff (created files exempt); CLI `--repair-snapshot`, decision.json `repair_out_of_scope`. Audit of 13 runs: 37 of 43 in-diff task-review defects were labeled `improvement`, fixed only by human override at close-out.

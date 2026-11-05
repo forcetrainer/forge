@@ -155,7 +155,9 @@ forge-run.py --status --run-dir DIR
    does not meet its stated outcome → rework iteration, whose finding names the first failing clause's command,
    stated outcome, exit code and output tail.
 3a. On every worker turn, whether or not acceptance passed — before step 3's rework
-   or step 4's review is acted on — compute widenings with `forge_dispose.scope_widenings` (`execution` spec: Scope
+   or step 4's review is acted on — compute widenings from the checkpoint recorded before
+   the worker dispatch (the task's start commit; for a final-review fixer turn, the commit of
+   the last passed task) with `forge_dispose.scope_widenings` (`execution` spec: Scope
    widening) against the record at `task-<N>/widenings.json` in the run dir, the path
    every worker brief names — after every worker turn: the cold attempt, each rework
    resume, and each final-review fixer turn (against `final/widenings.json`). An
@@ -684,6 +686,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-11-04: amended by [execution] — step 3a detects from the checkpoint recorded before each worker dispatch, never from `HEAD` read afterwards
 2026-11-04: amended by [execution] — the task loop computes widenings after every worker turn against the record each brief names (`task-<N>/widenings.json`, `final/widenings.json`), escalates `scope-delete` before review, and the review packet carries `## Widened files`; receipts carry the `widenings` block
 2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
 2026-10-05: a reviewer write is a `reviewer-wrote` escalation (exit 2, frozen), not a contract error; a fingerprint git failure stays a contract error (#127)
