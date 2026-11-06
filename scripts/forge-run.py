@@ -1000,6 +1000,29 @@ def _current_branch(cwd, what):
     return out.strip() if code == 0 else None
 
 
+def _carry_task_timing(prior_summary):
+    """``(first_started_at, active_secs)`` for a task a resumed invocation
+    starts again: the first start survives, and the prior invocation's closed
+    segment (``started_at``..``ended_at``) is added to the active time it
+    already carried. A segment with no ``ended_at`` (the process died
+    mid-task) has no known end and adds nothing."""
+    first = prior_summary.get("first_started_at") or prior_summary.get("started_at")
+    active = prior_summary.get("active_secs") or 0
+    start = _parse_utc_iso(prior_summary.get("started_at"))
+    end = _parse_utc_iso(prior_summary.get("ended_at"))
+    if start is not None and end is not None and end >= start:
+        active += int(end - start)
+    return first, active
+
+
+def _parse_utc_iso(value):
+    """Seconds since the epoch for a run.json ``...Z`` timestamp, or None."""
+    if not value:
+        return None
+    return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=datetime.timezone.utc).timestamp()
+
+
 def _record_checkpoint(cwd, plan_path=None):
     """The stage checkpoint (Scope widening, The checkpoint): ``HEAD`` — its
     commit sha and the branch it is attached to — recorded once per stage per
@@ -3172,6 +3195,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             "commit": None,
             "started_at": None,
             "ended_at": None,
+            "first_started_at": None,
+            "active_secs": 0,
         }
         for t in order
     ]
@@ -3257,6 +3282,8 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 "commit": prior_commits.get(task.number),
                 "started_at": prior_summary.get("started_at"),
                 "ended_at": prior_summary.get("ended_at"),
+                "first_started_at": prior_summary.get("first_started_at"),
+                "active_secs": prior_summary.get("active_secs") or 0,
             })
             continue
 
@@ -3266,7 +3293,11 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
         # Mark the task `running` with its start time so the monitor lights the row
         # and shows live per-task elapsed (its summary is otherwise `queued` until
         # it completes).
-        summary.update({"status": "running", "started_at": task_started})
+        first_started, active_secs = _carry_task_timing(
+            prior_tasks.get(task.number, {}))
+        summary.update({"status": "running", "started_at": task_started,
+                        "first_started_at": first_started or task_started,
+                        "active_secs": active_secs})
         write_run_json(run_dir, plan_path, spec_paths, "running", task_summaries,
                        run_base, started_at=run_started, pid=run_pid, threads=threads,
                        seeded_findings=seeded_findings or None, halt=halt_state,

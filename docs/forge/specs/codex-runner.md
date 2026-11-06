@@ -299,7 +299,9 @@ setup.
   "tasks": [
     { "number": 1, "title": "...", "tier": "standard", "status": "passed",
       "attempts": 1, "commit": "abc1234",
-      "started_at": "...", "ended_at": "..." }
+      "started_at": "...", "ended_at": "...",   // this invocation's segment
+      "first_started_at": "...",                 // first start; survives a resume
+      "active_secs": 300 }                       // closed segments before this one
   ]
 }
 ```
@@ -527,7 +529,12 @@ Layout — two panels plus a terminal-state banner:
 Rendering contract:
 
 - Panels `box.SQUARE` hairline; a table for the ledger with right-aligned tabular
-  elapsed. Row columns `glyph · number · title · tier · phase · elapsed`; title
+  elapsed. Row columns `glyph · number · title · tier · phase · elapsed`. A task's
+  elapsed is its active time — `active_secs` plus the current segment, ending at
+  `ended_at` or now — so a halt stops it and a resume continues it rather than
+  restarting; a task resumed after a halt adds the wall-clock span since
+  `first_started_at` in parentheses (`7:00 (60:00)`). A resumed invocation adds the
+  prior segment to `active_secs`; a segment with no `ended_at` adds nothing. Title
   `no_wrap`, `overflow="ellipsis"`, sensible min width on resize.
 - Palette (truecolor): fg `#d3dae2`, dim `#66717f`, edge `#212a34`, accent/running
   `#5ad0df`, passed `#59c26b`, queued `#3e4753`, halt `#f2683f`. Semantic fills are
@@ -702,6 +709,7 @@ staleness is never an exit condition.
 
 ## Changelog
 
+2026-11-05: a task's monitor elapsed is active time carried across resumes (`active_secs`, `first_started_at` on each run.json task), with the wall-clock span since its first start beside it once resumed.
 2026-11-04: amended by [execution] — step 3a detects from the stage's checkpoint, `HEAD` recorded once per stage per invocation before its first worker dispatch and held across rework laps
 2026-11-04: amended by [execution] — the task loop computes widenings after every worker turn against the record each brief names (`task-<N>/widenings.json`, `final/widenings.json`), escalates `scope-delete` before review, and the review packet carries `## Widened files`; receipts carry the `widenings` block
 2026-10-05: `--resolve` names a finding's review-scoped identity (`t<N>:<id>` / `final:<id>`), a bare id only when unambiguous (#128)
