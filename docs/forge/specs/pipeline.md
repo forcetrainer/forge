@@ -39,17 +39,20 @@ graduates to a build; free-form ideation stays unprocessed.
 
 ## Brainstorming flow contracts
 
-- Clarify step: batch 2–3 independent questions per turn, multiple choice preferred;
-  single-question only when the answer forks the design.
-- Design presentation: sections scaled to their complexity, a check-in after each with
-  a decision digest — what was chosen, what it forecloses, what is assumed.
+- Input is unconstrained: conversation, pasted documents, answers to questions. The
+  author works the material toward the conditions (Spec authoring, below) and asks the
+  user only where a condition is unmet and reading the code cannot meet it — each such
+  question carries a proposed default.
+- Design presentation: one decision digest — what was chosen, what it forecloses, what
+  is assumed — approved once. Sections with a check-in after each replace the single
+  digest when the design spans several specs or is too large to judge in one read, or
+  when the user asks. Nothing is written to a spec before the approval.
 - Self-review of the spec is fixed inline, no re-review. Self-review is **not** the
   gate — an author checking their own document is the control Spec review replaces.
 - Spec review (below) runs after self-review and before close-out. Planning does not
   begin until it passes.
 - Close-out is a message, not a gate: "spec written to `<path>` and committed — flag
-  changes, otherwise proceeding to planning." The sectioned walkthrough was the
-  approval gate.
+  changes, otherwise proceeding to planning." The digest approval was the gate.
 
 ## Spec documents
 
@@ -72,6 +75,49 @@ superseding document (constraint: `specs-amend-in-place`). `skills/brainstorming
 instructs amendment in place and the `<system>.md` form for a genuinely new system;
 `skills/planning/SKILL.md` and `skills/project-memory/SKILL.md` follow where they name
 spec paths. This convention binds every repo running forge, not only this one.
+
+### Spec authoring
+
+Applies wherever Spec review applies: a new spec, and an amendment written ahead of a
+build. A gear 2 change, whose spec is amended after execution, is outside it.
+
+**Conditions.** A spec is ready for review when six conditions hold: **Grounded**,
+**Consistent**, **Testable**, **Decided**, **Bounded**, **Complete**. They are stated
+once, in `skills/brainstorming/design-anti-patterns.md`; the author is held to the same
+file the reviewer loads. A condition is evaluative, not a list of items: each names what
+must hold and what shows that it holds, and work on it stops when that showing exists.
+Complete is the one condition that rests on judgment — where the author judges a
+requirement incomplete, it asks the user.
+
+**Scouts.** Where the design depends on existing code, the author reads it before
+designing against it: one read-only scout per depended-on area, each returning facts
+with file and line. The number of scouts is the number of areas the design depends on.
+
+**Dependency record.** The author writes down the existing code the design relies on —
+per entry the symbol, the file, and what it does including side effects — as a JSON file
+beside the spec, never in it (Spec style: no restated codebase context) and never
+committed, since its line references age with the code:
+
+```
+{"dependencies": [{"symbol", "file", "behavior"}], "waiver": "<reason>" | null}
+```
+
+`file` takes the forms `dependencies_read[].file` takes (`execution` spec: Document
+review contract). An empty `dependencies` is legal only with a non-null `waiver`. The
+record is an input to Spec review, below.
+
+**Checker.** A separate agent — never the author — tests the material against the
+conditions and returns only the conditions that are unmet, each with evidence. It is
+given the material, the dependency record and the conditions file, and it reads the
+code. It runs **at least once, in the foreground, before the design is presented for
+approval**, on both harnesses; it may also run in the background as material
+accumulates, where the harness supports it. An unmet condition that is a fact about the
+code sends the author to read; one that is a judgment becomes a question to the user.
+The checker is not the gate: Spec review is, and its reviewer is cold.
+
+**Not constrained.** A behaviour the user deliberately leaves to the implementer is
+stated where it lives, as `<behaviour>: not constrained`. It is a decision the spec
+records, not a requirement: plan review owes it no coverage, and no reviewer reopens it.
 
 ### Spec review
 
@@ -101,20 +147,41 @@ its exact text has unambiguous ends. A finding's `section` is copied from that l
 verbatim (schema: `execution` spec, Document review contract). This is what makes the mechanical half enforced
 rather than advisory: no claim the spec makes about the codebase can go unexamined.
 
-**Hunting list.** The reviewer's guidance is `skills/brainstorming/design-anti-patterns.md`,
+**Dependency record** (mechanical). The packet is built with the author's record
+(Spec authoring, above) and cannot be built without one. The record is validated before
+the packet is built — each `file` tracked, each `symbol` present in it — and a defect is
+the author's, like a lint defect: fix the record and regenerate. The packet carries the
+record as its own section. The reviewer **validates** it against the code: every record
+entry is covered by an entry of the verdict's `dependencies_read` (schema: `execution`
+spec), stated from the reviewer's own reading. A record entry the code contradicts, and
+a dependency the design relies on that the record omits, are `groundedness` findings.
+
+**Hunting list.** The reviewer's guidance is the conditions file, `skills/brainstorming/design-anti-patterns.md`,
 loaded by the `@design-anti-patterns.md` on-demand reference form, never inlined. The
 packet names it by its absolute path under the plugin root: the reviewer runs in the repo
 under review, where a plugin-relative path names nothing.
 **To change what the reviewer looks for, change that file.** It is the single tuning
 surface; no other file restates a Gate. Entries use the Trigger / Gate / Instead format
-of `testing-anti-patterns.md`. An entry enters on **two independent observations** — one
-incident does not mint a permanent rule. An entry backed by a required verdict field is
+of `testing-anti-patterns.md`; each also states what shows the condition holds and the
+finding `kind` its failures are filed under. An entry enters on **two independent
+observations** — one incident does not mint a permanent rule. An entry backed by a required verdict field is
 marked as such: deleting a marked entry does not remove the field, and the two are
 checked to agree.
 
-**The author's requirements are stated separately** (Spec style, below) and are not the
-reviewer's hunting list. A reviewer hunting the author's checklist re-performs a presence
-check against a document written to satisfy it — the failure this gate exists to replace.
+**The reviewer checks against the code, never against the author's work.** Author and
+reviewer share the conditions; they do not share evidence. A record entry is a claim the
+reviewer opens the code to confirm or refute — a reviewer that accepts a claim because a
+citation is present re-performs a presence check against a document written to satisfy
+it, the failure this gate exists to replace.
+
+**Bounds.** A finding is a failed condition, never a preferred design: the reviewer
+judges whether the spec's own design holds, and does not propose another. A
+`sufficiency` finding carries a `demonstration` — the concrete case that shows the
+condition failed, such as two reasonable implementations of the spec that differ in a
+way the user would care about, a decision the implementer would be forced to make that
+is the user's, or an implementation that meets a criterion and is still wrong. An
+unmentioned edge with no such case is not a finding. A behaviour the spec states as not
+constrained is closed.
 
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
 re-review after an amendment is a verification lap and may resume.
@@ -609,6 +676,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed. Until now grounding was required of the reviewer alone: in one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and a fresh reviewer could raise a further unstated edge every round.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)

@@ -584,12 +584,23 @@ One JSON object:
  "replaced_system": {"applies": true|false, "guarantees": [...]},
  "findings": [{"id", "summary", "kind": "groundedness"|"sufficiency"|"contradiction",
                "section", "evidence", "citation": "<file>:<line>"|null,
-               "proposed_amendment"}]}
+               "demonstration": "<case>"|null, "proposed_amendment"}]}
 ```
+
+Both modes of `forge_docreview.py --spec` take the author's dependency record
+(`pipeline` spec: Spec authoring) as `--record <path>`: building the packet, and
+validating a verdict. Without it the command is a contract error. A record that is not
+the stated JSON object, or that has an empty `dependencies` and a null `waiver`, an
+entry missing a field, a `file` that is not tracked, or a `symbol` absent from its
+`file`, is a contract error naming the entry and the cause; no packet is built.
 
 - `references` — one entry per **unresolved** reference in the packet's table. A missing
   entry, or one naming a ref not in the table, invalidates the verdict.
-- `dependencies_read` — the functions the design depends on and what they actually do.
+- `dependencies_read` — the functions the design depends on and what they actually do,
+  from the reviewer's own reading. It **covers the record**: every record entry has an
+  entry here with the same `symbol` and the same `file` path, any line suffix aside. A
+  record entry left uncovered invalidates the verdict. Entries beyond the record are
+  legal — they are how the reviewer names a dependency the record omits.
   Empty is legal only with a non-null `dependencies_waiver`. `file` is a tracked path,
   optionally with a 1-based line or line range: `path`, `path:N` or `path:N-M`. Any other
   form is the path as written and must be tracked, so a malformed suffix fails as an
@@ -597,6 +608,10 @@ One JSON object:
 - `findings[].section` — exactly one name from the packet's Section names list, copied
   verbatim. A finer location goes in `evidence`; a finding about two sections is two
   findings.
+- `findings[].demonstration` — required, non-blank, on a `sufficiency` finding: the
+  concrete case that shows the condition failed (`pipeline` spec: Spec review, Bounds).
+  On the other kinds it is optional. Its presence is checked; whether the case is
+  convincing is the user's judgment when the finding surfaces.
 - `replaced_system` — `applies: false` requires no `guarantees`; `applies: true` requires
   a non-empty list. This is the field behind "what does the old path re-derive that the
   new one computes once".
@@ -607,8 +622,10 @@ One JSON object:
 **`kind` drives disposition, and `groundedness` is guarded.** A `groundedness` finding
 **requires** a `citation`, and the citation is validated — the file exists and the line is
 within it. Absent or unresolvable, the finding **downgrades to `sufficiency`** and
-surfaces rather than auto-applying. A reviewer cannot route a design opinion into the
-auto-amend path by labelling it a fact.
+surfaces rather than auto-applying, carrying `original_kind: "groundedness"` in the
+disposition output so the reviewer's label survives. A downgraded finding owes no
+`demonstration`. A reviewer cannot route a design opinion into the auto-amend path by
+labelling it a fact.
 
 **Disposition:**
 
@@ -650,6 +667,8 @@ One JSON object:
 - `covered_by` — promise ids copied verbatim from the packet's promise table: `g<N>`,
   `t<N>.t<M>`, `t<N>.a<M>`, `t<N>.c<M>`. An id not in the table invalidates the verdict;
   a near-miss is a defect, never normalized (`parsers-fail-loud`).
+- A behaviour the spec states as not constrained (`pipeline` spec: Spec authoring) is not
+  a requirement and is not listed.
 - `na` — non-null marks a requirement the plan deliberately does not build. It requires
   a non-empty reason and an empty `covered_by`, and takes no finding.
 - A requirement with an empty `covered_by` and a null `na` is **uncovered**: it requires
@@ -1626,6 +1645,7 @@ Any cost claim requires measurement against a comparable run.
 
 ## Changelog
 
+2026-11-10: amended by [pipeline] — document review takes the author's dependency record (`--record`, required in both modes, validated before the packet is built); the verdict's `dependencies_read` covers every record entry; a `sufficiency` finding carries a `demonstration`; plan-review coverage lists no behaviour a spec states as not constrained; a downgraded `groundedness` finding keeps its original kind in the disposition output. The reviewer validates the author's stated dependencies against the code and a completeness gap has to be shown, where before the reviewer alone established the dependencies and any unstated edge was a finding.
 2026-11-05: Heartbeat and stalls (Claude) — agents never end a turn with a command still running and wait on long ones with a re-issued foreground loop; workers and reviewers append to a per-task progress file; the orchestrator prints a status line on a 10-minute `Monitor` tick and nudges an agent idle without its report (#146).
 2026-11-05: regression (rule 3) halts on acceptance going green→red or a resolved widening rejected again; a reviewer finding whose identity matches a resolved one is an ordinary fix finding. Reviewers never prove the repository unchanged — the orchestrator's fingerprint does, and gitignored paths such as `.forge/` run logs are out of scope. Standard- and complex-tier workers run the test files their change touches; the orchestrator alone runs acceptance (#144, #149, #147).
 2026-11-04: Scope widening detects from a recorded checkpoint, not `HEAD`, and reads `**Files:**` from the plan as committed at the checkpoint — a worker's commit cannot hide an out-of-scope edit and a worker's plan edit cannot widen its own scope; `--checkpoint` on the `widened` subcommand and the decision CLI; `**Spec files:**` and the citable set are read at the checkpoint too, an in-repo plan absent at the checkpoint is a contract error before any worker runs, and an out-of-repo plan is read as given and recorded as unprotected. A post-commit security review found both escapes.
