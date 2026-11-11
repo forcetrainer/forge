@@ -249,13 +249,13 @@ class ValidateVerdictTests(unittest.TestCase):
     def test_missing_top_level_verdict_key_is_invalid(self):
         verdict = _valid_verdict()
         del verdict["verdict"]
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("verdict" in defect for defect in result.defects))
 
     def test_verdict_value_outside_enum_is_invalid(self):
         verdict = _valid_verdict(verdict="banana")
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("banana" in defect for defect in result.defects))
 
@@ -264,19 +264,19 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa",
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("pass" in defect and "findings" in defect for defect in result.defects))
 
     def test_verdict_findings_with_no_findings_is_invalid(self):
         verdict = _valid_verdict(verdict="findings", findings=[])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("findings" in defect for defect in result.defects))
 
     def test_missing_references_entry_for_unresolved_ref_is_invalid(self):
         verdict = _valid_verdict(references=[])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("a/b.py" in defect for defect in result.defects))
 
@@ -285,7 +285,7 @@ class ValidateVerdictTests(unittest.TestCase):
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "e"},
             {"ref": "c/d.py", "disposition": "intended-new", "evidence": "e"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("c/d.py" in defect for defect in result.defects))
 
@@ -293,75 +293,75 @@ class ValidateVerdictTests(unittest.TestCase):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "bogus", "evidence": "e"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_empty_dependencies_read_with_no_waiver_is_invalid(self):
         verdict = _valid_verdict(dependencies_read=[], dependencies_waiver=None)
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_empty_dependencies_read_with_waiver_is_valid(self):
         verdict = _valid_verdict(dependencies_read=[], dependencies_waiver="nothing to read")
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid)
 
     def test_replaced_system_applies_false_with_guarantees_is_invalid(self):
         verdict = _valid_verdict(replaced_system={"applies": False, "guarantees": ["x"]})
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_replaced_system_applies_true_with_empty_guarantees_is_invalid(self):
         verdict = _valid_verdict(replaced_system={"applies": True, "guarantees": []})
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_missing_replaced_system_is_invalid(self):
         verdict = _valid_verdict()
         del verdict["replaced_system"]
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_present_without_applies_key_is_invalid(self):
         verdict = _valid_verdict(replaced_system={"guarantees": []})
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_applies_non_boolean_is_invalid(self):
         verdict = _valid_verdict(replaced_system={"applies": "yes", "guarantees": []})
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_string_is_invalid_not_raised(self):
         verdict = _valid_verdict(replaced_system="nope")
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_int_is_invalid_not_raised(self):
         verdict = _valid_verdict(replaced_system=7)
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_bool_is_invalid_not_raised(self):
         verdict = _valid_verdict(replaced_system=True)
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_empty_list_is_invalid_not_raised(self):
         verdict = _valid_verdict(replaced_system=[])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
     def test_replaced_system_none_is_still_invalid(self):
         verdict = _valid_verdict(replaced_system=None)
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("replaced_system" in defect for defect in result.defects))
 
@@ -370,7 +370,7 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa", "citation": 42,
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             "citation" in defect and "f1" in defect for defect in result.defects
@@ -381,7 +381,7 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa", "citation": True,
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             "citation" in defect and "f1" in defect for defect in result.defects
@@ -392,7 +392,7 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa", "citation": None,
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid)
 
     def test_finding_citation_absent_is_still_legal(self):
@@ -400,14 +400,14 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "groundedness", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa",
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid)
 
     def test_references_entry_missing_evidence_key_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("a/b.py" in defect for defect in result.defects))
 
@@ -415,7 +415,7 @@ class ValidateVerdictTests(unittest.TestCase):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": ""},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("a/b.py" in defect for defect in result.defects))
 
@@ -423,7 +423,7 @@ class ValidateVerdictTests(unittest.TestCase):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "   "},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("a/b.py" in defect for defect in result.defects))
 
@@ -431,7 +431,7 @@ class ValidateVerdictTests(unittest.TestCase):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "not yet built"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid)
 
     def test_whitespace_only_finding_field_is_invalid(self):
@@ -439,26 +439,26 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "   ", "kind": "sufficiency", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa",
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_dependencies_read_entry_with_blank_fields_is_invalid(self):
         verdict = _valid_verdict(dependencies_read=[
             {"symbol": "", "file": "  ", "behavior": ""},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_dependencies_read_entry_entirely_empty_is_invalid(self):
         verdict = _valid_verdict(dependencies_read=[{}])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_defect_names_both_field_and_entry(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         matches = [
             defect for defect in result.defects
@@ -479,7 +479,7 @@ class ValidateVerdictTests(unittest.TestCase):
             patched_schema["references"]["fields"] + ("reviewed_by",)
         )
         with mock.patch.object(d, "_REQUIRED_FIELDS_SCHEMA", patched_schema):
-            result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+            result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("reviewed_by" in defect for defect in result.defects))
 
@@ -487,35 +487,35 @@ class ValidateVerdictTests(unittest.TestCase):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "​"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_byte_order_mark_evidence_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "﻿"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_word_joiner_evidence_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "⁠"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_nul_evidence_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "\x00"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_other_control_character_evidence_is_invalid(self):
         verdict = _valid_verdict(references=[
             {"ref": "a/b.py", "disposition": "intended-new", "evidence": "\x01"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_evidence_with_embedded_newline_and_tab_is_still_valid(self):
@@ -525,30 +525,30 @@ class ValidateVerdictTests(unittest.TestCase):
                 "evidence": "line one\n\tline two",
             },
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid)
 
     def test_non_list_references_is_invalid_not_raised(self):
         verdict = _valid_verdict(references="nope")
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("references" in defect for defect in result.defects))
 
     def test_dict_where_references_list_belongs_is_invalid_not_raised(self):
         verdict = _valid_verdict(references={"ref": "x"})
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("references" in defect for defect in result.defects))
 
     def test_non_dict_element_in_references_is_invalid_not_raised(self):
         verdict = _valid_verdict(references=["not-a-dict"])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("references[0]" in defect for defect in result.defects))
 
     def test_null_element_in_references_is_invalid_not_raised(self):
         verdict = _valid_verdict(references=[None])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any("references[0]" in defect for defect in result.defects))
 
@@ -559,7 +559,7 @@ class ValidateVerdictTests(unittest.TestCase):
             dependencies_waiver=None,
             replaced_system={"applies": True, "guarantees": []},
         )
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         # the malformed references[0] entry, the still-unresolved a/b.py
         # (references[0] wasn't a usable entry so it can't cover it),
@@ -572,7 +572,7 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
             "evidence": "e",
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_unknown_finding_kind_is_invalid(self):
@@ -580,7 +580,7 @@ class ValidateVerdictTests(unittest.TestCase):
             "id": "f1", "summary": "s", "kind": "bogus", "section": "sec",
             "evidence": "e", "proposed_amendment": "pa",
         }])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
     def test_every_defect_in_one_verdict_reported_in_single_pass(self):
@@ -594,7 +594,7 @@ class ValidateVerdictTests(unittest.TestCase):
                 "evidence": "e",
             }],
         )
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         # missing references + empty deps/no waiver + replaced_system + kind +
         # missing proposed_amendment: at least 5 independent defects, not just one.
@@ -1164,7 +1164,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
             {"symbol": "REPO_ROOT", "file": "scripts/does_not_exist_at_all.py",
              "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             "does_not_exist_at_all.py" in defect and "not a tracked file" in defect
@@ -1179,7 +1179,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
             {"symbol": "REPO_ROOT", "file": "scripts/__task6_untracked_dep_test__.py",
              "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             "__task6_untracked_dep_test__.py" in defect and "not a tracked file" in defect
@@ -1190,7 +1190,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(dependencies_read=[
             {"symbol": NO_SUCH_SYMBOL, "file": "scripts/forge_common.py", "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             NO_SUCH_SYMBOL in defect and "scripts/forge_common.py" in defect
@@ -1201,14 +1201,14 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(dependencies_read=[
             {"symbol": "REPO_ROOT", "file": "scripts/forge_common.py", "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertTrue(result.valid, result.defects)
 
     def _deps_result(self, file_val, symbol="REPO_ROOT"):
         verdict = _valid_verdict(dependencies_read=[
             {"symbol": symbol, "file": file_val, "behavior": "x"},
         ])
-        return d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        return d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
 
     def test_file_with_a_line_suffix_is_valid(self):
         result = self._deps_result("scripts/forge_common.py:12")
@@ -1245,7 +1245,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(dependencies_read=[
             {"symbol": "REPO", "file": "scripts/forge_common.py", "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
         self.assertTrue(any(
             "REPO" in defect and "scripts/forge_common.py" in defect
@@ -1268,7 +1268,7 @@ class DependenciesReadStructuralTests(unittest.TestCase):
             {"symbol": "reticulate_splines", "file": "scripts/does_not_exist.py",
              "behavior": "x"},
         ])
-        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS)
+        result = d.validate_verdict(verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, [])
         self.assertFalse(result.valid)
 
 
@@ -1284,7 +1284,7 @@ class FindingsSectionStructuralTests(unittest.TestCase):
             "proposed_amendment": "pa",
         }])
         result = d.validate_verdict(
-            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"]
+            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
         )
         self.assertFalse(result.valid)
         self.assertTrue(any(
@@ -1295,10 +1295,10 @@ class FindingsSectionStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(findings=[{
             "id": "f1", "summary": "s", "kind": "sufficiency",
             "section": "Spec review", "evidence": "e",
-            "proposed_amendment": "pa",
+            "demonstration": "d", "proposed_amendment": "pa",
         }])
         result = d.validate_verdict(
-            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"]
+            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
         )
         self.assertTrue(result.valid, result.defects)
 
@@ -1306,10 +1306,10 @@ class FindingsSectionStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(findings=[{
             "id": "f1", "summary": "s", "kind": "sufficiency",
             "section": "spec rev", "evidence": "e",
-            "proposed_amendment": "pa",
+            "demonstration": "d", "proposed_amendment": "pa",
         }])
         result = d.validate_verdict(
-            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"]
+            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
         )
         self.assertTrue(result.valid, result.defects)
 
@@ -1321,7 +1321,7 @@ class FindingsSectionStructuralTests(unittest.TestCase):
         }])
         result = d.validate_verdict(
             verdict, ["a/b.py"], str(REPO_ROOT),
-            ["Structural verification", "Structural notes"],
+            ["Structural verification", "Structural notes"], [],
         )
         self.assertFalse(result.valid)
         self.assertTrue(any(
@@ -1434,7 +1434,7 @@ class StructuralAndRequiredFieldDefectsTogetherTests(unittest.TestCase):
             }],
         )
         result = d.validate_verdict(
-            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"]
+            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
         )
         self.assertFalse(result.valid)
         # missing references entry (required-field-ish coverage check) + the
@@ -1459,11 +1459,12 @@ class StructuralAndRequiredFieldDefectsTogetherTests(unittest.TestCase):
                 "id": "f1", "summary": "an unverifiable summary",
                 "kind": "sufficiency", "section": "Spec review",
                 "evidence": "an unverifiable claim of evidence",
+                "demonstration": "an unverifiable case",
                 "proposed_amendment": "an unverifiable amendment",
             }],
         )
         result = d.validate_verdict(
-            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"]
+            verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
         )
         self.assertTrue(result.valid, result.defects)
 
@@ -2054,3 +2055,146 @@ class DependencyRecordTests(TempGitRepoMixin, unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("disagrees with filename stem", proc.stderr)
         self.assertFalse(os.path.exists(self.out))
+
+
+# --- Task 3: record coverage, demonstration, downgrade kind ------------------
+
+_RECORD_ENTRY = {
+    "symbol": "REPO_ROOT", "file": "scripts/forge_common.py",
+    "behavior": "the repo root path",
+}
+
+
+def _validate_with_record(verdict, record):
+    return d.validate_verdict(
+        verdict, ["a/b.py"], str(REPO_ROOT), DEFAULT_SPEC_SECTIONS, record)
+
+
+def _suff_finding(**over):
+    f = {
+        "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
+        "evidence": "e", "citation": None, "demonstration": "the case",
+        "proposed_amendment": "pa",
+    }
+    f.update(over)
+    return f
+
+
+class VerdictRecordCoverageTests(unittest.TestCase):
+    def test_verdict_covering_every_record_entry_is_valid(self):
+        result = _validate_with_record(_valid_verdict(), [dict(_RECORD_ENTRY)])
+        self.assertTrue(result.valid, result.defects)
+
+    def test_verdict_missing_a_record_entry_is_invalid_naming_it(self):
+        record = [dict(_RECORD_ENTRY),
+                  {"symbol": "uncoveredSym", "file": "scripts/forge_lint.py",
+                   "behavior": "b"}]
+        result = _validate_with_record(_valid_verdict(), record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(
+            "uncoveredSym" in defect and "scripts/forge_lint.py" in defect
+            for defect in result.defects), result.defects)
+
+    def test_record_entry_covered_by_same_file_with_different_line_suffix(self):
+        record = [dict(_RECORD_ENTRY, file="scripts/forge_common.py:3-9")]
+        verdict = _valid_verdict(dependencies_read=[
+            dict(_REAL_DEPENDENCY, file="scripts/forge_common.py:40")])
+        result = _validate_with_record(verdict, record)
+        self.assertTrue(result.valid, result.defects)
+
+    def test_record_entry_not_covered_by_same_symbol_in_other_file(self):
+        verdict = _valid_verdict(dependencies_read=[
+            dict(_REAL_DEPENDENCY, file="scripts/forge_docreview.py")])
+        result = _validate_with_record(verdict, [dict(_RECORD_ENTRY)])
+        # the entry may fail its own structural check too; the coverage
+        # defect is the one under test
+        self.assertFalse(result.valid)
+        self.assertTrue(any(
+            "record" in defect and "REPO_ROOT" in defect
+            for defect in result.defects), result.defects)
+
+    def test_dependencies_read_beyond_the_record_are_accepted(self):
+        verdict = _valid_verdict(dependencies_read=[
+            dict(_REAL_DEPENDENCY),
+            {"symbol": "main", "file": "scripts/forge_docreview.py",
+             "behavior": "the CLI"}])
+        result = _validate_with_record(verdict, [dict(_RECORD_ENTRY)])
+        self.assertTrue(result.valid, result.defects)
+
+    def test_empty_record_with_empty_dependencies_read_needs_waiver(self):
+        record = _empty_record()
+        verdict = _valid_verdict(dependencies_read=[], dependencies_waiver=None)
+        result = _validate_with_record(verdict, record)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("dependencies_waiver" in x for x in result.defects))
+        verdict = _valid_verdict(
+            dependencies_read=[], dependencies_waiver="reads no code")
+        result = _validate_with_record(verdict, record)
+        self.assertTrue(result.valid, result.defects)
+
+
+class DemonstrationTests(unittest.TestCase):
+    def _check(self, finding):
+        return _validate_with_record(_valid_verdict(findings=[finding]), [])
+
+    def test_sufficiency_without_demonstration_is_invalid_naming_finding(self):
+        f = _suff_finding(id="fSuff")
+        del f["demonstration"]
+        result = self._check(f)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("fSuff" in x and "demonstration" in x
+                            for x in result.defects), result.defects)
+
+    def test_sufficiency_with_null_or_blank_demonstration_is_invalid(self):
+        for value in (None, "", "   "):
+            result = self._check(_suff_finding(id="fSuff", demonstration=value))
+            self.assertFalse(result.valid, value)
+            self.assertTrue(any("fSuff" in x and "demonstration" in x
+                                for x in result.defects), result.defects)
+
+    def test_sufficiency_with_demonstration_is_valid(self):
+        result = self._check(_suff_finding())
+        self.assertTrue(result.valid, result.defects)
+
+    def test_groundedness_and_contradiction_need_no_demonstration(self):
+        for kind in ("groundedness", "contradiction"):
+            f = _suff_finding(kind=kind, citation="scripts/forge_common.py:1")
+            del f["demonstration"]
+            result = self._check(f)
+            self.assertTrue(result.valid, (kind, result.defects))
+
+    def test_downgraded_groundedness_validates_and_surfaces_with_original_kind(self):
+        f = _suff_finding(kind="groundedness", citation=None)
+        del f["demonstration"]
+        result = self._check(f)
+        self.assertTrue(result.valid, result.defects)
+        disp = d.dispose(result.findings, str(REPO_ROOT))
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.surface[0]["kind"], "sufficiency")
+        self.assertEqual(disp.surface[0]["original_kind"], "groundedness")
+
+    def test_emitted_sufficiency_carries_no_original_kind(self):
+        disp = d.dispose([_suff_finding()], str(REPO_ROOT))
+        self.assertEqual(len(disp.surface), 1)
+        self.assertNotIn("original_kind", disp.surface[0])
+
+
+class RequiredFieldsPacketTextTests(unittest.TestCase):
+    def test_required_fields_section_names_demonstration_and_coverage_rule(self):
+        text = d._required_verdict_fields_text()
+        self.assertIn("demonstration", text)
+        self.assertIn("record", text)
+        self.assertIn("must cover the dependency record", text)
+
+
+class MalformedDependencyEntryTests(unittest.TestCase):
+    def test_unhashable_symbol_or_file_yields_defects_never_raises(self):
+        for entry in (
+            {"symbol": 5, "file": ["x"], "behavior": "b"},
+            {"symbol": {"a": 1}, "file": {"b": 2}, "behavior": "b"},
+            {"symbol": ["s"], "file": "scripts/forge_common.py", "behavior": "b"},
+        ):
+            verdict = _valid_verdict(dependencies_read=[entry])
+            result = _validate_with_record(verdict, [dict(_RECORD_ENTRY)])
+            self.assertFalse(result.valid)
+            self.assertTrue(any("dependencies_read" in x for x in result.defects))

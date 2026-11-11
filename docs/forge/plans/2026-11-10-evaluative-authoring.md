@@ -101,7 +101,7 @@
 **Depends on:** Task 1
 
 ### Task 3: The verdict covers the record, demonstrates sufficiency, and keeps a downgraded kind
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_docreview.py` (`validate_verdict`, `dispose`, required-fields packet text)
