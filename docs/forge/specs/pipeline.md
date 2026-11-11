@@ -114,6 +114,12 @@ approval**, on both harnesses; it may also run in the background as material
 accumulates, where the harness supports it. An unmet condition that is a fact about the
 code sends the author to read; one that is a judgment becomes a question to the user.
 The checker is not the gate: Spec review is, and its reviewer is cold.
+It starts as the spec reviewer starts (Spec review: Starting the reviewer): on Claude a
+spawned agent at the standard tier; on Codex the one `codex exec` command given under
+Document reviews on Codex, with the checker's material in place of the review packet.
+**If the checker cannot be started, the session stops and tells the user.** It never
+substitutes the author's own check, never retries with a different model, and never
+presents the design for approval without the run.
 
 **Not constrained.** A behaviour the user deliberately leaves to the implementer is
 stated where it lives, as `<behaviour>: not constrained`. It is a decision the spec
@@ -676,7 +682,7 @@ and a session restart to apply.
 
 ## Changelog
 
-2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed. Until now grounding was required of the reviewer alone: in one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and a fresh reviewer could raise a further unstated edge every round.
+2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker starts as the spec reviewer starts and a checker that cannot start stops the session; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed. In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
