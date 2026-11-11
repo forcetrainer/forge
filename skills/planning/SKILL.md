@@ -13,6 +13,8 @@ Plan prose is agent-consumed, not narrative: apply the brainstorming skill's sen
 
 **Save to:** `docs/forge/plans/YYYY-MM-DD-<feature>.md` and commit. (User/project preferences for plan location override this default.)
 
+**Carried cases:** when brainstorming hands off a carried-cases file (plan-scale spec review findings), each case becomes a `**Tests:**` case of the task that builds that behaviour, or is dropped with a one-line reason stated in the execution offer. They are never amended into the spec at planning.
+
 **Before writing:** constraints (`docs/forge/constraints.md`) are supplied at session start — the plan must not contradict any of them; surface conflicts to the user. Code in the plan follows the same contract rule as specs: signatures, schemas, and wire formats are decisions and belong; bodies, test code, and boilerplate are solutions and don't.
 
 ## Scope
