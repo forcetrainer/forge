@@ -189,8 +189,10 @@ is the user's, or an implementation that meets a criterion and is still wrong. A
 unmentioned edge with no such case is not a finding. A behaviour the spec states as not
 constrained is closed.
 
-**Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
-re-review after an amendment is a verification lap and may resume.
+**Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`), and
+so is every re-review after an amendment: a resumed reviewer checks the amendment and
+passes without re-reading the document, which is not the whole-document review stated
+below. Only the single verdict-validation retry resumes.
 
 **Starting the reviewer.** On Claude the session spawns an agent. On Codex the session
 runs the one `codex exec` command given in `skills/planning/codex-execution.md`, under
@@ -682,7 +684,7 @@ and a session restart to apply.
 
 ## Changelog
 
-2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker starts as the spec reviewer starts and a checker that cannot start stops the session; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed. In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
+2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker starts as the spec reviewer starts and a checker that cannot start stops the session; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
