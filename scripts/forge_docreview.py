@@ -446,39 +446,159 @@ def _validate_required_fields(entries_by_type, defects):
 _FILE_WITH_LINES = re.compile(r"(?P<path>.+?)(?::[1-9][0-9]*(?:-[1-9][0-9]*)?)?")
 
 
+def _file_symbol_defects(entry_type, label, entry, tracked_set, repo_root):
+    """The one file/symbol verification both ``dependencies_read`` entries
+    and the author's record entries go through: ``file`` must name a tracked
+    file (optionally with ``:N``/``:N-M``, ``_FILE_WITH_LINES``) and
+    ``symbol`` must appear in it, checked by ``_resolve_symbol`` scoped to
+    that one file. Skips a field already blank — blankness is reported by
+    the caller's own required-field check. Returns defect strings."""
+    defects = []
+    file_val = entry.get("file")
+    if _is_blank(file_val):
+        return defects
+    m = _FILE_WITH_LINES.fullmatch(file_val) if isinstance(file_val, str) else None
+    path = m.group("path") if m else None
+    if path not in tracked_set:
+        defects.append(
+            "{} entry {!r} names file {!r} which is not "
+            "a tracked file".format(entry_type, label, file_val)
+        )
+        return defects
+    symbol_val = entry.get("symbol")
+    if _is_blank(symbol_val):
+        return defects
+    if not isinstance(symbol_val, str):
+        defects.append(
+            "{} entry {!r} has non-string symbol {!r}".format(
+                entry_type, label, symbol_val)
+        )
+        return defects
+    found, _found_at = _resolve_symbol(symbol_val, repo_root, pathspec=path)
+    if not found:
+        defects.append(
+            "{} entry {!r} names symbol {!r} which does "
+            "not appear in {!r}".format(entry_type, label, symbol_val, file_val)
+        )
+    return defects
+
+
 def _validate_dependencies_read(entries, defects, repo_root):
     """Structural verification of ``dependencies_read`` — a field carrying a
     claim about the repository is verified, not merely non-blank (spec: Spec
-    review, Structural verification). ``file`` must name a tracked file,
-    optionally with a ``:N``/``:N-M`` line suffix (``_FILE_WITH_LINES``);
-    ``symbol`` must actually appear in that file, checked by reusing
-    ``_resolve_symbol`` (Task 1's symbol resolution) scoped to the one file,
-    never a second grep implementation. Skips a field already reported blank
-    by ``_validate_required_fields`` — this is a second, independent check on
-    top of that one, not a replacement for it."""
+    review, Structural verification). Delegates to ``_file_symbol_defects``.
+    A second, independent check on top of ``_validate_required_fields``, not
+    a replacement for it."""
     tracked_set = set(_tracked_files(repo_root))
     for i, entry in entries:
         label = _entry_label(entry, "dependencies_read", "symbol", i)
-        file_val = entry.get("file")
-        if _is_blank(file_val):
-            continue
-        m = _FILE_WITH_LINES.fullmatch(file_val) if isinstance(file_val, str) else None
-        path = m.group("path") if m else None
-        if path not in tracked_set:
+        defects.extend(_file_symbol_defects(
+            "dependencies_read", label, entry, tracked_set, repo_root))
+
+
+def _file_path_of(file_val):
+    """``file_val`` with any ``:N``/``:N-M`` suffix removed; the value
+    itself when it is not a string or matches no accepted form."""
+    if isinstance(file_val, str):
+        m = _FILE_WITH_LINES.fullmatch(file_val)
+        if m:
+            return m.group("path")
+    return file_val
+
+
+def _validate_record_coverage(entries, record, defects):
+    """Every record entry is covered by some ``dependencies_read`` entry with
+    the same ``symbol`` and the same ``file`` path, line suffix aside. An
+    uncovered record entry is a defect naming it."""
+    covered = {
+        (e["symbol"], _file_path_of(e["file"])) for _, e in entries
+        if isinstance(e.get("symbol"), str) and isinstance(e.get("file"), str)
+    }
+    for rec in record:
+        key = (rec.get("symbol"), _file_path_of(rec.get("file")))
+        if key not in covered:
             defects.append(
-                "dependencies_read entry {!r} names file {!r} which is not "
-                "a tracked file".format(label, file_val)
+                "dependencies_read does not cover record entry {!r} in "
+                "{!r}".format(rec.get("symbol"), rec.get("file"))
             )
-            continue
-        symbol_val = entry.get("symbol")
-        if _is_blank(symbol_val) or not isinstance(symbol_val, str):
-            continue
-        found, _found_at = _resolve_symbol(symbol_val, repo_root, pathspec=path)
-        if not found:
+
+
+class _Record(list):
+    """The record's ``dependencies`` entries (a plain list of dicts), carrying
+    the record's ``waiver`` so the packet can state it for an empty record."""
+
+    waiver = None
+
+
+class RecordError(Exception):
+    """The author's dependency record is malformed — a contract error naming
+    the entry and the cause. Never defaulted or repaired."""
+
+
+_RECORD_FIELDS = ("symbol", "file", "behavior")
+
+
+def load_record(record_path, repo_root):
+    """Load and validate the author's dependency record (spec: Spec review,
+    Dependency record). Returns the ``dependencies`` entries; raises
+    ``RecordError`` naming the entry and the cause on any defect."""
+    try:
+        with open(record_path, "r", encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RecordError(
+            "cannot read dependency record {}: {}".format(record_path, e))
+    if not isinstance(record, dict):
+        raise RecordError(
+            "dependency record {} is not a JSON object (found {})".format(
+                record_path, type(record).__name__))
+    for key in ("dependencies", "waiver"):
+        if key not in record:
+            raise RecordError(
+                "dependency record {} is missing the {!r} key".format(
+                    record_path, key))
+    deps = record["dependencies"]
+    waiver = record["waiver"]
+    if not isinstance(deps, list):
+        raise RecordError(
+            "dependency record {}: 'dependencies' is not a list".format(
+                record_path))
+    if waiver is not None and not isinstance(waiver, str):
+        raise RecordError(
+            "dependency record {}: 'waiver' must be a string or null".format(
+                record_path))
+    if not deps:
+        if waiver is None:
+            raise RecordError(
+                "dependency record {}: 'dependencies' is empty and 'waiver' "
+                "is null; an empty record needs a waiver reason".format(
+                    record_path))
+        if _is_blank(waiver):
+            raise RecordError(
+                "dependency record {}: 'waiver' is blank".format(record_path))
+        result = _Record(deps)
+        result.waiver = waiver
+        return result
+    tracked_set = set(_tracked_files(repo_root))
+    defects = []
+    for i, entry in enumerate(deps):
+        if not isinstance(entry, dict):
             defects.append(
-                "dependencies_read entry {!r} names symbol {!r} which does "
-                "not appear in {!r}".format(label, symbol_val, file_val)
-            )
+                "record entry [{}] is not an object".format(i))
+            continue
+        label = _entry_label(entry, "dependencies", "symbol", i)
+        missing = [fld for fld in _RECORD_FIELDS if _is_blank(entry.get(fld))]
+        for fld in missing:
+            defects.append(
+                "record entry {!r} has a missing or blank {!r}".format(
+                    label, fld))
+        defects.extend(_file_symbol_defects(
+            "record", label, entry, tracked_set, repo_root))
+    if defects:
+        raise RecordError("; ".join(defects))
+    result = _Record(deps)
+    result.waiver = waiver
+    return result
 
 
 def _resolve_section(name, spec_sections):
@@ -552,7 +672,7 @@ class Disposition:
     surface: "list[dict]"
 
 
-def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
+def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections, record):
     """Validate a document review verdict against the Document review
     contract (spec: `execution` "Document review contract"). Returns a
     ``VerdictResult`` — never raises on a malformed verdict, because every
@@ -585,7 +705,14 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     ``pass``/``findings``. Self-consistency between ``verdict`` and
     ``findings[]`` (a `pass` carrying findings, or a `findings` carrying
     none) is checked separately, since it is a relationship between two
-    fields rather than either field's own shape."""
+    fields rather than either field's own shape.
+
+    ``record`` is the list ``load_record`` returns, and is **required** for
+    the same reason ``spec_sections`` is: ``dependencies_read`` must cover
+    every record entry (same ``symbol``, same ``file`` path with any line
+    suffix removed from both). Entries beyond the record are legal.
+    ``findings[].demonstration`` is required, non-blank, on a
+    ``sufficiency`` finding."""
     defects = []
 
     # Parse each declared entry array once, skipping (and reporting, never
@@ -634,6 +761,8 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
     # against a function or section never actually read.
     _validate_dependencies_read(entries_by_type["dependencies_read"], defects, repo_root)
     _validate_findings_sections(entries_by_type["findings"], spec_sections, defects)
+    _validate_record_coverage(
+        entries_by_type["dependencies_read"], record, defects)
 
     unresolved_set = set(unresolved_refs)
     covered = set()
@@ -705,6 +834,19 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections):
         if kind is not None and kind not in _FINDING_KINDS:
             defects.append(
                 "finding {!r} has unknown kind {!r}".format(label, kind)
+            )
+        demonstration = finding.get("demonstration")
+        if kind == "sufficiency":
+            if not isinstance(demonstration, str) or _is_blank(demonstration):
+                defects.append(
+                    "finding {!r} is a sufficiency finding with a missing, "
+                    "null or blank 'demonstration'".format(label)
+                )
+        elif demonstration is not None and not isinstance(demonstration, str):
+            defects.append(
+                "finding {!r} has non-string demonstration {!r}".format(
+                    label, demonstration
+                )
             )
         if "citation" in finding:
             citation = finding["citation"]
@@ -780,6 +922,7 @@ def dispose(findings, repo_root):
                 amend.append(finding)
             else:
                 finding["kind"] = "sufficiency"
+                finding["original_kind"] = "groundedness"
                 surface.append(finding)
         else:
             surface.append(finding)
@@ -839,6 +982,18 @@ def _required_verdict_fields_text():
         "never `module.main` or a description). One symbol per entry."
     )
     lines.append(
+        "- `dependencies_read` must cover the dependency record: every "
+        "record entry needs an entry here with the same `symbol` and the "
+        "same `file` path, any line suffix aside. A record entry left "
+        "uncovered invalidates the verdict; entries beyond the record are "
+        "legal, and are how you name a dependency the record omits."
+    )
+    lines.append(
+        "- `findings[].demonstration` is required and non-blank on a "
+        "`sufficiency` finding: the concrete case that shows the condition "
+        "failed. On other kinds it is optional (a string or null)."
+    )
+    lines.append(
         "- `findings[].section` is exactly one name from Section names, "
         "copied verbatim as listed. A finer location (a bullet, a clause, a "
         "quote) goes in `evidence`, never in `section`; a finding about two "
@@ -874,6 +1029,16 @@ def _render_reference_table(table):
     for r in table:
         lines.append("- `{}` ({}, {})".format(r.ref, r.shape, _reference_state_text(r)))
     return "\n".join(lines) + "\n"
+
+
+def _render_record(record):
+    """One line per record entry; an empty record states its waiver."""
+    if not record:
+        return "(none; waiver: {})\n".format(getattr(record, "waiver", None))
+    return "".join(
+        "- `{}` in `{}`: {}\n".format(e["symbol"], e["file"], e["behavior"])
+        for e in record
+    )
 
 
 def _render_unresolved_list(unresolved):
@@ -913,7 +1078,7 @@ def _all_spec_section_names(spec_lines):
     return names
 
 
-def build_packet(spec_path, repo_root):
+def build_packet(spec_path, repo_root, record):
     """Assemble the reviewer's packet as text (spec: Spec review). Always the
     whole document — an amendment re-reviews the whole spec, never a
     changed-sections scope (`pipeline` spec, "Amendments re-enter, and the
@@ -944,6 +1109,10 @@ def build_packet(spec_path, repo_root):
 
     parts.append("# Reference table\n\n")
     parts.append(_render_reference_table(table))
+    parts.append("\n")
+
+    parts.append("# Dependency record\n\n")
+    parts.append(_render_record(record))
     parts.append("\n")
 
     parts.append("# Unresolved references requiring disposition\n\n")
@@ -1013,16 +1182,41 @@ def main(argv=None):
         help="the repository under review; defaults to the current directory "
              "(issue #125: never this script's own checkout).",
     )
+    parser.add_argument(
+        "--record",
+        help="path to the author's dependency record (JSON); required with "
+             "--spec, not taken by plan review.",
+    )
     parser.add_argument("--out")
     args = parser.parse_args(argv)
     if not args.plan and not args.spec:
         parser.error("--spec is required unless --plan is given")
+
+    if args.plan and args.record:
+        print(
+            "error: --record is not taken by plan review (--plan)",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.plan:
         # Imported here: forge_planreview imports this module's helpers, so a
         # top-level import would be circular.
         import forge_planreview
         return forge_planreview.run(args.plan, args.spec, args.verdict, args.out)
+
+    if not args.record:
+        print(
+            "error: --record <path> is required with --spec: the author's "
+            "dependency record is missing",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        record = load_record(args.record, args.repo_root)
+    except RecordError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
 
     # The reviewed spec — never the corpus — must pass the living-spec lint
     # rules before review proceeds, so a bad `system` id fails when the spec
@@ -1037,7 +1231,7 @@ def main(argv=None):
         return 1
 
     try:
-        packet = build_packet(args.spec, args.repo_root)
+        packet = build_packet(args.spec, args.repo_root, record)
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
@@ -1080,7 +1274,8 @@ def main(argv=None):
     unresolved_refs = [r.ref for r in table if not r.resolved]
     spec_sections = _all_spec_section_names(spec_lines)
 
-    result = validate_verdict(verdict, unresolved_refs, args.repo_root, spec_sections)
+    result = validate_verdict(
+        verdict, unresolved_refs, args.repo_root, spec_sections, record)
     if not result.valid:
         # Disposition is only meaningful for a verdict that already passed
         # validation (dispose()/validate_citation assume a validated shape

@@ -343,6 +343,7 @@ codex exec -c agents.enabled=false --disable multi_agent_v2 --disable memories \
 ```
 
 - **`< /dev/null` is required.** With a prompt argument and an open standard input, `codex exec` waits for more input and never starts; closing it is what lets the command run unattended.
+- **The authoring checker** (brainstorming skill, step 5) uses this same command, with this prompt in place of the packet prompt: "Your material is the file <material-path>. Read it and follow it exactly. Reply with the unmet conditions — per item the condition, the place in the draft and the evidence — or state that none is unmet." Its reply is taken from the last message; no script validates it.
 - **Model and effort** are the standard tier's, from the routing table in `SKILL.md`.
 - **The verdict** is the reviewer's last message: `--output-last-message` writes it to `<verdict-file>`, which is the file `forge_docreview.py --verdict` validates. The reviewer is read-only (this document-review command, not a runner dispatch) and writes no file itself.
 - **Scripts** live at the plugin root: `../../scripts/` from this skill directory. Do not search the working repo for them.

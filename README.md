@@ -82,14 +82,17 @@ process. The keepers land in `docs/forge/ideas/`, and when one is ready to
 become a build, that doc feeds the brainstorm as its starting input. The
 flow is for building, not ideating, and I don't force everything through it.
 
-**Brainstorming** turns an idea into a spec through conversation. The agent
-asks questions in small batches, proposes a few approaches with a
-recommendation, and walks through the design section by section for
-approval. The point is to make design decisions in conversation, where
+**Brainstorming** turns an idea into a spec through conversation. Input is
+open: talk, pasted documents, answers. The agent reads the code the design
+relies on, proposes a few approaches with a recommendation, and asks me only
+where it can't settle something itself, with a default attached. A separate
+agent checks the draft against six conditions before I'm asked to approve, and
+I approve one digest of what was chosen, what it forecloses and what it
+assumes. The point is to make design decisions in conversation, where
 changing course is cheap. Specs stay short and get amended in place as the
-system changes. Before planning starts, a separate agent that took no part in
-the conversation reviews the spec against the actual code — the files and
-functions it names, the behavior it assumes. Factual corrections get applied;
+system changes. Before planning starts, a reviewer that took no part in the
+conversation validates the spec against the actual code, including the record
+of dependencies the author wrote down. Factual corrections get applied;
 anything that's a judgment call comes back to me.
 
 **Planning** turns the spec into tasks: which files, what interfaces, what

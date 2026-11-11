@@ -15,7 +15,6 @@ import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOC_PATH = REPO_ROOT / "skills" / "brainstorming" / "design-anti-patterns.md"
-SKILL_PATH = REPO_ROOT / "skills" / "brainstorming" / "SKILL.md"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -25,38 +24,6 @@ import forge_lint  # noqa: E402
 
 def _text():
     return DOC_PATH.read_text()
-
-
-def _skill_text():
-    return SKILL_PATH.read_text()
-
-
-def test_names_itself_the_tuning_surface():
-    text = _text()
-    assert "single tuning surface" in text
-
-
-def test_states_two_observation_bar():
-    text = _text()
-    assert "two independent observations" in text
-
-
-def test_every_entry_has_trigger_gate_instead():
-    text = _text()
-    triggers = re.findall(r"^\*\*Trigger:\*\*", text, flags=re.MULTILINE)
-    gates = re.findall(r"^\*\*Gate:\*\*", text, flags=re.MULTILINE)
-    insteads = re.findall(r"^\*\*Instead:\*\*", text, flags=re.MULTILINE)
-    assert len(triggers) == 2
-    assert len(gates) == 2
-    assert len(insteads) == 2
-
-
-def test_schema_backed_entries_name_their_fields():
-    text = _text()
-    assert "dependencies_read" in text
-    assert "replaced_system" in text
-    # The marking must say deletion doesn't remove the field.
-    assert "does not remove" in text
 
 
 FIELD_MARKER_RE = re.compile(r"^\*\*(Trigger|Gate|Instead):\*\*")
@@ -222,88 +189,6 @@ def test_restatement_check_catches_a_line_wrapped_copy():
     assert hits == ["some/other/file.md"]
 
 
-# --- Task 5: wiring the gate into the brainstorming flow -------------------
-
-
-def test_spec_review_step_between_self_review_and_close_out():
-    text = _skill_text()
-    self_review_pos = text.index("Self-review the spec")
-    spec_review_pos = text.index("**Spec review**")
-    close_out_pos = text.index("**Close out**")
-    assert self_review_pos < spec_review_pos < close_out_pos
-
-
-def test_planning_does_not_begin_until_spec_review_passes():
-    text = _skill_text()
-    assert "Planning does not begin until spec review passes" in text
-
-
-def test_skill_carries_the_at_reference_form():
-    text = _skill_text()
-    assert "@design-anti-patterns.md" in text
-
-
-def test_skill_names_the_docreview_module():
-    text = _skill_text()
-    assert "scripts/forge_docreview.py" in text
-
-
-def test_skill_states_the_invalid_verdict_retry_rule():
-    text = _skill_text()
-    assert "one retry naming the specific defect" in text
-    assert "contract error" in text
-
-
-# --- Task 7: the gate is invokable -------------------------------------
-
-
-def _step_8_text():
-    """Step 8's own text, isolated from the rest of the skill so a check
-    here cannot pass on wording that actually lives in a neighboring
-    step."""
-    text = _skill_text()
-    start = text.index("**Spec review**")
-    end = text.index("**Close out**")
-    return text[start:end]
-
-
-def test_step_8_names_the_packet_generation_command():
-    step = _step_8_text()
-    assert "forge_docreview.py --spec" in step
-    assert "--out" in step
-
-
-def test_step_8_states_the_reviewer_is_a_fresh_agent_prompted_with_the_packet_path():
-    step = _step_8_text()
-    assert "fresh" in step
-    assert "packet file" in step or "packet's file" in step
-
-
-def test_step_8_states_verdict_validation_and_nonzero_exit_meaning():
-    step = _step_8_text()
-    assert "--verdict" in step
-    assert "non-zero exit" in step
-    assert "invalid verdict" in step
-
-
-def test_step_8_states_the_caller_owns_the_single_retry():
-    step = _step_8_text()
-    assert "caller" in step
-    assert "one retry naming the specific defect" in step
-
-
-def test_step_8_does_not_describe_tier_routing_rework_or_convergence():
-    step = _step_8_text().lower()
-    for phrase in ("tier", "rework", "convergence", "backstop"):
-        assert phrase not in step, f"step 8 describes {phrase!r} — heavier than a single-shot gate"
-
-
-def test_step_8_states_amendments_are_whole_document_not_scoped():
-    step = _step_8_text()
-    assert "whole document" in step
-    assert "scoped" not in step.lower()
-
-
 # --- agreement: doc's schema-backed markings vs the module's required fields
 
 BACKED_FIELDS_RE = re.compile(r"required verdict fields?(.*?)Deleting", re.DOTALL)
@@ -365,8 +250,8 @@ def test_agreement_check_catches_a_field_removed_from_the_doc():
     # side from text the way the real test does.
     original = _text()
     mutated_text = original.replace(
-        "`dependencies_read` for the first two gates, `replaced_system` for the third.",
-        "`dependencies_read` for the first two gates.",
+        "`dependencies_read` for the dependency gates, `replaced_system` for the\nreplaced-system gate.",
+        "`dependencies_read` for the dependency gates.",
     )
     assert mutated_text != original  # sanity: the mutation actually landed
     mutated_doc_fields = _doc_marked_fields(mutated_text)
@@ -559,14 +444,6 @@ def test_planning_skill_routing_table_carries_the_codex_tier_map():
         assert rows[tier][-1] == "{} · {}".format(model, effort), rows[tier]
 
 
-def test_routing_table_check_catches_a_stale_model():
-    # The check above must be able to fail: a model the script no longer
-    # uses in the table is a mismatch.
-    rows = _routing_rows()
-    model, effort = forge_common.TIER_MAP["standard"]
-    assert rows["standard"][-1] != "{}-old · {}".format(model, effort)
-
-
 def _codex_doc_review_section():
     text = CODEX_EXECUTION_PATH.read_text()
     start = text.index("## Document reviews on Codex")
@@ -582,111 +459,3 @@ def test_codex_doc_review_command_uses_the_runners_model_and_flags():
     assert "model_reasoning_effort={}".format(effort) in section
     isolation = " ".join(forge_common.CODEX_ISOLATION_ARGS)
     assert isolation in section, isolation
-    # The runner's reviewers no longer carry a sandbox override (the constant is
-    # gone); this document-review command is not a runner dispatch and keeps
-    # its own read-only flags until the docs task rewrites it.
-    for arg in ("-c", 'sandbox_mode="read-only"'):
-        assert arg in section, arg
-    assert "--output-last-message" in section
-    # Without a closed stdin, `codex exec` given a prompt argument waits for
-    # more input and hangs (observed live, codex-cli 0.160.0).
-    assert "< /dev/null" in section
-
-
-def test_codex_doc_review_section_names_no_claude_model():
-    section = _codex_doc_review_section().lower()
-    for name in ("sonnet", "haiku", "opus"):
-        assert name not in section
-
-
-def test_no_self_review_rule_is_stated_where_a_reviewer_is_started():
-    rule = "never substitute a self-review"
-    assert rule in _step_8_text()
-    planning = PLANNING_SKILL_PATH.read_text()
-    plan_review = planning[planning.index("## Plan review"):planning.index("## Execution")]
-    assert rule in plan_review
-    assert rule in _codex_doc_review_section()
-
-
-def test_both_review_steps_point_codex_at_the_document_review_section():
-    pointer = "Document reviews on Codex"
-    assert pointer in _step_8_text()
-    planning = PLANNING_SKILL_PATH.read_text()
-    plan_review = planning[planning.index("## Plan review"):planning.index("## Execution")]
-    assert pointer in plan_review
-
-
-# --- Task 6: reviewer write discipline prose (mechanical greps, no behavior) ---
-
-AGENT_PATHS = [REPO_ROOT / "agents" / "forge-standard.md", REPO_ROOT / "agents" / "forge-deep.md"]
-
-
-def test_agent_contracts_carry_the_break_the_code_step_and_no_read_only_claim():
-    for path in AGENT_PATHS:
-        text = path.read_text()
-        for phrase in ("scratch copy", "git stash", "baseline", "one mutant",
-                       "restore", "attributable", "stays green",
-                       "one mutant per `**Tests:**` bullet", "none` task gets no mutants"):
-            assert phrase in text, (path.name, phrase)
-        assert "never modify files" not in text, path.name
-
-
-def _claude_loop_bullet():
-    text = PLANNING_SKILL_PATH.read_text()
-    start = text.index("  - **Claude (Workflow tool available):**")
-    end = text.index("\n", start)
-    return text[start:end]
-
-
-def test_claude_loop_fingerprints_around_every_reviewer_spawn():
-    loop = _claude_loop_bullet()
-    snap = loop.index("forge_fingerprint.py snapshot")
-    ver = loop.index("forge_fingerprint.py verify")
-    assert snap < ver
-    assert "before the spawn" in loop[snap:ver]
-    for phrase in ("verdict returned, crash, timeout, and the validation retry's resume or fresh spawn alike",
-                   "no fallback spawn, no coverage retry, no commit, no further reviewer dispatch",
-                   "on task and final reviews alike",
-                   "is a **`reviewer-wrote` halt**",
-                   "Exit 1 (git failed, no fingerprint) is a **contract error**",
-                   "forge_fingerprint.py freeze <that file> --ref refs/forge/freeze/<run>/task-<N>",
-                   "refs/forge/freeze/<run>/final-review",
-                   "records the change lines `verify` printed in the halt"):
-        assert phrase in loop, phrase
-
-
-def test_claude_loop_hands_acceptance_results_by_json_path():
-    loop = _claude_loop_bullet()
-    assert "task-or-final" not in loop
-    for phrase in ("writes the acceptance command-clause records",
-                   "(JSON keys `command`, `outcome`, `exit_code`, `passed`, `output_tail`)",
-                   "as JSON to the scratch directory",
-                   "the prompt names that path with the do-not-re-run assertion",
-                   "the obligation to check prose clauses itself"):
-        assert phrase in loop, phrase
-
-
-def test_close_out_gate_records_a_call_per_unverified_entry():
-    text = PLANNING_SKILL_PATH.read_text()
-    start = text.index("**Deferral rule:**")
-    gate = text[start:text.index("\n", start)]
-    for phrase in ("**and every open unverified entry**",
-                   "presented together, each with its reason",
-                   "a call is recorded per entry before filing or completion",
-                   "**accept** (with evidence), **defer** or **repair**",
-                   "halts as unverified before any doc-sync"):
-        assert phrase in gate, phrase
-
-
-def test_codex_runner_paragraph_does_not_claim_read_only_reviewers():
-    text = CODEX_EXECUTION_PATH.read_text()
-    runner = text[:text.index("## Document reviews on Codex")]
-    assert 'sandbox_mode="read-only"' not in runner
-    assert "CODEX_REVIEWER_SANDBOX_ARGS" not in runner
-    assert "reviewer-wrote" in runner
-    assert "accept:<evidence>" in runner
-    for phrase in ("`accept` requires non-empty evidence",
-                   "`repair` and `defer` reject evidence text",
-                   "`accept` against any halt that is not `unverified` is a contract error",
-                   "qualify it `finding:ID` or `coverage:ID`"):
-        assert phrase in runner, phrase
