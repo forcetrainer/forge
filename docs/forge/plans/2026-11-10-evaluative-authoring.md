@@ -14,7 +14,7 @@
 - docs/forge/specs/execution.md
 
 ### Task 1: Skill prose, conditions file, and wording-test removal
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/brainstorming/SKILL.md` (flow steps 1, 3, 4, 5, 7 and 8)
