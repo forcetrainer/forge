@@ -56,6 +56,7 @@
 - the test `test_agreement_check_catches_a_field_removed_from_the_doc` still proves the field-agreement check fails when a field is removed from the conditions file, against the file's rewritten text
 - the test `test_codex_doc_review_command_uses_the_runners_model_and_flags` compares the command's model, effort and isolation flags with `forge_common` and asserts no hard-coded flag strings
 - no Gate sentence of the conditions file is restated in any other tracked file
+- the conditions file states, under Consistent, that a `contradiction` finding's evidence quotes the two statements that cannot both hold
 
 **Tier:** standard
 
