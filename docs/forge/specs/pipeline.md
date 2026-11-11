@@ -137,10 +137,11 @@ to decide. The checker is not the gate: Spec review is, and its reviewer is cold
 
 It starts as the spec reviewer starts (Spec review: Starting the reviewer), with its own
 prompt: on Claude a spawned agent at the standard tier whose prompt is the material
-file's path; on Codex the `codex exec` command given in
-`skills/planning/codex-execution.md` under Authoring checks on Codex — the model, effort
-and read-only flags of the document review command, a prompt that names the material
-file and asks for the unmet conditions, the reply taken from the last message.
+file's path; on Codex the one `codex exec` command given in
+`skills/planning/codex-execution.md` under Document reviews on Codex, used as written
+except for its prompt — the checker prompt given beside it there names the material file
+and asks for the unmet conditions — with the reply taken from the last message. The
+checker adds no second command and no further place that names the Codex model.
 **If the checker cannot be started, the session stops and tells the user.** It never
 substitutes the author's own check, never retries with a different model, and never
 presents the design for approval without the run.
