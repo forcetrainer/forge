@@ -32,6 +32,20 @@ import forge_docreview as d  # noqa: E402
 NO_SUCH_SYMBOL = "totallyNonexistent" + "SymbolXyz123"
 
 
+def _waiver_record(directory):
+    """A record file with no dependencies and a waiver: the minimal valid
+    dependency record, for tests whose subject is not the record."""
+    path = os.path.join(directory, "record-waiver.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"dependencies": [], "waiver": "fixture reads no code"}, f)
+    return path
+
+
+def _empty_record():
+    record = d.load_record(_waiver_record(tempfile.gettempdir()), str(REPO_ROOT))
+    return record
+
+
 def _tracked_files():
     result = subprocess.run(
         ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
@@ -706,28 +720,29 @@ class BuildPacketTests(unittest.TestCase):
         # Scoped review is deleted (spec: Spec review, "Amendments re-enter,
         # and the review is always whole-document") — a packet for a spec
         # always carries every section, with no way to ask for less.
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("Alpha references", packet)
         self.assertIn("Beta references", packet)
 
     def test_build_packet_takes_no_sections_parameter(self):
         with self.assertRaises(TypeError):
-            d.build_packet(self.spec_path, str(REPO_ROOT), sections=["Alpha section"])
+            d.build_packet(
+                self.spec_path, str(REPO_ROOT), _empty_record(), sections=["Alpha section"])
 
     def test_packet_references_anti_patterns_doc_by_path_without_inlining(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("skills/brainstorming/design-anti-patterns.md", packet)
         self.assertNotIn("Gate:", packet)
         self.assertNotIn("Trigger:", packet)
         self.assertNotIn("Instead:", packet)
 
     def test_packet_lists_every_unresolved_reference(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn(NO_SUCH_SYMBOL, packet)
         self.assertIn("scripts/does_not_exist_at_all.py", packet)
 
     def test_packet_states_required_verdict_fields(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("disposition", packet)
         self.assertIn("evidence", packet)
         self.assertIn("intended-new", packet)
@@ -738,23 +753,23 @@ class BuildPacketTests(unittest.TestCase):
     def test_packet_states_how_dependencies_read_is_verified(self):
         # `file` is a tracked path, optionally with `:N` or `:N-M`, and
         # `symbol` must appear literally in it.
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("`scripts/x.py:88-120`", packet)
         self.assertIn("appears literally in that file", packet)
 
     def test_packet_lists_every_section_name_as_a_quoted_string(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         listed = packet.split("# Section names\n", 1)[1].split("\n# ", 1)[0]
         for name in ("Alpha section", "Beta section"):
             self.assertIn('- "{}"'.format(name), listed)
 
     def test_packet_states_section_is_one_listed_name_copied_verbatim(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("`findings[].section` is exactly one name from Section names", packet)
         self.assertIn("two findings", packet)
 
     def test_packet_states_references_are_exactly_the_listed_set(self):
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("exactly one `references` entry for each reference below, and no others", packet)
 
     def test_packet_states_the_top_level_verdict_envelope(self):
@@ -766,7 +781,7 @@ class BuildPacketTests(unittest.TestCase):
         # elsewhere in the packet for other reasons — see
         # test_packet_envelope_statement_check_catches_its_own_removal for
         # proof this actually discriminates.
-        packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+        packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("written to a file", packet)
         self.assertIn('"verdict"', packet)
         self.assertIn("pass", packet)
@@ -780,7 +795,7 @@ class BuildPacketTests(unittest.TestCase):
         lines = d._required_verdict_fields_text().splitlines()
         stripped = "\n".join(l for l in lines if "written to a file" not in l) + "\n"
         with mock.patch.object(d, "_required_verdict_fields_text", return_value=stripped):
-            packet = d.build_packet(self.spec_path, str(REPO_ROOT))
+            packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         with self.assertRaises(AssertionError):
             self.assertIn("written to a file", packet)
 
@@ -798,7 +813,9 @@ class DocreviewCliTests(unittest.TestCase):
         with open(self.spec_path, "w", encoding="utf-8") as f:
             f.write(SPEC_FIXTURE)
 
-    def run_cli(self, args):
+    def run_cli(self, args, record=True):
+        if record and "--spec" in args and "--record" not in args:
+            args = args + ["--record", _waiver_record(self.tmp)]
         return subprocess.run(
             [sys.executable, SCRIPT] + args,
             capture_output=True, text=True,
@@ -1053,6 +1070,7 @@ class CliValidityOrderingTests(unittest.TestCase):
         argv = [
             "--spec", self.spec_path, "--verdict", verdict_path,
             "--repo-root", str(REPO_ROOT),
+            "--record", _waiver_record(self.tmp),
         ]
         if out_path:
             argv += ["--out", out_path]
@@ -1594,7 +1612,7 @@ class HuntingListPathTests(TempGitRepoMixin, unittest.TestCase):
         self._track("docs/spec.md", content="# Spec\n\nNothing referenced.\n")
 
     def test_packet_names_hunting_list_by_absolute_plugin_path(self):
-        packet = d.build_packet(os.path.join(self.repo, "docs/spec.md"), self.repo)
+        packet = d.build_packet(os.path.join(self.repo, "docs/spec.md"), self.repo, _empty_record())
         expected = REPO_ROOT / "skills" / "brainstorming" / "design-anti-patterns.md"
         self.assertTrue(expected.is_file())
         self.assertIn("@{} ".format(expected), packet)
@@ -1666,7 +1684,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
             )
 
     def test_reference_table_distinguishes_ambiguous_from_plain_unresolved(self):
-        packet = d.build_packet(self.spec_path, self.repo)
+        packet = d.build_packet(self.spec_path, self.repo, _empty_record())
         table_section = packet.split("# Reference table")[1].split("# Unresolved")[0]
         ambiguous_line = next(
             line for line in table_section.splitlines() if "`dup.md`" in line
@@ -1680,7 +1698,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIn("unresolved", plain_line)
 
     def test_ambiguous_entry_names_its_candidate_paths(self):
-        packet = d.build_packet(self.spec_path, self.repo)
+        packet = d.build_packet(self.spec_path, self.repo, _empty_record())
         table_section = packet.split("# Reference table")[1].split("# Unresolved")[0]
         ambiguous_line = next(
             line for line in table_section.splitlines() if "`dup.md`" in line
@@ -1689,7 +1707,7 @@ class AmbiguousReferenceRenderingTests(TempGitRepoMixin, unittest.TestCase):
         self.assertIn("docs/two/dup.md", ambiguous_line)
 
     def test_unresolved_disposition_list_also_distinguishes_ambiguous(self):
-        packet = d.build_packet(self.spec_path, self.repo)
+        packet = d.build_packet(self.spec_path, self.repo, _empty_record())
         unresolved_section = packet.split("# Unresolved references")[1].split(
             "# Required verdict fields"
         )[0]
@@ -1748,6 +1766,8 @@ class RepoRootTests(unittest.TestCase):
         self.packet_path = os.path.join(self.elsewhere, "packet.md")
 
     def _run(self, *args, cwd):
+        if "--spec" in args and "--record" not in args:
+            args = args + ("--record", _waiver_record(self.tmp))
         return subprocess.run(
             [sys.executable, SCRIPT, *args], cwd=cwd, capture_output=True, text=True,
         )
@@ -1824,6 +1844,8 @@ class SpecReviewLintsReviewedSpecTests(unittest.TestCase):
         return path
 
     def _run(self, *args):
+        if "--spec" in args and "--record" not in args:
+            args = args + ("--record", _waiver_record(self.tmp))
         return subprocess.run(
             [sys.executable, SCRIPT, *args, "--repo-root", self.tmp],
             cwd=self.tmp, capture_output=True, text=True,
@@ -1874,3 +1896,161 @@ class SpecReviewLintsReviewedSpecTests(unittest.TestCase):
         spec = self._write("qc-005-api.md", self.VALID.format(stem="qc-005-api"))
         proc = self._run("--spec", spec, "--out", self.out_path)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class DependencyRecordTests(TempGitRepoMixin, unittest.TestCase):
+    """The author's dependency record: required with --spec, validated
+    before any packet is built, carried in the packet's own section."""
+
+    SYMBOL = "record_target_fn"
+
+    def setUp(self):
+        self._init_repo()
+        self._track("pkg/mod.py", content="def {}():\n    pass\n".format(self.SYMBOL))
+        self._track(
+            "docs/spec.md",
+            content="---\nsystem: spec\n---\n\n# Spec\n\nText.\n\n"
+                    "## Changelog\n\n2026-11-02: fixture\n",
+        )
+        self.spec = os.path.join(self.repo, "docs/spec.md")
+        self.out = os.path.join(self.repo, "packet.md")
+        self.record_path = os.path.join(self.repo, "record.json")
+
+    def _write_record(self, obj, raw=None):
+        with open(self.record_path, "w", encoding="utf-8") as f:
+            f.write(raw if raw is not None else json.dumps(obj))
+        return self.record_path
+
+    def _entry(self, **over):
+        entry = {"symbol": self.SYMBOL, "file": "pkg/mod.py", "behavior": "does a thing"}
+        entry.update(over)
+        return entry
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, SCRIPT, *args, "--repo-root", self.repo],
+            cwd=self.repo, capture_output=True, text=True,
+        )
+
+    def _load(self, obj):
+        return d.load_record(self._write_record(obj), self.repo)
+
+    def test_packet_build_without_record_exits_1_naming_the_record(self):
+        proc = self._run("--spec", self.spec, "--out", self.out)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--record", proc.stderr)
+        self.assertIn("missing", proc.stderr)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_verdict_validation_without_record_exits_1_naming_the_record(self):
+        verdict = os.path.join(self.repo, "verdict.json")
+        with open(verdict, "w", encoding="utf-8") as f:
+            json.dump({"verdict": "pass"}, f)
+        proc = self._run("--spec", self.spec, "--verdict", verdict)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--record", proc.stderr)
+
+    def test_plan_with_record_exits_1_naming_record_as_not_taken(self):
+        record = self._write_record({"dependencies": [], "waiver": "w"})
+        proc = self._run("--plan", "plan.md", "--record", record)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--record", proc.stderr)
+        self.assertIn("not taken by plan review", proc.stderr)
+
+    def test_record_not_valid_json_is_contract_error_naming_the_file(self):
+        path = self._write_record(None, raw="{not json")
+        with self.assertRaises(d.RecordError) as ctx:
+            d.load_record(path, self.repo)
+        self.assertIn(path, str(ctx.exception))
+        proc = self._run("--spec", self.spec, "--record", path, "--out", self.out)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn(path, proc.stderr)
+
+    def test_record_without_dependencies_or_waiver_key_names_the_key(self):
+        for obj, key in (
+            ({"waiver": "w"}, "dependencies"),
+            ({"dependencies": []}, "waiver"),
+            ([], None),
+        ):
+            with self.subTest(obj=obj):
+                with self.assertRaises(d.RecordError) as ctx:
+                    self._load(obj)
+                if key:
+                    self.assertIn(key, str(ctx.exception))
+
+    def test_empty_dependencies_with_null_waiver_is_contract_error(self):
+        with self.assertRaises(d.RecordError) as ctx:
+            self._load({"dependencies": [], "waiver": None})
+        self.assertIn("waiver", str(ctx.exception))
+
+    def test_empty_dependencies_with_waiver_loads_and_packet_states_reason(self):
+        record = self._load({"dependencies": [], "waiver": "reads no code at all"})
+        self.assertEqual(list(record), [])
+        packet = d.build_packet(self.spec, self.repo, record)
+        section = packet[packet.index("# Dependency record"):]
+        self.assertIn("reads no code at all", section)
+
+    def test_entry_missing_or_blank_field_names_entry_and_field(self):
+        for field in ("symbol", "file", "behavior"):
+            for how in ("missing", "blank"):
+                entry = self._entry()
+                if how == "missing":
+                    del entry[field]
+                else:
+                    entry[field] = "  "
+                with self.subTest(field=field, how=how):
+                    with self.assertRaises(d.RecordError) as ctx:
+                        self._load({"dependencies": [entry], "waiver": None})
+                    self.assertIn(repr(field), str(ctx.exception))
+                    if field != "symbol":
+                        self.assertIn(self.SYMBOL, str(ctx.exception))
+
+    def test_entry_with_untracked_file_names_entry_and_file(self):
+        with self.assertRaises(d.RecordError) as ctx:
+            self._load({"dependencies": [self._entry(file="pkg/nope.py")],
+                        "waiver": None})
+        self.assertIn(self.SYMBOL, str(ctx.exception))
+        self.assertIn("pkg/nope.py", str(ctx.exception))
+
+    def test_entry_with_symbol_absent_from_file_names_entry_and_symbol(self):
+        with self.assertRaises(d.RecordError) as ctx:
+            self._load({"dependencies": [self._entry(symbol="absent_fn_xyz")],
+                        "waiver": None})
+        self.assertIn("absent_fn_xyz", str(ctx.exception))
+        self.assertIn("does not appear", str(ctx.exception))
+
+    def test_entry_file_accepts_path_and_line_forms(self):
+        for form in ("pkg/mod.py", "pkg/mod.py:2", "pkg/mod.py:1-2"):
+            with self.subTest(form=form):
+                record = self._load({"dependencies": [self._entry(file=form)],
+                                     "waiver": None})
+                self.assertEqual(record[0]["file"], form)
+
+    def test_valid_record_entries_follow_the_reference_table_in_the_packet(self):
+        record = self._load({"dependencies": [
+            self._entry(),
+            self._entry(symbol="def", file="pkg/mod.py:1", behavior="second"),
+        ], "waiver": None})
+        packet = d.build_packet(self.spec, self.repo, record)
+        self.assertLess(packet.index("# Reference table"),
+                        packet.index("# Dependency record"))
+        section = packet[packet.index("# Dependency record"):]
+        self.assertIn("`{}` in `pkg/mod.py`: does a thing".format(self.SYMBOL), section)
+        self.assertIn("`def` in `pkg/mod.py:1`: second", section)
+
+    def test_record_defect_reported_before_any_packet_and_lint_still_reported(self):
+        bad = self._write_record({"dependencies": [self._entry(file="pkg/nope.py")],
+                                  "waiver": None})
+        proc = self._run("--spec", self.spec, "--record", bad, "--out", self.out)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("pkg/nope.py", proc.stderr)
+        self.assertFalse(os.path.exists(self.out))
+        # A valid record does not hide a spec lint defect.
+        good = self._write_record({"dependencies": [self._entry()], "waiver": None})
+        lint_spec = os.path.join(self.repo, "docs/qc-005-api.md")
+        with open(lint_spec, "w", encoding="utf-8") as f:
+            f.write("---\nsystem: qc-005\n---\n\n# Spec\n\n## Changelog\n\nx\n")
+        proc = self._run("--spec", lint_spec, "--record", good, "--out", self.out)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("disagrees with filename stem", proc.stderr)
+        self.assertFalse(os.path.exists(self.out))

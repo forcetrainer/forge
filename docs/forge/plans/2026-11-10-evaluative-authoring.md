@@ -63,7 +63,7 @@
 **Depends on:** nothing
 
 ### Task 2: Spec review takes and carries the dependency record
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_docreview.py` (`--record`, record loading and validation, packet section)
