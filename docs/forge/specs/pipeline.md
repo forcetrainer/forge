@@ -46,7 +46,7 @@ graduates to a build; free-form ideation stays unprocessed.
 - Design presentation: one decision digest — what was chosen, what it forecloses, what
   is assumed — approved once. Sections with a check-in after each replace the single
   digest when the design spans several specs or is too large to judge in one read, or
-  when the user asks. Nothing is written to a spec before the approval.
+  when the user asks. The digest is derived from the draft (Spec authoring, below).
 - Self-review of the spec is fixed inline, no re-review. Self-review is **not** the
   gate — an author checking their own document is the control Spec review replaces.
 - Spec review (below) runs after self-review and before close-out. Planning does not
@@ -93,10 +93,16 @@ requirement incomplete, it asks the user.
 designing against it: one read-only scout per depended-on area, each returning facts
 with file and line. The number of scouts is the number of areas the design depends on.
 
+**Draft.** Before approval the author writes what the spec will say — for an amendment,
+the amended sections as they will read — to a draft file outside the repository's
+tracked files. The draft is the one statement of the design: the checker reads it, the
+approval digest is derived from it, and after approval its text goes into the spec.
+Nothing is written to a spec before the approval.
+
 **Dependency record.** The author writes down the existing code the design relies on —
 per entry the symbol, the file, and what it does including side effects — as a JSON file
-beside the spec, never in it (Spec style: no restated codebase context) and never
-committed, since its line references age with the code:
+kept with the draft, never in the spec (Spec style: no restated codebase context) and
+never committed, since its line references age with the code:
 
 ```
 {"dependencies": [{"symbol", "file", "behavior"}], "waiver": "<reason>" | null}
@@ -106,17 +112,26 @@ committed, since its line references age with the code:
 review contract). An empty `dependencies` is legal only with a non-null `waiver`. The
 record is an input to Spec review, below.
 
-**Checker.** A separate agent — never the author — tests the material against the
-conditions and returns only the conditions that are unmet, each with evidence. It is
-given the material, the dependency record and the conditions file, and it reads the
-code. It runs **at least once, in the foreground, before the design is presented for
+**Checker.** A separate agent — never the author — tests the design against the
+conditions. Its material, assembled by the author into one file, is: the draft, the
+dependency record, every document the user supplied, and the path of the conditions
+file. It reads the code. It returns a list of the conditions that are unmet — per item
+the condition, the place in the draft, and the evidence — or states that none is unmet.
+The return is read by the author; no script validates it.
+
+It runs **at least once, in the foreground, before the design is presented for
 approval**, on both harnesses; it may also run in the background as material
 accumulates, where the harness supports it. An unmet condition that is a fact about the
-code sends the author to read; one that is a judgment becomes a question to the user.
-The checker is not the gate: Spec review is, and its reviewer is cold.
-It starts as the spec reviewer starts (Spec review: Starting the reviewer): on Claude a
-spawned agent at the standard tier; on Codex the one `codex exec` command given under
-Document reviews on Codex, with the checker's material in place of the review packet.
+code sends the author to read; one that is a judgment becomes a question to the user. A
+condition still unmet when the design is presented is stated in the digest, for the user
+to decide. The checker is not the gate: Spec review is, and its reviewer is cold.
+
+It starts as the spec reviewer starts (Spec review: Starting the reviewer), with its own
+prompt: on Claude a spawned agent at the standard tier whose prompt is the material
+file's path; on Codex the `codex exec` command given in
+`skills/planning/codex-execution.md` under Authoring checks on Codex — the model, effort
+and read-only flags of the document review command, a prompt that names the material
+file and asks for the unmet conditions, the reply taken from the last message.
 **If the checker cannot be started, the session stops and tells the user.** It never
 substitutes the author's own check, never retries with a different model, and never
 presents the design for approval without the run.
@@ -684,7 +699,7 @@ and a session restart to apply.
 
 ## Changelog
 
-2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker starts as the spec reviewer starts and a checker that cannot start stops the session; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
+2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker reads a draft of what the spec will say, returns the unmet conditions, starts as the spec reviewer starts with its own prompt, and stops the session when it cannot start; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)
