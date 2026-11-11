@@ -50,7 +50,9 @@ graduates to a build; free-form ideation stays unprocessed.
 - Self-review of the spec is fixed inline, no re-review. Self-review is **not** the
   gate — an author checking their own document is the control Spec review replaces.
 - Spec review (below) runs after self-review and before close-out. Planning does not
-  begin until it passes.
+  begin until it passes, or the user ends it at the round stop.
+- Close-out shows the user the carried cases (Spec review: Stake) once, before the
+  hand-off to planning.
 - Close-out is a message, not a gate: "spec written to `<path>` and committed — flag
   changes, otherwise proceeding to planning." The digest approval was the gate.
 
@@ -215,10 +217,28 @@ is the user's, or an implementation that meets a criterion and is still wrong. A
 unmentioned edge with no such case is not a finding. A behaviour the spec states as not
 constrained is closed.
 
+**Stake.** A `sufficiency` finding names what is at stake, or names nothing:
+
+| `stake` | The wrong build |
+|---|---|
+| `harm` | loses data, exposes something it should not, or costs money |
+| `contract` | breaks something another spec, system or stored data depends on |
+| `misdirects` | is the one the spec's own text leads a careful implementer to |
+| null | none of these: any reasonable choice works and a test pins it |
+
+A finding with a null stake is **plan-scale**. It is not amended into the spec and holds
+no round open: the script routes it to `plan` (schema: `execution` spec), and a round
+whose only findings are plan-scale passes. The author keeps every plan-scale finding of
+every round in a carried-cases list beside the dependency record, never in the spec,
+shows the list to the user once at close-out — the user may promote any case to an
+amendment or mark it not constrained — and hands the rest to planning, where each
+becomes a test case. A `contradiction` or `groundedness` finding is never plan-scale,
+whatever stake it carries.
+
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`), and
-so is every re-review after an amendment: a resumed reviewer checks the amendment and
-passes without re-reading the document, which is not the whole-document review stated
-below. Only the single verdict-validation retry resumes.
+so is every re-review after an amendment, whole-document or scoped (Rounds, below): a
+resumed reviewer sets its own scope, and a scope is set by the script. Only the single
+verdict-validation retry resumes.
 
 **Starting the reviewer.** On Claude the session spawns an agent. On Codex the session
 runs the one `codex exec` command given in `skills/planning/codex-execution.md`, under
@@ -230,17 +250,29 @@ fresh dispatch, since the session holds no handle to resume. This applies to Pla
 too. **If a cold reviewer cannot be started, the session stops and tells the user. It
 never substitutes a self-review, and never retries with a different model.**
 
-**Amendments re-enter, and the review is always whole-document** — never scoped to the
-changed sections. Scoping was specified first and dropped: "changed sections" never said
-changed *relative to what*, and three incompatible baselines each satisfied the words
-while covering different things. Every one of them fails the same way, by running a gate
-that covers less than it claims — a last-commit baseline reviews only the final slice of
-a multi-commit amendment, and an author-declared scope lets the party under review set
-the reviewer's scope. Scoping also bought little: the whole-document contradiction
-question has to be asked regardless, since an amendment can contradict a section it did
-not touch, so the reviewer reads the whole document either way. A stateful
-last-passing-review baseline remains addable later if full review proves costly; its
-fallback when no state exists is this rule.
+**Rounds.** An amendment re-enters review. Rounds 1 and 2 are whole-document: the
+second cold read finds what the first missed in text no amendment touched. From round 3
+the review is **scoped**: the packet is built with `--prior-packet <previous round's
+packet>`, and the script — never the author, never the reviewer — names the sections
+whose text differs from the spec inside that packet. The reviewer checks those sections
+and every statement elsewhere in the spec that an amendment makes stale or contradicts;
+the whole spec still travels in the packet for that purpose. A scoped round owes no
+record coverage. The baseline is the text the previous reviewer was given, so nothing
+amended since the last review escapes; a changelog line is not an amended section, and
+a scoped round with no amended section is a contract error.
+
+**Amending between rounds.** Two rules bind the author, because a narrow fix is where
+the next finding comes from:
+- Before a re-review, the author finds every statement of the amended rule — in this
+  spec and every other spec — and changes them together.
+- A section that draws findings in two consecutive rounds is rewritten whole, not
+  patched again: as a state table where it describes states and transitions.
+
+**Round stop.** A spec that has not passed after round 3 stops. The author shows the
+user the findings per round and what is still open, and the user chooses: another
+round, hand the open findings to planning as carried cases, or mark them not
+constrained. Every further round stops the same way. The author never runs a fourth
+round unasked.
 
 ### Frontmatter
 
@@ -567,8 +599,8 @@ validates and disposes. Non-zero exit is an invalid verdict.
 **Coldness.** Discovery is a fresh reviewer (constraint: `discovery-review-is-cold`); a
 re-review after a plan amendment is a verification lap in that constraint's sense and
 resumes the reviewer; a failed resume falls back to a fresh reviewer given the full
-packet. Unlike a task review's verification it is always whole-plan, for the reason
-Spec review is whole-document, and its verdict carries the full `coverage` array. A spec
+packet. Unlike a task review's verification it is always whole-plan — a plan amendment
+can break coverage anywhere — and its verdict carries the full `coverage` array. A spec
 amended in response to a `spec-defect` finding re-enters Spec review; plan lint then
 re-runs against the amended spec, and plan review restarts cold.
 
@@ -710,6 +742,7 @@ and a session restart to apply.
 
 ## Changelog
 
+2026-11-11: spec review converges — a `sufficiency` finding names a stake (`harm`, `contract`, `misdirects`) or is plan-scale and goes to planning as a carried case without holding a round open; rounds 1 and 2 are whole-document and later rounds are scoped by the script to the sections amended since the previous round's packet; the author changes every statement of an amended rule together and rewrites a section that fails two rounds running; a spec not passed after round 3 stops for the user's call. Seen on one repo's review of six specs: after round 1, 37 of 47 findings sat in sections the author had just amended.
 2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete), each mapped to a finding kind, stated once in `design-anti-patterns.md` and shared by author and reviewer; the author reads the code the design relies on, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker reads a draft of what the spec will say, returns the unmet conditions, starts as the spec reviewer starts with its own prompt, and stops the session when it cannot start; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line

@@ -664,7 +664,8 @@ class DisposeTests(unittest.TestCase):
     def test_sufficiency_finding_surfaces_and_is_never_auto_amended(self):
         findings = [{
             "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
-            "evidence": "e", "citation": None, "proposed_amendment": "pa",
+            "evidence": "e", "citation": None, "stake": "contract",
+            "proposed_amendment": "pa",
         }]
         disp = d.dispose(findings, str(REPO_ROOT))
         self.assertEqual(disp.amend, [])
@@ -717,9 +718,9 @@ class BuildPacketTests(unittest.TestCase):
             f.write(SPEC_FIXTURE)
 
     def test_packet_always_contains_every_section_of_the_spec(self):
-        # Scoped review is deleted (spec: Spec review, "Amendments re-enter,
-        # and the review is always whole-document") — a packet for a spec
-        # always carries every section, with no way to ask for less.
+        # The whole spec always travels, on a scoped re-review too (spec:
+        # Spec review): a scope narrows where the reviewer looks, never what
+        # the packet carries.
         packet = d.build_packet(self.spec_path, str(REPO_ROOT), _empty_record())
         self.assertIn("Alpha references", packet)
         self.assertIn("Beta references", packet)
@@ -1295,7 +1296,7 @@ class FindingsSectionStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(findings=[{
             "id": "f1", "summary": "s", "kind": "sufficiency",
             "section": "Spec review", "evidence": "e",
-            "demonstration": "d", "proposed_amendment": "pa",
+            "stake": "harm", "demonstration": "d", "proposed_amendment": "pa",
         }])
         result = d.validate_verdict(
             verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
@@ -1306,7 +1307,7 @@ class FindingsSectionStructuralTests(unittest.TestCase):
         verdict = _valid_verdict(findings=[{
             "id": "f1", "summary": "s", "kind": "sufficiency",
             "section": "spec rev", "evidence": "e",
-            "demonstration": "d", "proposed_amendment": "pa",
+            "stake": "harm", "demonstration": "d", "proposed_amendment": "pa",
         }])
         result = d.validate_verdict(
             verdict, ["a/b.py"], str(REPO_ROOT), ["Spec review", "Plan documents"], []
@@ -1459,7 +1460,7 @@ class StructuralAndRequiredFieldDefectsTogetherTests(unittest.TestCase):
                 "id": "f1", "summary": "an unverifiable summary",
                 "kind": "sufficiency", "section": "Spec review",
                 "evidence": "an unverifiable claim of evidence",
-                "demonstration": "an unverifiable case",
+                "stake": "harm", "demonstration": "an unverifiable case",
                 "proposed_amendment": "an unverifiable amendment",
             }],
         )
@@ -2084,7 +2085,7 @@ def _suff_finding(**over):
     f = {
         "id": "f1", "summary": "s", "kind": "sufficiency", "section": "sec",
         "evidence": "e", "citation": None, "demonstration": "the case",
-        "proposed_amendment": "pa",
+        "stake": "harm", "proposed_amendment": "pa",
     }
     f.update(over)
     return f
@@ -2208,3 +2209,295 @@ class MalformedDependencyEntryTests(unittest.TestCase):
             result = _validate_with_record(verdict, [dict(_RECORD_ENTRY)])
             self.assertFalse(result.valid)
             self.assertTrue(any("dependencies_read" in x for x in result.defects))
+
+
+class StakeTests(unittest.TestCase):
+    """A sufficiency finding names its stake or is plan-scale: it goes to
+    the plan as a test case and forces neither an amendment nor a round."""
+
+    def _check(self, finding):
+        return _validate_with_record(_valid_verdict(findings=[finding]), [])
+
+    def test_sufficiency_without_stake_key_is_invalid_naming_finding(self):
+        f = _suff_finding(id="fS")
+        del f["stake"]
+        result = self._check(f)
+        self.assertFalse(result.valid)
+        self.assertTrue(any("fS" in x and "stake" in x for x in result.defects),
+                        result.defects)
+
+    def test_sufficiency_with_each_stake_or_null_is_valid(self):
+        for stake in ("harm", "contract", "misdirects", None):
+            result = self._check(_suff_finding(stake=stake))
+            self.assertTrue(result.valid, (stake, result.defects))
+
+    def test_unknown_or_non_string_stake_is_invalid_on_any_kind(self):
+        for kind in ("sufficiency", "contradiction"):
+            for stake in ("big", "", 5, ["harm"]):
+                result = self._check(_suff_finding(id="fS", kind=kind, stake=stake))
+                self.assertFalse(result.valid, (kind, stake))
+                self.assertTrue(
+                    any("fS" in x and "stake" in x for x in result.defects),
+                    result.defects)
+
+    def test_other_kinds_need_no_stake_key(self):
+        for kind in ("groundedness", "contradiction"):
+            f = _suff_finding(kind=kind, citation="scripts/forge_common.py:1")
+            del f["stake"]
+            self.assertTrue(self._check(f).valid, kind)
+
+    def test_sufficiency_with_null_stake_disposes_to_plan_only(self):
+        disp = d.dispose([_suff_finding(stake=None)], str(REPO_ROOT))
+        self.assertEqual([f["id"] for f in disp.plan], ["f1"])
+        self.assertEqual(disp.surface, [])
+        self.assertEqual(disp.amend, [])
+
+    def test_sufficiency_with_a_stake_surfaces(self):
+        for stake in ("harm", "contract", "misdirects"):
+            disp = d.dispose([_suff_finding(stake=stake)], str(REPO_ROOT))
+            self.assertEqual(len(disp.surface), 1, stake)
+            self.assertEqual(disp.plan, [], stake)
+
+    def test_contradiction_surfaces_whatever_its_stake(self):
+        f = _suff_finding(kind="contradiction", stake=None)
+        disp = d.dispose([f], str(REPO_ROOT))
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.plan, [])
+
+    def test_downgraded_groundedness_surfaces_without_a_stake(self):
+        f = _suff_finding(kind="groundedness", citation=None)
+        del f["stake"]
+        disp = d.dispose([f], str(REPO_ROOT))
+        self.assertEqual(len(disp.surface), 1)
+        self.assertEqual(disp.plan, [])
+
+    def test_required_fields_text_names_stake_and_its_values(self):
+        text = d._required_verdict_fields_text()
+        for word in ("stake", "harm", "contract", "misdirects", "plan"):
+            self.assertIn(word, text)
+
+
+class ScopedReviewTests(TempGitRepoMixin, unittest.TestCase):
+    """--prior-packet scopes a re-review to the sections amended since the
+    previous round's packet, and lifts record coverage for that round."""
+
+    SYMBOL = "scoped_target_fn"
+    SPEC_V1 = (
+        "---\nsystem: spec\n---\n\n# Spec\n\nIntro.\n\n"
+        "## Alpha\n\nAlpha rule one.\n\n"
+        "## Beta\n\nBeta rule one.\n\n"
+        "## Changelog\n\n2026-11-02: fixture\n"
+    )
+
+    def setUp(self):
+        self._init_repo()
+        self._track("pkg/mod.py", content="def {}():\n    pass\n".format(self.SYMBOL))
+        self._track("docs/spec.md", content=self.SPEC_V1)
+        self.spec = os.path.join(self.repo, "docs/spec.md")
+        self.record = os.path.join(self.repo, "record.json")
+        with open(self.record, "w", encoding="utf-8") as f:
+            json.dump({"dependencies": [
+                {"symbol": self.SYMBOL, "file": "pkg/mod.py", "behavior": "b"}],
+                "waiver": None}, f)
+        self.prior = os.path.join(self.repo, "packet1.md")
+        proc = self._run("--spec", self.spec, "--record", self.record,
+                         "--out", self.prior)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, SCRIPT, *args, "--repo-root", self.repo],
+            cwd=self.repo, capture_output=True, text=True,
+        )
+
+    def _amend(self, old, new):
+        with open(self.spec, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(old, text)
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new))
+
+    def _scoped_packet(self):
+        out = os.path.join(self.repo, "packet2.md")
+        proc = self._run("--spec", self.spec, "--record", self.record,
+                         "--prior-packet", self.prior, "--out", out)
+        return proc, out
+
+    def _verdict(self, **over):
+        v = {
+            "verdict": "pass", "references": [], "dependencies_read": [],
+            "dependencies_waiver": "scoped round", "findings": [],
+            "replaced_system": {"applies": False, "guarantees": []},
+        }
+        v.update(over)
+        path = os.path.join(self.repo, "verdict.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(v, f)
+        return path
+
+    def test_whole_document_packet_has_no_review_scope_section(self):
+        with open(self.prior, encoding="utf-8") as f:
+            self.assertNotIn("# Review scope", f.read())
+
+    def test_scoped_packet_names_only_the_amended_sections(self):
+        self._amend("Beta rule one.", "Beta rule one, amended.")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, encoding="utf-8") as f:
+            packet = f.read()
+        scope = packet.split("# Review scope", 1)[1].split("\n# ", 1)[0]
+        self.assertIn('"Beta"', scope)
+        self.assertNotIn('"Alpha"', scope)
+        # The whole spec still travels: cross-statements must be checkable.
+        self.assertIn("Alpha rule one.", packet)
+
+    def test_scoped_packet_names_a_section_added_since_the_prior_round(self):
+        self._amend("## Changelog", "## Gamma\n\nNew rule.\n\n## Changelog")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, encoding="utf-8") as f:
+            scope = f.read().split("# Review scope", 1)[1].split("\n# ", 1)[0]
+        self.assertIn('"Gamma"', scope)
+
+    def _scope_of(self, out):
+        with open(out, encoding="utf-8") as f:
+            return f.read().split("# Review scope", 1)[1].split("\n# ", 1)[0]
+
+    def test_a_change_before_the_first_heading_is_in_the_scope(self):
+        self._amend("---\n\n# Spec", "---\n\nA line above the title.\n\n# Spec")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        scope = self._scope_of(out)
+        self.assertIn("before the first heading", scope)
+        self.assertNotIn("(none)", scope)
+
+    def test_a_removed_section_is_named_as_removed(self):
+        self._amend("## Beta\n\nBeta rule one.\n\n", "")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        scope = self._scope_of(out)
+        removed = scope.split("Removed sections", 1)[1]
+        self.assertIn('"Beta"', removed)
+        self.assertNotIn('"Alpha"', scope)
+
+    def test_a_heading_level_change_is_an_amended_section(self):
+        self._amend("## Beta", "### Beta")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"Beta"', self._scope_of(out))
+
+    def test_a_changelog_line_alone_is_not_an_amended_section(self):
+        self._amend("2026-11-02: fixture", "2026-11-02: fixture\n2026-11-03: more")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("no section", proc.stderr)
+        self._amend("Beta rule one.", "Beta rule two.")
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, encoding="utf-8") as f:
+            scope = f.read().split("# Review scope", 1)[1].split("\n# ", 1)[0]
+        self.assertNotIn('"Changelog"', scope)
+
+    def test_scoped_packet_says_record_coverage_is_not_owed(self):
+        self._amend("Beta rule one.", "Beta rule two.")
+        proc, out = self._scoped_packet()
+        with open(out, encoding="utf-8") as f:
+            packet = f.read()
+        fields = packet.split("# Required verdict fields", 1)[1]
+        self.assertNotIn("must cover the dependency record", fields)
+        self.assertIn("scoped", fields)
+
+    def test_prior_packet_with_nothing_amended_is_a_contract_error(self):
+        proc, out = self._scoped_packet()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("no section", proc.stderr)
+        self.assertFalse(os.path.exists(out))
+
+    def test_prior_packet_unreadable_or_not_a_packet_is_a_contract_error(self):
+        self._amend("Beta rule one.", "Beta rule two.")
+        for content in (None, "not a packet at all\n"):
+            bad = os.path.join(self.repo, "bad.md")
+            if content is None:
+                bad = os.path.join(self.repo, "missing.md")
+            else:
+                with open(bad, "w", encoding="utf-8") as f:
+                    f.write(content)
+            out = os.path.join(self.repo, "p.md")
+            proc = self._run("--spec", self.spec, "--record", self.record,
+                             "--prior-packet", bad, "--out", out)
+            self.assertEqual(proc.returncode, 1, content)
+            self.assertIn("--prior-packet", proc.stderr)
+            self.assertFalse(os.path.exists(out))
+
+    def test_plan_with_prior_packet_is_a_contract_error(self):
+        proc = self._run("--plan", "plan.md", "--prior-packet", self.prior)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--prior-packet", proc.stderr)
+
+    def test_whole_document_verdict_must_cover_the_record(self):
+        proc = self._run("--spec", self.spec, "--record", self.record,
+                         "--verdict", self._verdict())
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn(self.SYMBOL, proc.stderr)
+
+    def test_scoped_verdict_owes_no_record_coverage(self):
+        self._amend("Beta rule one.", "Beta rule two.")
+        proc = self._run("--spec", self.spec, "--record", self.record,
+                         "--prior-packet", self.prior,
+                         "--verdict", self._verdict())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class DecisionOutcomeTests(TempGitRepoMixin, unittest.TestCase):
+    """The decision states whether the round passed: plan-scale findings
+    alone do not hold a spec open."""
+
+    def setUp(self):
+        self._init_repo()
+        self._track(
+            "docs/spec.md",
+            content="---\nsystem: spec\n---\n\n# Spec\n\n## Alpha\n\nText.\n\n"
+                    "## Changelog\n\n2026-11-02: fixture\n",
+        )
+        self.spec = os.path.join(self.repo, "docs/spec.md")
+        self.record = _waiver_record(self.repo)
+
+    def _decide(self, findings):
+        verdict = {
+            "verdict": "findings" if findings else "pass", "references": [],
+            "dependencies_read": [], "dependencies_waiver": "none read",
+            "replaced_system": {"applies": False, "guarantees": []},
+            "findings": findings,
+        }
+        vpath = os.path.join(self.repo, "verdict.json")
+        with open(vpath, "w", encoding="utf-8") as f:
+            json.dump(verdict, f)
+        out = os.path.join(self.repo, "decision.json")
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "--spec", self.spec, "--record", self.record,
+             "--verdict", vpath, "--out", out, "--repo-root", self.repo],
+            cwd=self.repo, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_no_findings_passes(self):
+        decision = self._decide([])
+        self.assertIs(decision["pass"], True)
+        self.assertEqual(decision["plan"], [])
+
+    def test_only_plan_scale_findings_pass_and_are_listed(self):
+        decision = self._decide([_suff_finding(section="Alpha", stake=None)])
+        self.assertIs(decision["pass"], True)
+        self.assertEqual([f["id"] for f in decision["plan"]], ["f1"])
+        self.assertEqual(decision["surface"], [])
+
+    def test_a_staked_finding_beside_a_plan_scale_one_does_not_pass(self):
+        decision = self._decide([
+            _suff_finding(id="f1", section="Alpha", stake=None),
+            _suff_finding(id="f2", section="Alpha", stake="harm"),
+        ])
+        self.assertIs(decision["pass"], False)
+        self.assertEqual([f["id"] for f in decision["surface"]], ["f2"])
+        self.assertEqual([f["id"] for f in decision["plan"]], ["f1"])

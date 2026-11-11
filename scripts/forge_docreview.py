@@ -272,6 +272,9 @@ def reference_table(spec_text, repo_root):
 _REFERENCE_DISPOSITIONS = {"intended-new", "wrong", "unverifiable"}
 _FINDING_KINDS = {"groundedness", "sufficiency", "contradiction"}
 _VERDICT_VALUES = {"pass", "findings"}
+# What a `sufficiency` finding puts at stake. A finding naming none (null)
+# is plan-scale: it goes to the plan as a test case (`dispose`).
+_FINDING_STAKES = {"harm", "contract", "misdirects"}
 
 # The declared schema for required-field checking (Document review contract).
 # One uniform rule reads this table; a field nobody enumerated is not a hole
@@ -670,6 +673,7 @@ class VerdictResult:
 class Disposition:
     amend: "list[dict]"
     surface: "list[dict]"
+    plan: "list[dict]"
 
 
 def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections, record):
@@ -711,6 +715,12 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections, record)
     the same reason ``spec_sections`` is: ``dependencies_read`` must cover
     every record entry (same ``symbol``, same ``file`` path with any line
     suffix removed from both). Entries beyond the record are legal.
+    ``record`` is ``None`` on a scoped re-review (``--prior-packet``), which
+    owes no record coverage; the caller still passes it, so the check cannot
+    vanish by omission.
+    ``findings[].stake`` is a required key on a ``sufficiency`` finding:
+    one of ``_FINDING_STAKES`` or null. On any kind, a present stake is one
+    of those values or null.
     ``findings[].demonstration`` is required, non-blank, on a
     ``sufficiency`` finding."""
     defects = []
@@ -761,8 +771,9 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections, record)
     # against a function or section never actually read.
     _validate_dependencies_read(entries_by_type["dependencies_read"], defects, repo_root)
     _validate_findings_sections(entries_by_type["findings"], spec_sections, defects)
-    _validate_record_coverage(
-        entries_by_type["dependencies_read"], record, defects)
+    if record is not None:
+        _validate_record_coverage(
+            entries_by_type["dependencies_read"], record, defects)
 
     unresolved_set = set(unresolved_refs)
     covered = set()
@@ -848,6 +859,19 @@ def validate_verdict(verdict, unresolved_refs, repo_root, spec_sections, record)
                     label, demonstration
                 )
             )
+        if kind == "sufficiency" and "stake" not in finding:
+            defects.append(
+                "finding {!r} is a sufficiency finding with no 'stake': it "
+                "must be one of {} or null".format(label, sorted(_FINDING_STAKES))
+            )
+        elif "stake" in finding:
+            stake = finding["stake"]
+            if stake is not None and not (
+                    isinstance(stake, str) and stake in _FINDING_STAKES):
+                defects.append(
+                    "finding {!r} has unknown stake {!r}; must be one of {} "
+                    "or null".format(label, stake, sorted(_FINDING_STAKES))
+                )
         if "citation" in finding:
             citation = finding["citation"]
             if citation is not None and not isinstance(citation, str):
@@ -901,19 +925,25 @@ def validate_citation(citation, repo_root):
 
 def dispose(findings, repo_root):
     """Disposition matrix for a document review's findings (spec: `execution`
-    "Document review contract"). Returns ``Disposition(amend, surface)``.
+    "Document review contract"). Returns ``Disposition(amend, surface, plan)``.
 
     A ``groundedness`` finding with a citation that resolves (`validate_
     citation`) goes to ``amend`` — the author amends the spec and it
-    re-enters review (whole-document, per `pipeline` spec: Spec review). A
+    re-enters review (`pipeline` spec: Spec review, Rounds). A
     ``groundedness`` finding whose citation is absent or
     unresolvable is **rewritten** to ``kind: "sufficiency"`` and routed to
     ``surface`` — a real downgrade, not advisory, so a reviewer cannot route
     a design opinion into the auto-amend path by labelling it a fact.
-    ``sufficiency`` and ``contradiction`` always surface; nothing in those
-    kinds is auto-applied."""
+    ``contradiction`` always surfaces. A ``sufficiency`` finding the
+    reviewer emitted surfaces when it names a stake and goes to ``plan``
+    when its stake is null: a plan-scale case is handed to planning as a
+    test case and forces neither an amendment nor another round. A
+    downgraded ``groundedness`` finding surfaces whatever its stake: it is
+    an unverified claim about the code, never a plan test case. Nothing in
+    ``surface`` or ``plan`` is auto-applied."""
     amend = []
     surface = []
+    plan = []
     for finding in findings:
         finding = dict(finding)
         if finding.get("kind") == "groundedness":
@@ -924,9 +954,12 @@ def dispose(findings, repo_root):
                 finding["kind"] = "sufficiency"
                 finding["original_kind"] = "groundedness"
                 surface.append(finding)
+        elif (finding.get("kind") == "sufficiency"
+                and finding.get("stake") is None):
+            plan.append(finding)
         else:
             surface.append(finding)
-    return Disposition(amend=amend, surface=surface)
+    return Disposition(amend=amend, surface=surface, plan=plan)
 
 
 # --- packet build (spec: Spec review, reviewer packet) -----------------------
@@ -940,7 +973,7 @@ _ANTI_PATTERNS_DOC = os.path.join(
 )
 
 
-def _required_verdict_fields_text():
+def _required_verdict_fields_text(scoped=False):
     """The required-field list rendered from the same declared schema
     ``validate_verdict`` checks against (``_REQUIRED_FIELDS_SCHEMA``,
     ``_TOP_LEVEL_SCALAR_SCHEMA``) plus the enums and structural rules that
@@ -981,17 +1014,32 @@ def _required_verdict_fields_text():
         "`symbol` is one name that appears literally in that file (`main`, "
         "never `module.main` or a description). One symbol per entry."
     )
-    lines.append(
-        "- `dependencies_read` must cover the dependency record: every "
-        "record entry needs an entry here with the same `symbol` and the "
-        "same `file` path, any line suffix aside. A record entry left "
-        "uncovered invalidates the verdict; entries beyond the record are "
-        "legal, and are how you name a dependency the record omits."
-    )
+    if scoped:
+        lines.append(
+            "- This is a scoped re-review: `dependencies_read` owes no "
+            "coverage of the dependency record. List what you read for the "
+            "amended sections, or give a `dependencies_waiver`."
+        )
+    else:
+        lines.append(
+            "- `dependencies_read` must cover the dependency record: every "
+            "record entry needs an entry here with the same `symbol` and the "
+            "same `file` path, any line suffix aside. A record entry left "
+            "uncovered invalidates the verdict; entries beyond the record are "
+            "legal, and are how you name a dependency the record omits."
+        )
     lines.append(
         "- `findings[].demonstration` is required and non-blank on a "
         "`sufficiency` finding: the concrete case that shows the condition "
         "failed. On other kinds it is optional (a string or null)."
+    )
+    lines.append(
+        "- `findings[].stake` is a required key on a `sufficiency` finding: "
+        "one of {}, or null. Null means plan-scale: the finding goes to the "
+        "plan as a test case and holds the spec open for nothing. On other "
+        "kinds the key is optional.".format(
+            ", ".join(sorted(_FINDING_STAKES))
+        )
     )
     lines.append(
         "- `findings[].section` is exactly one name from Section names, "
@@ -1078,11 +1126,89 @@ def _all_spec_section_names(spec_lines):
     return names
 
 
-def build_packet(spec_path, repo_root, record):
-    """Assemble the reviewer's packet as text (spec: Spec review). Always the
-    whole document — an amendment re-reviews the whole spec, never a
-    changed-sections scope (`pipeline` spec, "Amendments re-enter, and the
-    review is always whole-document").
+def _sections_by_name(lines):
+    """Heading text -> the lines under it, up to the next heading; text
+    before the first heading is under ``None``. Two headings with one name
+    share an entry, in order."""
+    eb = forge_common.eb
+    mask = eb.fence_mask(lines)
+    sections = {}
+    current = None
+    for i, line in enumerate(lines):
+        m = None if mask[i] else eb.HEADING_RE.match(line)
+        if m:
+            current = m.group(2).strip()
+            # The heading's own level is part of the section: `## B` made
+            # `### B` is an amendment though name and body are unchanged.
+            sections.setdefault(current, []).append(m.group(1) + "\n")
+        else:
+            sections.setdefault(current, []).append(line)
+    return {name: "".join(body).strip() for name, body in sections.items()}
+
+
+_PACKET_SPEC_START = "# Spec\n\n"
+_PACKET_SPEC_END = "\n\n# Hunting list\n"
+
+
+_CHANGELOG_SECTION = "Changelog"
+# How the scope names an amendment above the spec's first heading, which has
+# no section name of its own.
+_PREAMBLE_SCOPE = "(text before the first heading)"
+
+
+class PriorPacketError(Exception):
+    """``--prior-packet`` cannot scope the review: unreadable, not a spec
+    review packet, or no section amended since it. A contract error."""
+
+
+def amended_sections(spec_path, prior_packet_path):
+    """Names of the spec's sections whose text differs from the spec inside
+    the previous round's packet, in document order; a section new since
+    that packet counts. Raises ``PriorPacketError`` (never guesses a
+    scope) when the packet cannot be read, holds no spec, or nothing
+    differs."""
+    try:
+        with open(prior_packet_path, "r", encoding="utf-8") as f:
+            prior = f.read()
+    except OSError as e:
+        raise PriorPacketError(
+            "--prior-packet {}: cannot read: {}".format(prior_packet_path, e))
+    start = prior.find(_PACKET_SPEC_START)
+    end = prior.rfind(_PACKET_SPEC_END)
+    if start != 0 or end < 0:
+        raise PriorPacketError(
+            "--prior-packet {}: not a spec review packet (no '# Spec' ... "
+            "'# Hunting list' sections)".format(prior_packet_path))
+    prior_spec = prior[len(_PACKET_SPEC_START):end] + "\n"
+    before = _sections_by_name(prior_spec.splitlines(keepends=True))
+    lines = forge_common.eb.read_lines(spec_path)
+    after = _sections_by_name(lines)
+    # The changelog records amendments; it is not itself a statement of the
+    # spec, so a new line there is never a section to review.
+    before.pop(_CHANGELOG_SECTION, None)
+    after.pop(_CHANGELOG_SECTION, None)
+    changed = [
+        name for name in _all_spec_section_names(lines)
+        if name != _CHANGELOG_SECTION and after.get(name) != before.get(name)
+    ]
+    changed = list(dict.fromkeys(changed))
+    if after.get(None) != before.get(None):
+        changed.insert(0, _PREAMBLE_SCOPE)
+    removed = [n for n in before if n is not None and n not in after]
+    if not changed and not removed:
+        raise PriorPacketError(
+            "--prior-packet {}: no section of {} was amended since that "
+            "packet; a scoped re-review has nothing to review".format(
+                prior_packet_path, spec_path))
+    return changed, removed
+
+
+def build_packet(spec_path, repo_root, record, prior_packet=None):
+    """Assemble the reviewer's packet as text (spec: Spec review). The whole
+    spec always travels. With ``prior_packet`` (a previous round's packet
+    path) the packet is a scoped re-review: it adds a ``# Review scope``
+    section naming the sections amended since that packet, and its required
+    fields lift record coverage. ``PriorPacketError`` propagates.
 
     Raises (never returns a legal-negative) on a missing/unreadable spec —
     an `extract-brief.py` failure this function propagates unchanged
@@ -1093,6 +1219,8 @@ def build_packet(spec_path, repo_root, record):
 
     table = reference_table(full_text, repo_root)
     unresolved = [r for r in table if not r.resolved]
+
+    scope = amended_sections(spec_path, prior_packet) if prior_packet else None
 
     parts = []
     parts.append("# Spec\n\n")
@@ -1106,6 +1234,22 @@ def build_packet(spec_path, repo_root, record):
             doc=_ANTI_PATTERNS_DOC
         )
     )
+
+    if scope is not None:
+        changed, removed = scope
+        parts.append("# Review scope\n\n")
+        parts.append(
+            "Scoped re-review. Review the sections amended since the "
+            "previous round, and every statement elsewhere in the spec that "
+            "an amendment makes stale or contradicts. Do not re-review "
+            "unamended text for its own sake.\n\n"
+            "Amended sections:\n\n"
+        )
+        parts.append(_render_name_list(changed))
+        if removed:
+            parts.append("\nRemoved sections:\n\n")
+            parts.append(_render_name_list(removed))
+        parts.append("\n")
 
     parts.append("# Reference table\n\n")
     parts.append(_render_reference_table(table))
@@ -1131,7 +1275,7 @@ def build_packet(spec_path, repo_root, record):
     parts.append("\n")
 
     parts.append("# Required verdict fields\n\n")
-    parts.append(_required_verdict_fields_text())
+    parts.append(_required_verdict_fields_text(scoped=scope is not None))
 
     return "".join(parts)
 
@@ -1187,6 +1331,12 @@ def main(argv=None):
         help="path to the author's dependency record (JSON); required with "
              "--spec, not taken by plan review.",
     )
+    parser.add_argument(
+        "--prior-packet",
+        help="path to the previous round's spec review packet; scopes this "
+             "re-review to the sections amended since it and lifts record "
+             "coverage. Not taken by plan review.",
+    )
     parser.add_argument("--out")
     args = parser.parse_args(argv)
     if not args.plan and not args.spec:
@@ -1195,6 +1345,13 @@ def main(argv=None):
     if args.plan and args.record:
         print(
             "error: --record is not taken by plan review (--plan)",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.plan and args.prior_packet:
+        print(
+            "error: --prior-packet is not taken by plan review (--plan)",
             file=sys.stderr,
         )
         return 1
@@ -1231,8 +1388,9 @@ def main(argv=None):
         return 1
 
     try:
-        packet = build_packet(args.spec, args.repo_root, record)
-    except RuntimeError as e:
+        packet = build_packet(
+            args.spec, args.repo_root, record, prior_packet=args.prior_packet)
+    except (RuntimeError, PriorPacketError) as e:
         print("error: {}".format(e), file=sys.stderr)
         return 1
 
@@ -1275,7 +1433,8 @@ def main(argv=None):
     spec_sections = _all_spec_section_names(spec_lines)
 
     result = validate_verdict(
-        verdict, unresolved_refs, args.repo_root, spec_sections, record)
+        verdict, unresolved_refs, args.repo_root, spec_sections,
+        None if args.prior_packet else record)
     if not result.valid:
         # Disposition is only meaningful for a verdict that already passed
         # validation (dispose()/validate_citation assume a validated shape
@@ -1297,8 +1456,10 @@ def main(argv=None):
     decision = {
         "valid": True,
         "defects": [],
+        "pass": not disposition.amend and not disposition.surface,
         "amend": disposition.amend,
         "surface": disposition.surface,
+        "plan": disposition.plan,
     }
     if not _emit(json.dumps(decision, indent=2), args.out):
         return 1

@@ -122,4 +122,16 @@ or deliberately left out.
 - A `sufficiency` finding carries a demonstration: the concrete case that shows the
   condition failed.
 - An unmentioned edge with no such case is not a finding.
+- A `sufficiency` finding names its `stake`, or null:
+  - `harm`: the wrong build loses data, exposes something it should not, or costs money.
+  - `contract`: the wrong build breaks something another spec, system or stored data
+    depends on.
+  - `misdirects`: the spec's own text leads a careful implementer to the wrong build.
+  - null: none of these. Any reasonable choice works and a test pins it. The finding is
+    plan-scale: it goes to the plan as a test case and holds the spec open for nothing.
+- A stake is named only when the demonstration shows it. A gap an implementer settles in
+  minutes is null, however real.
+- On a scoped re-review the reviewer checks the sections the packet's Review scope names
+  and every statement elsewhere that an amendment makes stale or contradicts, and does
+  not re-review unamended text for its own sake.
 - A behaviour the spec states as not constrained is closed.
