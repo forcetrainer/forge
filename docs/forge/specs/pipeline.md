@@ -78,8 +78,13 @@ spec paths. This convention binds every repo running forge, not only this one.
 
 ### Spec authoring
 
-Applies wherever Spec review applies: a new spec, and an amendment written ahead of a
-build. A gear 2 change, whose spec is amended after execution, is outside it.
+Applies to a new spec and to an amendment written ahead of a build. Two cases are
+outside it. A gear 2 change, whose spec is amended after execution. And an amendment
+made in answer to a review finding — a spec review finding, or a plan review
+`spec-defect`: it owes no draft, checker run or digest, since a `groundedness` finding
+is a fact the author corrects and every other kind was decided by the user when it
+surfaced. Such an amendment keeps the dependency record current — an entry for any code
+it newly relies on — and re-enters Spec review with that record.
 
 **Conditions.** A spec is ready for review when six conditions hold: **Grounded**,
 **Consistent**, **Testable**, **Decided**, **Bounded**, **Complete**. They are stated
@@ -87,11 +92,15 @@ once, in `skills/brainstorming/design-anti-patterns.md`; the author is held to t
 file the reviewer loads. A condition is evaluative, not a list of items: each names what
 must hold and what shows that it holds, and work on it stops when that showing exists.
 Complete is the one condition that rests on judgment — where the author judges a
-requirement incomplete, it asks the user.
+requirement incomplete, it asks the user. The six are fixed by this spec. A failure is
+filed under the finding `kind` its condition maps to: Grounded → `groundedness`;
+Consistent → `contradiction`; Testable, Decided, Bounded and Complete → `sufficiency`.
 
-**Scouts.** Where the design depends on existing code, the author reads it before
-designing against it: one read-only scout per depended-on area, each returning facts
-with file and line. The number of scouts is the number of areas the design depends on.
+**Reading the code.** Where the design depends on existing code, the author reads it
+before designing against it. What is required, and checked, is the dependency record
+below: every piece of existing code the design relies on has an entry. Read-only scouts,
+run in parallel and each returning facts with file and line, are the means when the
+design depends on more than one part of the code; how many is the author's call.
 
 **Draft.** Before approval the author writes what the spec will say — for an amendment,
 the amended sections as they will read — to a draft file outside the repository's
@@ -183,9 +192,10 @@ packet names it by its absolute path under the plugin root: the reviewer runs in
 under review, where a plugin-relative path names nothing.
 **To change what the reviewer looks for, change that file.** It is the single tuning
 surface; no other file restates a Gate. Entries use the Trigger / Gate / Instead format
-of `testing-anti-patterns.md`; each also states what shows the condition holds and the
-finding `kind` its failures are filed under. An entry enters on **two independent
-observations** — one incident does not mint a permanent rule. An entry backed by a required verdict field is
+of `testing-anti-patterns.md` and sit under the condition they serve; each condition
+states what shows that it holds. An entry enters on **two independent observations** —
+one incident does not mint a permanent rule. The bar is for entries: the six conditions
+are fixed by Spec authoring, above, and are not entries. An entry backed by a required verdict field is
 marked as such: deleting a marked entry does not remove the field, and the two are
 checked to agree.
 
@@ -699,7 +709,7 @@ and a session restart to apply.
 
 ## Changelog
 
-2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete) stated once in `design-anti-patterns.md` and shared by author and reviewer; the author grounds the design with scouts, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker reads a draft of what the spec will say, returns the unmet conditions, starts as the spec reviewer starts with its own prompt, and stops the session when it cannot start; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
+2026-11-10: spec authoring — a spec is held to six conditions (Grounded, Consistent, Testable, Decided, Bounded, Complete), each mapped to a finding kind, stated once in `design-anti-patterns.md` and shared by author and reviewer; the author reads the code the design relies on, writes a dependency record that spec review validates, and runs a separate checker before the design is approved; input is unconstrained and the design is approved from one digest; the checker reads a draft of what the spec will say, returns the unmet conditions, starts as the spec reviewer starts with its own prompt, and stops the session when it cannot start; the reviewer's findings are failed conditions with a demonstration, never alternative designs, and a behaviour stated as not constrained is closed; a spec re-review after an amendment runs on a fresh reviewer, since resumed reviewers passed after reading only the amendment and whole-document reads then found defects (#145). In one repo's spec reviews about four findings in ten were facts about existing code the author had not read, two of twenty review cycles across two repos passed their first round, and later rounds kept producing new findings.
 2026-11-05: a dispatched plan task's worker runs only the test files its cycle touched; the orchestrator runs the task's acceptance commands (#147).
 2026-11-04: amended by [execution] — `**Files:**` is required on every task and machine-read: bulleted `Create:` / `Modify:` / `Test:` entries of backticked repo-relative paths with an optional trailing note; its paths are the task's scope for Scope widening, and a prose or glob entry is a lint error naming the task and line
 2026-10-06: a changelog entry states the new rule and never quotes the retired one — the changelog is matchable prose, and a quoted retired rule reads as a live assertion; a writing convention for the reviewer, not a sixth lint rule (#128 close-out)

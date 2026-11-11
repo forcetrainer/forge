@@ -587,9 +587,11 @@ One JSON object:
                "demonstration": "<case>"|null, "proposed_amendment"}]}
 ```
 
-Both modes of `forge_docreview.py --spec` take the author's dependency record
-(`pipeline` spec: Spec authoring) as `--record <path>`: building the packet, and
-validating a verdict. Without it the command is a contract error. A record that is not
+Both modes of spec review — `forge_docreview.py --spec` building the packet, and
+validating a verdict — take the author's dependency record (`pipeline` spec: Spec
+authoring) as `--record <path>`. Without it the command is a contract error. Plan review
+(`--plan`, with or without `--spec`) takes no record, and `--record` there is a contract
+error. A record that is not
 the stated JSON object, or that has an empty `dependencies` and a null `waiver`, an
 entry missing a field, a `file` that is not tracked, or a `symbol` absent from its
 `file`, is a contract error naming the entry and the cause; no packet is built.
@@ -608,6 +610,10 @@ entry missing a field, a `file` that is not tracked, or a `symbol` absent from i
 - `findings[].section` — exactly one name from the packet's Section names list, copied
   verbatim. A finer location goes in `evidence`; a finding about two sections is two
   findings.
+- `findings[].kind` follows the condition that failed (`pipeline` spec: Spec authoring):
+  Grounded → `groundedness`; Consistent → `contradiction`; Testable, Decided, Bounded,
+  Complete → `sufficiency`. A `contradiction` finding's `evidence` quotes the two
+  statements that cannot both hold.
 - `findings[].demonstration` — required, non-blank, on a `sufficiency` finding: the
   concrete case that shows the condition failed (`pipeline` spec: Spec review, Bounds).
   On the other kinds it is optional. Its presence is checked; whether the case is
