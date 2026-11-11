@@ -699,7 +699,7 @@ and a session restart to apply.
 
 2026-09-09: the prose exception to execute-don't-substring gains a bar — a mechanical text check must be demonstrated to fail when the thing it guards is violated, and is written against the requirement's meaning rather than its spelling; five checks in the #96 run were green while guarding nothing, including one whose requirement, acceptance command and eponymous test all passed with the violation in place (#98)
 
-2026-09-09: spec review — a cold reviewer validates a spec against the codebase before planning, with a mechanical reference table it owes a disposition on and `design-anti-patterns.md` as its single tuning surface; self-review stays but is no longer the gate; amendments re-enter scoped to changed sections (#96)
+2026-09-09: spec review — a cold reviewer validates a spec against the codebase before planning, with a mechanical reference table it owes a disposition on and `design-anti-patterns.md` as its single tuning surface; self-review stays but is no longer the gate; amendments re-enter spec review (#96)
 
 2026-09-09: field clause grammar's clause-block termination widens from `#`–`###` to any heading level (`#` through `######` at column 0), agreeing with `forge_plan._field_text`'s existing boundary — closes the gap where an h4+ heading and the prose beneath it were absorbed into the last clause (#87)
 
