@@ -1984,6 +1984,16 @@ class DependencyRecordTests(TempGitRepoMixin, unittest.TestCase):
             self._load({"dependencies": [], "waiver": None})
         self.assertIn("waiver", str(ctx.exception))
 
+    def test_non_string_waiver_is_contract_error_naming_waiver_and_type(self):
+        for deps in ([], [self._entry()]):
+            for bad in (5, True, ["x"], {"r": "x"}):
+                with self.subTest(deps=len(deps), waiver=bad):
+                    with self.assertRaises(d.RecordError) as ctx:
+                        self._load({"dependencies": deps, "waiver": bad})
+                    msg = str(ctx.exception)
+                    self.assertIn("waiver", msg)
+                    self.assertIn("string or null", msg)
+
     def test_empty_dependencies_with_waiver_loads_and_packet_states_reason(self):
         record = self._load({"dependencies": [], "waiver": "reads no code at all"})
         self.assertEqual(list(record), [])

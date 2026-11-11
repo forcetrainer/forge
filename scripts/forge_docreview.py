@@ -563,6 +563,10 @@ def load_record(record_path, repo_root):
         raise RecordError(
             "dependency record {}: 'dependencies' is not a list".format(
                 record_path))
+    if waiver is not None and not isinstance(waiver, str):
+        raise RecordError(
+            "dependency record {}: 'waiver' must be a string or null".format(
+                record_path))
     if not deps:
         if waiver is None:
             raise RecordError(
